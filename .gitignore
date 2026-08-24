@@ -43,3 +43,9 @@ Thumbs.db
 *.log
 vgcore.*
 core.[0-9]*
+# The server's spool directory holds raw meeting audio; a stray copy of it in
+# a repository is a data-protection problem, not just clutter.
+*.pcm
+# A live server config carries the two Bearer tokens in plain text.  The
+# committed sample under tools/ deliberately has neither.
+s2t-qt-server.conf

@@ -1,0 +1,59 @@
+# Mẫu cấu hình cho s2t-qt-server (Server buffer).
+#
+# Chép sang /etc/s2t-qt-server.conf rồi sửa hai token.  Tệp thật chứa token
+# dạng chữ thường, nên phải để quyền 600 và không đưa vào git - .gitignore đã
+# chặn tên "s2t-qt-server.conf" vì lý do đó.
+#
+#   install -m 600 tools/s2t-qt-server.conf.sample /etc/s2t-qt-server.conf
+#
+# Mọi khoá ở đây đều có thể bị ghi đè bằng tham số dòng lệnh, và dòng lệnh
+# luôn thắng.  Xem `s2t-qt-server --help`.
+
+[listen]
+# Nơi s2t-qt-client kết nối tới.  Để 127.0.0.1 nếu client chạy cùng máy.
+address=0.0.0.0
+port=8800
+# Token mà client phải gửi kèm mọi lệnh gọi.  ĐỂ TRỐNG NGHĨA LÀ CHẤP NHẬN MỌI
+# NGƯỜI GỌI TỚI ĐƯỢC CỔNG NÀY - server có cảnh báo lúc khởi động, nhưng nó vẫn
+# chạy, nên đừng để trống trên mạng dùng chung.
+token=
+max_connections=128
+# Một kênh RPC của client có thể nghỉ hết cả cuộc họp, nên giá trị này dài có
+# chủ ý.
+idle_timeout_ms=300000
+
+[upstream]
+# Tầng suy luận: grpc_session_adapter.py đứng trước Triton.  Chỉ Server buffer
+# nói chuyện với địa chỉ này; client không bao giờ biết tới nó.
+target=192.168.1.47:8700
+token=
+# Số kênh giữ sẵn cho các RPC chuyển tiếp (soát/sửa, phát lại, đăng ký giọng).
+# Đường audio và đường đọc trạng thái KHÔNG dùng nhóm này - mỗi phiên có kênh
+# riêng, để một lệnh EnrollSpeaker 120 giây không bao giờ chắn trước một gói
+# audio 160 ms.
+lanes=4
+timeout_ms=30000
+probe_ms=5000
+
+[buffer]
+# Mỗi phiên được giữ tối đa bấy nhiêu giây audio khi tầng suy luận chưa theo
+# kịp.  Đây chính là thứ biến một sự cố mạng 5 phút thành độ sâu hàng đợi thay
+# vì mất tiếng: 300 giây ở 48 kHz mono 16-bit là khoảng 28 MB RAM mỗi phiên.
+# Đầy thì push_audio bị từ chối - có chủ ý, vì client được viết để dừng ồn ào
+# chứ không im lặng bỏ audio.
+seconds=300
+# Nơi lưu bản sao mọi gói audio đã nhận (<phiên>.pcm).  Để trống là tắt.
+# Đây là bản sao để đối chiếu, KHÔNG phải nơi hàng đợi tràn vào.
+spool_dir=
+# Tuổi tối đa của bộ nhớ đệm get_live_state.  Dưới ngưỡng này, mười client
+# cùng xem một cuộc họp chỉ tốn của tầng suy luận đúng một lần hỏi.
+state_poll_ms=200
+# Giữ phiên đã dừng thêm bấy nhiêu giây để client còn đọc được trạng thái cuối
+# và các bộ đếm.
+finished_retention_sec=900
+
+[log]
+# debug ghi ra console, develop ghi ra tệp trong thư mục dữ liệu ứng dụng.
+# Chạy dưới systemd thì để debug: journald đã lo phần lưu trữ.
+mode=debug
+level=info

@@ -1,9 +1,14 @@
 # s2t_qt — Hướng dẫn sử dụng
 
-Ứng dụng khách Qt/C++ cho hệ thống nhận dạng tiếng nói và phân tách người nói
-(ASR + diarization). Ứng dụng thu microphone trên máy trạm, đẩy lên AI server
-qua gRPC, hiển thị bản chép trực tiếp, và cho phép soát lại, sửa và lưu vết
-mọi chỉnh sửa.
+`s2t-qt-client` — ứng dụng khách Qt/C++ cho hệ thống nhận dạng tiếng nói và
+phân tách người nói (ASR + diarization). Nó thu microphone trên máy trạm, đẩy
+lên **Server buffer** (`s2t-qt-server`) qua gRPC, hiển thị bản chép trực tiếp,
+và cho phép soát lại, sửa và lưu vết mọi chỉnh sửa.
+
+Server buffer là chương trình đứng giữa máy trạm và tầng suy luận GPU. Nó giữ
+hàng đợi audio, nên một sự cố mạng ở máy trạm hay một lúc tầng suy luận bận
+không làm mất tiếng. Người vận hành không cần cấu hình gì cho nó ngoài việc
+biết địa chỉ của nó.
 
 Tài liệu này dành cho người vận hành.
 
@@ -23,8 +28,8 @@ Mở **Cấu hình** trên thanh công cụ và điền:
 
 | Mục | Ý nghĩa |
 |---|---|
-| **AI server (host:port)** | Địa chỉ bộ chuyển tiếp gRPC. Mặc định `192.168.1.47:8700`. |
-| **Bearer token** | Token xác thực. Bấm **Từ tệp...** để đọc từ tệp thay vì gõ tay. |
+| **Server buffer (host:port)** | Địa chỉ của `s2t-qt-server`. Mặc định `192.168.1.47:8800`. **Không phải** địa chỉ tầng suy luận (`:8700`) — xem ghi chú ngay dưới bảng. |
+| **Bearer token** | Token xác thực của Server buffer. Bấm **Từ tệp...** để đọc từ tệp thay vì gõ tay. Token của tầng suy luận là việc của server và không nằm trên máy này. |
 | **Microphone** | Thiết bị thu. `(mặc định hệ thống)` để hệ điều hành tự chọn. |
 | **Tên thiết bị bắt buộc chứa** | Chuỗi mà tên thiết bị phải chứa, mặc định `Speaker`. |
 | **Sample rate / Số kênh** | Mặc định 48000 Hz, 1 kênh. Phải là định dạng thiết bị hỗ trợ. |
@@ -35,6 +40,13 @@ Mở **Cấu hình** trên thanh công cụ và điền:
 | **Chế độ log / Mức log** | Xem [mục 7](#7-nhật-ký-và-chẩn-đoán). |
 
 Cấu hình được lưu lại và tự nạp ở lần mở sau.
+
+> **Điền nhầm cổng thì sao.** Nếu bạn trỏ vào tầng suy luận (`:8700`) thay vì
+> Server buffer (`:8800`), đèn báo sẽ đỏ kèm câu *"…trả lời nhưng không phải
+> Server buffer"*. Đó là lỗi cấu hình, không phải lỗi mạng: cả hai đều nói
+> gRPC, nhưng chỉ Server buffer mới trả lời được lệnh `ping` của nó. Đừng dùng
+> địa chỉ `:8700` — bỏ qua bộ đệm nghĩa là mất toàn bộ khả năng chịu sự cố mạng
+> mà nó đem lại.
 
 > **"Tên thiết bị bắt buộc chứa" để làm gì.** Sau khi rút USB mic, Windows có
 > thể tái sử dụng đúng endpoint đó cho một thiết bị khác. Nếu không kiểm tra
@@ -53,12 +65,20 @@ giọng nói.
 
 ### 1.3 Kiểm tra kết nối
 
-Đèn báo ở đầu thanh công cụ tự cập nhật mỗi 3 giây:
+Đèn báo ở đầu thanh công cụ tự cập nhật mỗi 3 giây. Nó có **ba** trạng thái,
+không phải hai, vì giờ có hai chặng mạng và hai chặng ấy hỏng theo hai cách
+khác nhau — cần hai cách xử lý khác nhau:
 
-- **● AI ĐÃ KẾT NỐI** — server trả lời và token được chấp nhận.
-- **● MẤT KẾT NỐI AI** — kèm lý do. Xem [mục 8](#8-xử-lý-sự-cố).
+| Đèn | Nghĩa | Cần làm gì |
+|---|---|---|
+| **● ĐÃ KẾT NỐI AI** (xanh) | Server buffer trả lời, token được chấp nhận, và **nó** tới được tầng suy luận. | Không. |
+| **● ĐANG ĐỆM** (vàng) | Server buffer vẫn trả lời bình thường, nhưng nó chưa tới được tầng suy luận. | **Cứ ghi tiếp.** Audio vẫn được nhận và xếp hàng trên server; chữ sẽ hiện ra khi tầng suy luận trở lại. Báo cho người quản trị. |
+| **● MẤT KẾT NỐI** (đỏ) | Không tới được Server buffer, hoặc token sai. | Xem [mục 8](#8-xử-lý-sự-cố). Ghi tiếp cũng chỉ dồn hàng đợi trên máy này, và hàng đợi đó có giới hạn. |
 
 Đèn xanh nghĩa là server *trả lời được một RPC thật*, không chỉ là mở được TCP.
+
+Di chuột lên đèn để thấy chi tiết đầy đủ: địa chỉ, phiên bản Server buffer, và
+tình trạng tầng suy luận.
 
 ---
 
@@ -224,12 +244,18 @@ nguồn.
 
 | Nút | Làm gì | Cần mạng |
 |---|---|---|
-| **Kiểm tra lại kết nối** | Gọi lại `get_model_status` bằng cấu hình đang chạy — cùng thứ quyết định màu đèn báo. | Có |
+| **Kiểm tra lại kết nối** | Gọi lại `ping` của Server buffer bằng cấu hình đang chạy — cùng thứ quyết định màu đèn báo (xanh/vàng/đỏ). | Có |
+| **Đọc trạng thái đệm** | Gọi `get_buffer_status`: server đã chạy bao lâu, tầng suy luận có sống không, và **mọi phiên đang mở trên server — kể cả của máy khác** với số gói đã nhận, đã đẩy, đang chờ và độ trễ. | Có |
 | **Probe máy chủ** | Gọi thật các RPC chỉ-đọc với địa chỉ và token gõ ở trên: model status, danh sách phiên, trạng thái DB giọng nói. Trả lời "server có sống và token có được chấp nhận không" mà **không tạo phiên nào**. | Có |
 | **Self-test giao thức** | Kiểm tra bộ mã proto3 và HPACK tự viết bằng các phép round-trip. | Không |
-| **Test mạng đầy đủ** | Bộ khẳng định đầu-cuối, cần `tools/mock_adapter.js` đang chạy. Dành cho phát triển. | Có |
+| **Test mạng đầy đủ** | Bộ khẳng định đầu-cuối, cần `tools/mock_adapter.js` đang chạy. Dành cho phát triển; nó dùng mã phiên cố định nên **không chạy được qua Server buffer** — trỏ thẳng vào mock adapter. | Có |
 
 Bấm **Copy báo cáo** để chép kết quả gửi cho người hỗ trợ.
+
+**Bảng trạng thái đệm là chỗ đầu tiên nên nhìn khi chữ ra chậm.** Cột *Trễ* cho
+biết tầng suy luận đang chậm hơn thời gian thực bao nhiêu giây; cột *Chờ* là số
+gói còn nằm trong hàng đợi. Cả hai lớn dần đều nghĩa là đường ống không theo
+kịp — đó là chuyện của người quản trị hệ thống, không phải của máy trạm.
 
 Mỗi lúc chỉ chạy được một phép chẩn đoán; các nút còn lại bị khoá cho tới khi
 xong. Nếu máy chủ không phản hồi, phép đang chạy vẫn phải chờ hết deadline của
@@ -240,16 +266,16 @@ nó — **Probe** khoảng 12 giây, **Test mạng đầy đủ** có thể lâu
 Các chế độ không cần giao diện:
 
 ```
-s2t_qt --selftest                              # self-test giao thức
-s2t_qt --probe 192.168.1.47:8700 --token T     # probe máy chủ
-s2t_qt --selftest-net 127.0.0.1:8700 --token T # test mạng đầy đủ
+s2t-qt-client --selftest                                 # self-test giao thức
+s2t-qt-client --probe 192.168.1.47:8800 --token T        # probe Server buffer
+s2t-qt-client --selftest-net 127.0.0.1:18700 --token T   # test mạng đầy đủ
 ```
 
 Điều khiển log:
 
 ```
-s2t_qt --log-mode develop --log-level trace
-s2t_qt --log-file D:\loi-hom-nay.log           # tự chuyển sang chế độ develop
+s2t-qt-client --log-mode develop --log-level trace
+s2t-qt-client --log-file D:\loi-hom-nay.log    # tự chuyển sang chế độ develop
 ```
 
 Hoặc bằng biến môi trường `S2T_LOG_MODE`, `S2T_LOG_LEVEL`, `S2T_LOG_FILE`.
@@ -275,7 +301,7 @@ Endpoint vẫn còn nhưng tên đã đổi — thường là do rút USB mic r�
 khác. Kiểm tra lại **Microphone** và **Tên thiết bị bắt buộc chứa** trong Cấu
 hình.
 
-### "Mất kết nối tới AI server"
+### "Mất kết nối tới Server buffer"
 
 Phiên được giữ nguyên, audio mới được giữ tạm trên máy này và ứng dụng tự kết
 nối lại, gửi lại đúng gói còn dở. Không mất chữ.
@@ -286,6 +312,30 @@ ai biết thì tệ hơn là dừng lại và báo.
 
 Dùng **Probe máy chủ** ở tab Chẩn đoán để biết là hỏng mạng, sai địa chỉ hay
 token bị từ chối.
+
+### Đèn vàng: "ĐANG ĐỆM"
+
+**Cứ ghi tiếp.** Server buffer vẫn nhận audio bình thường và xếp nó vào hàng
+đợi; chỉ có tầng suy luận GPU là chưa tới được, nên chữ tạm thời không ra. Khi
+tầng suy luận trở lại, toàn bộ phần đã xếp hàng được đẩy lên theo đúng thứ tự
+và bản chép bắt kịp.
+
+Bấm **Đọc trạng thái đệm** ở tab Chẩn đoán để xem hàng đợi đang lớn tới đâu, và
+báo cho người quản trị hệ thống. Đây là sự cố phía máy chủ, không phải phía máy
+trạm.
+
+Bộ đệm cũng có giới hạn (mặc định 300 giây audio mỗi phiên). Nếu tầng suy luận
+không trở lại trước khi hết chỗ, phiên sẽ dừng ồn ào với thông báo *"bộ đệm
+phiên đã đầy"* — lại là chủ ý, cùng lý do như trên.
+
+### "Máy chủ đệm không giữ phiên …"
+
+Server buffer đã được khởi động lại giữa chừng. Hàng đợi và bản đồ phiên nằm
+trong bộ nhớ, nên phiên bắt đầu trước lần khởi động lại không còn ở đó.
+
+Bản chép **không mất**: tầng suy luận vẫn giữ phiên ấy, nên nó vẫn nằm trong
+danh sách ở màn hình **SOÁT LẠI** và vẫn sửa được. Chỉ việc ghi tiếp vào phiên
+cũ là không được — bắt đầu một phiên mới.
 
 ### "Hàng đợi microphone bị tràn"
 
@@ -328,12 +378,19 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 7.3
 - **Tên người thao tác không được nhớ giữa các lần chạy** — xem mục 1.2.
 - **Mức bảo mật chỉ là nhãn**, không thay cho phân quyền phía server.
 - **Ứng dụng này không phải là server.** Nó không mở cổng nào và không có API
-  để phần mềm khác gọi vào. Muốn một hệ thống khác dùng dịch vụ xử lý âm thanh
-  thì hệ thống đó nói chuyện thẳng với AI server bằng đúng hợp đồng mà ứng dụng
-  này đang dùng — xem [danh-sach-api.md](danh-sach-api.md).
-- **Một phiên chỉ nên có một client đang ghi.** Hai chương trình cùng đẩy audio
-  vào một `session_id` sẽ làm hỏng bản chép, vì bộ đếm gói của mỗi bên là độc
-  lập với bên kia.
+  để phần mềm khác gọi vào. Phần server là chương trình riêng — `s2t-qt-server`
+  — và nó *có* API để phần mềm khác gọi vào; xem
+  [danh-sach-api.md](danh-sach-api.md).
+- **Một phiên chỉ nên có một client đang ghi**, nhưng **nhiều client xem chung
+  một phiên thì được**. Hai chương trình cùng đẩy audio vào một `session_id` sẽ
+  làm hỏng bản chép, vì bộ đếm gói của mỗi bên là độc lập với bên kia. Ngược
+  lại, việc nhiều người cùng theo dõi một cuộc họp là rẻ: Server buffer đệm
+  trạng thái trong 200 ms, nên mười người xem chỉ tốn của tầng suy luận đúng
+  một lần đọc.
+- **Máy trạm chỉ cần mở một cổng ra ngoài**, tới Server buffer. Địa chỉ và
+  token của tầng suy luận GPU không còn nằm trên máy của người vận hành.
+- **Phiên không sống qua lần khởi động lại của Server buffer** — xem mục 8.
+  Bản chép thì có; chỉ hàng đợi là không.
 
 ---
 
@@ -341,17 +398,21 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 7.3
 
 Nếu đơn vị bạn cần đưa dịch vụ này vào một phần mềm khác (tổng đài, hệ thống
 lưu trữ cuộc họp, quy trình xử lý hàng loạt), thì thứ cần đọc là
-[danh-sach-api.md](danh-sach-api.md). Tài liệu đó liệt kê toàn bộ 17 RPC, định
+[danh-sach-api.md](danh-sach-api.md). Tài liệu đó liệt kê toàn bộ 20 RPC, định
 dạng audio, chính sách thử lại và một tệp `.proto` sẵn sàng biên dịch.
+
+Client mới nên nối vào **Server buffer**, không phải vào tầng suy luận: đó là
+nơi có hàng đợi audio, và nó nói đúng hợp đồng mà tầng suy luận nói, cộng thêm
+ba RPC quản trị của riêng nó.
 
 Hai thông tin người vận hành cần cấp cho bộ phận tích hợp, lấy ngay trong
 **Cấu hình** của ứng dụng này:
 
 | Cần | Lấy ở đâu |
 |---|---|
-| Địa chỉ AI server (`host:port`) | ô **AI server** |
+| Địa chỉ Server buffer (`host:port`) | ô **Server buffer** |
 | Bearer token | ô **Bearer token** |
 
 Token là bí mật: gửi qua kênh nội bộ, đừng dán vào tài liệu dùng chung, và
-đừng để nó lọt vào log. Nếu nghi ngờ lộ, đề nghị quản trị AI server cấp lại —
-đổi token không ảnh hưởng tới các phiên đã lưu.
+đừng để nó lọt vào log. Nếu nghi ngờ lộ, đề nghị quản trị cấp lại — đổi token
+không ảnh hưởng tới các phiên đã lưu.

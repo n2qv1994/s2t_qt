@@ -1,29 +1,45 @@
 # s2t_qt — Danh sách API cho client bên ngoài
 
-Tài liệu này mô tả **toàn bộ giao diện lập trình của dịch vụ xử lý âm thanh**
-mà `s2t_qt` sử dụng, đủ chi tiết để một ứng dụng khác — viết bằng Python, Java,
+Tài liệu này mô tả **toàn bộ giao diện lập trình của Server buffer**
+(`s2t-qt-server`), đủ chi tiết để một ứng dụng khác — viết bằng Python, Java,
 C#, Go hay bất cứ ngôn ngữ nào có gRPC — nói chuyện trực tiếp với hệ thống mà
-không cần đi qua `s2t_qt`.
+không cần đi qua `s2t-qt-client`.
 
-`s2t_qt` **không phải là một server**: nó là một client. Vì vậy "dùng dịch vụ
-thông qua s2t_qt" trên thực tế nghĩa là **dùng đúng hợp đồng (contract) mà
-s2t_qt đang dùng**, với `s2t_qt` là bản cài đặt tham chiếu đã chạy trong thực
-tế. Mọi trường, mọi số hiệu trường và mọi quy tắc trong tài liệu này được đọc
-thẳng từ mã nguồn `proto/` và `grpc/` của `s2t_qt`, nên nó khớp với thứ thật sự
-chạy trên dây.
+`s2t-qt-server` **là** một server: nó mở cổng và trả lời. `s2t-qt-client` là
+bản cài đặt tham chiếu đã chạy trong thực tế cho hợp đồng dưới đây. Mọi trường,
+mọi số hiệu trường và mọi quy tắc trong tài liệu này được đọc thẳng từ mã nguồn
+`shared/proto/` và `shared/grpc/`, nên nó khớp với thứ thật sự chạy trên dây.
 
 ```
    client bên ngoài của bạn ─┐
-                             ├──► gRPC :8700 ──► Triton (:8011) ──► GPU
-   s2t_qt (ứng dụng Qt)    ──┘    (adapter)
+                             ├──► s2t-qt-server ──► adapter ──► Triton ──► GPU
+   s2t-qt-client           ──┘        :8800          :8700       :8011
+                                    (Server buffer)
 ```
+
+**Nối vào đâu.** Nối vào Server buffer (`:8800`), không phải vào adapter
+(`:8700`). Cả hai nói cùng một hợp đồng cho 17 RPC đầu, nhưng chỉ Server buffer
+mới có hàng đợi audio — và hàng đợi ấy là thứ giữ cho một sự cố mạng ở phía bạn
+không thành mất tiếng. Nó cũng thêm ba RPC quản trị của riêng nó.
+
+Ba service, cùng một cổng, cùng một token:
+
+| Service | RPC | Ai trả lời |
+|---|---|---|
+| `asr.ui.v1.ProductASRService` | 12 | 4 do bộ đệm trả lời, 8 chuyển tiếp |
+| `asr.ui.v1.SpeakerRegistryService` | 5 | chuyển tiếp toàn bộ |
+| `s2t.buffer.v1.BufferAdminService` | 3 | bộ đệm, hoàn toàn |
+
+"Chuyển tiếp" nghĩa là đúng nghĩa đen: request được giải mã để kiểm tra, rồi
+gọi lên tầng suy luận và trả lại nguyên vẹn phản hồi — kể cả mã lỗi và thông
+điệp lỗi. Server buffer không có ý kiến gì về nội dung một bản chép.
 
 Ba tài liệu đi cùng nhau:
 
 | Tài liệu | Dành cho |
 |---|---|
 | [huong-dan-su-dung.md](huong-dan-su-dung.md) | người vận hành ứng dụng |
-| [luong-hoat-dong.md](luong-hoat-dong.md) | người bảo trì mã nguồn `s2t_qt` |
+| [luong-hoat-dong.md](luong-hoat-dong.md) | người bảo trì mã nguồn |
 | **danh-sach-api.md** (tài liệu này) | **người tích hợp hệ thống khác** |
 
 ---
@@ -33,13 +49,15 @@ Ba tài liệu đi cùng nhau:
 | Mục | Giá trị |
 |---|---|
 | Giao thức | gRPC trên HTTP/2 **cleartext (h2c)**, prior-knowledge — không TLS, không upgrade từ HTTP/1.1 |
-| Địa chỉ mặc định | `192.168.1.47:8700` (cấu hình được) |
+| Địa chỉ mặc định | `192.168.1.47:8800` — Server buffer (cấu hình được) |
 | Kiểu RPC | **unary** toàn bộ. Không có streaming ở bất kỳ RPC nào. |
 | Đóng gói | proto3, `content-type: application/grpc+proto` |
-| Nén | không nén; client gửi `grpc-encoding: identity` và `grpc-accept-encoding: identity` |
+| Nén | không nén; client gửi `grpc-encoding: identity` và `grpc-accept-encoding: identity`. Server **từ chối** request có cờ nén. |
 | Xác thực | header `authorization: Bearer <token>` trên **mọi** lệnh gọi |
+| Giới hạn | 128 kết nối đồng thời (cấu hình được), 64 stream mở dở mỗi kết nối, 64 MiB mỗi request |
 
-Header mà `s2t_qt` gửi trên mỗi lệnh gọi (tham chiếu `grpc/GrpcChannel.cpp`):
+Header mà `s2t-qt-client` gửi trên mỗi lệnh gọi (tham chiếu
+`shared/grpc/GrpcChannel.cpp`):
 
 ```
 :method       POST
@@ -59,8 +77,33 @@ authorization Bearer <token>
 `grpc-status` ở trailer. Thân thông điệp theo đúng khung gRPC: 1 byte cờ nén +
 4 byte độ dài big-endian + payload proto3.
 
-Nếu adapter chạy không token thì bỏ header `authorization`; khi token sai hoặc
-thiếu, mọi RPC trả về `UNAUTHENTICATED (16)`.
+Những gì server trả lại:
+
+- **Luôn `:status 200`.** gRPC mang trạng thái của riêng nó ở trailer; một mã
+  HTTP khác chỉ khiến client đúng chuẩn báo lỗi truyền tải thay vì báo đúng
+  trạng thái.
+- **Thành công**: HEADERS (`:status`, `content-type`, `grpc-encoding`,
+  `grpc-accept-encoding`) → DATA → trailers (`grpc-status: 0`).
+- **Lỗi**: một khung HEADERS duy nhất mang cả header lẫn `grpc-status` và
+  `grpc-message`, không có DATA — dạng *trailers-only*, đúng như một server
+  gRPC thật.
+- `grpc-message` được **mã hoá phần trăm**: mọi byte ngoài `%x20`–`%x7E`, và cả
+  dấu `%`, đi thành `%XX`. Thông điệp lỗi ở đây có tiếng Việt, nên client của
+  bạn phải giải mã nó — nếu không sẽ nhận được ký tự rác.
+
+`grpc-timeout` của bạn **được chuyển tiếp nguyên** lên tầng suy luận, nên một
+người gọi đã bỏ cuộc không còn được chờ ở phía trên.
+
+Nếu Server buffer chạy không token thì bỏ header `authorization`; khi token sai
+hoặc thiếu, mọi RPC trả về `UNAUTHENTICATED (16)` với thông điệp
+`token không hợp lệ`.
+
+> **Phân biệt hai `UNAUTHENTICATED`.** Nếu thông điệp là `token không hợp lệ`
+> thì token *của bạn với Server buffer* sai, và lời gọi chưa từng rời khỏi
+> server. Nếu là một thông điệp khác — ví dụ `missing or invalid API token` —
+> thì token của bạn đã được chấp nhận và đó là token *của Server buffer với
+> tầng suy luận* đang sai; đấy là việc của người quản trị server, không phải
+> của bạn.
 
 > **Lưu ý bảo mật.** Đường truyền là cleartext. Token đi qua mạng ở dạng rõ,
 > nên chỉ dùng trong mạng nội bộ tin cậy hoặc bọc thêm một lớp TLS/VPN ở tầng
@@ -68,29 +111,47 @@ thiếu, mọi RPC trả về `UNAUTHENTICATED (16)`.
 
 ### 1.1 Kiểm tra nhanh trước khi tích hợp
 
-`s2t_qt` có sẵn một phép thử không cần cài thêm gì:
+Cả hai chương trình đều có sẵn phép thử không cần cài thêm gì:
 
 ```
-s2t_qt --probe 192.168.1.47:8700 --token <token>
+s2t-qt-client --probe 192.168.1.47:8800 --token <token>   # tới Server buffer
+s2t-qt-server --probe 192.168.1.47:8700 --token <token>   # tới tầng suy luận
 ```
 
-Nó gọi thật ba RPC — `get_model_status`, `list_sessions` và
+Cái đầu gọi thật ba RPC — `get_model_status`, `list_sessions` và
 `GetSpeakerRegistryStatus` — nên nó kiểm tra được **cả đường mạng lẫn token**,
 và in ra danh sách model kèm độ trễ. Đây là cách nhanh nhất để tách bạch "mạng
 hỏng" với "token sai" trước khi đổ lỗi cho mã của bạn.
 
-Từ phía client mới, RPC rẻ nhất để thử là `get_model_status`: nó không cần
-phiên, không cần tham số:
+Từ phía client mới, RPC rẻ nhất để thử là `ping` của
+`BufferAdminService`: nó không cần phiên, không cần tham số, và nó trả lời
+luôn cả câu hỏi thứ hai — Server buffer có tới được tầng suy luận không:
 
 ```
-grpcurl -plaintext -proto asr_session.proto -H "authorization: Bearer $TOKEN" \
-        192.168.1.47:8700 asr.ui.v1.ProductASRService/get_model_status
+grpcurl -plaintext -proto buffer_admin.proto -H "authorization: Bearer $TOKEN" \
+        192.168.1.47:8800 s2t.buffer.v1.BufferAdminService/ping
 ```
 
-Tệp `.proto` để biên dịch nằm ở [phụ lục A](#phụ-lục-a--tệp-proto-tái-dựng).
+Nếu RPC đó trả `UNIMPLEMENTED (12)` thì bạn đang nói chuyện với **adapter**,
+không phải với Server buffer — kiểm tra lại cổng.
+
+Các tệp `.proto` để biên dịch nằm ở
+[phụ lục A](#phụ-lục-a--tệp-proto-tái-dựng).
+
+### 1.2 Bằng chứng rằng tài liệu này khớp với thứ chạy thật
+
+`tools/interop_check.py` sinh stub Python **từ chính ba khối `.proto` in trong
+phụ lục A**, rồi dùng grpc C-core thật gọi vào một Server buffer đang chạy.
+Chú thích đầu tệp có đủ các lệnh.
+
+Đây là phép kiểm đáng tin hơn bất kỳ self-test nào của dự án này: client và
+server ở đây dùng chung một bản HPACK và một bộ mã proto3, nên chúng có thể
+đồng ý với nhau mà cả hai cùng sai. grpc C-core thì không đồng ý với ai cả.
+
+Nếu bạn sửa gì trong `shared/proto/` mà không sửa phụ lục A, script này sẽ báo
+ngay.
 
 ---
-
 ## 2. Mã lỗi và chính sách thử lại
 
 Mã trạng thái theo đúng chuẩn gRPC. Ba mã được coi là **lỗi truyền tải** và an
@@ -104,21 +165,52 @@ toàn để thử lại nguyên văn:
 | 13 | `INTERNAL` | **KHÔNG** | Xem cảnh báo bên dưới |
 | 16 | `UNAUTHENTICATED` | Không | Token sai hoặc thiếu |
 | 3 | `INVALID_ARGUMENT` | Không | Sai tham số; sửa yêu cầu rồi gọi lại |
-| 5 | `NOT_FOUND` | Không | `session_id` không tồn tại |
-| 9 | `FAILED_PRECONDITION` | Không | Ví dụ `edit_range_not_committed` |
+| 5 | `NOT_FOUND` | Không | `session_id` không tồn tại — hoặc Server buffer không giữ nó; xem dưới |
+| 9 | `FAILED_PRECONDITION` | Không | Ví dụ `edit_range_not_committed`, hoặc `push_audio` sau khi phiên đã dừng |
 | 10 | `ABORTED` | Không | Xung đột `base_revision` khi sửa văn bản |
-| 8 | `RESOURCE_EXHAUSTED` | Không | Vượt trần kích thước thông điệp |
+| 8 | `RESOURCE_EXHAUSTED` | **Không** | Vượt trần kích thước thông điệp — **hoặc bộ đệm phiên đã đầy**; xem dưới |
+| 12 | `UNIMPLEMENTED` | Không | Phương thức không có ở endpoint này. Với `BufferAdminService` thì gần như luôn nghĩa là bạn đang nói chuyện với adapter chứ không phải Server buffer. |
+
+### Hai mã lỗi riêng của Server buffer
+
+**`RESOURCE_EXHAUSTED` trên `push_audio`** nghĩa là hàng đợi của phiên đã đầy:
+tầng suy luận không theo kịp và bộ đệm (mặc định 300 giây audio) đã hết chỗ.
+
+Đây **không** phải lỗi để thử lại. Nó là tín hiệu dừng. Từ chối ở đây là có chủ
+ý — một hàng đợi không giới hạn biến một đường ống đình trệ thành một cú kill vì
+hết bộ nhớ, và một lỗ trong audio là thứ không tầng nào phía sau phát hiện
+được. Client nên **kết thúc phiên và báo cho người dùng**, đúng như
+`s2t-qt-client` làm.
+
+**`NOT_FOUND` trên `push_audio`, `get_live_state` hay `stop_session`** có thể
+nghĩa là Server buffer đã khởi động lại. Hàng đợi và bản đồ phiên nằm trong bộ
+nhớ, nên phiên bắt đầu trước lần khởi động lại không còn ở đó — thông điệp lỗi
+nói rõ điều này. Tầng suy luận vẫn giữ phiên ấy, nên `get_review_state` và
+`apply_text_edit` vẫn chạy được; chỉ việc ghi tiếp là không.
+
+Server buffer **không** chuyển tiếp mù `push_audio` cho một phiên nó không
+giữ: làm thế thì mọi bộ đếm — độ trễ, số gói, số byte — sẽ nói dối, và đó là
+những con số duy nhất cho biết đường ống có theo kịp hay không.
 
 > ### Không bao giờ thử lại `INTERNAL` trên `push_audio`
 >
 > Adapter trả `INTERNAL` **đúng vào lúc nó có thể đã tiêu thụ gói audio đó
 > rồi**. Thử lại một cách mù quáng sẽ làm nhân đôi chữ trong bản chép. Đây là
-> ràng buộc mạnh nhất của toàn bộ API này; `s2t_qt` cài đặt nó ở
-> `grpc::Status::isTransport()` và ở vòng lặp `SessionWorker::pushPacket()`.
+> ràng buộc mạnh nhất của toàn bộ API này; nó được cài đặt ở
+> `grpc::Status::isTransport()` và chạy ở **cả hai chặng** — vòng lặp
+> `SessionWorker::pushPacket()` của client, và `SessionBuffer::forward()` của
+> Server buffer.
+>
+> Server buffer **chuyển tiếp nguyên mã lỗi** đó cho bạn thay vì đổi nó thành
+> mã khác, chính là để quy tắc này còn kết luận đúng ở phía bạn.
 
 Khi gặp lỗi truyền tải, cách làm đã kiểm chứng là: **bỏ hẳn kết nối TCP hiện
 tại, mở lại, gửi lại đúng `seq` cũ** — chứ không chờ HTTP/2 tự phục hồi trên
-socket đã hỏng. `s2t_qt` chờ 500 ms giữa hai lần thử.
+socket đã hỏng. Cả hai chương trình chờ 500 ms giữa hai lần thử.
+
+Gửi lại `seq` cũ là an toàn vì Server buffer **phát lại ACK đã lưu** cho bất kỳ
+`seq` nào nhỏ hơn hoặc bằng `seq` lớn nhất nó đã nhận, và không xếp hàng thêm
+gì. Đây đúng là hành vi của adapter, giữ nguyên một chặng gần hơn.
 
 `grpc-message` được percent-encode theo chuẩn gRPC, và thông điệp lỗi từ
 adapter có tiếng Việt có dấu — nhớ giải mã trước khi hiển thị.
@@ -175,20 +267,49 @@ Số byte một gói: `sample_rate * channels * 2 * ms / 1000`. Với 48 kHz mon
 
 Bốn quy tắc thứ tự **không được phá**, mỗi cái tương ứng một sự cố thật:
 
-1. **`seq` bắt đầu từ 1 và tăng đều một đơn vị cho mỗi gói của phiên.** Adapter
-   phát lại nguyên phản hồi đã lưu cho một `seq` nó từng xử lý — đây là thứ duy
-   nhất làm cho việc thử lại sau `DEADLINE_EXCEEDED` an toàn trên một pipeline
-   có trạng thái.
+1. **`seq` bắt đầu từ 1 và tăng đều một đơn vị cho mỗi gói của phiên.** Server
+   buffer phát lại nguyên ACK đã lưu cho một `seq` nó từng nhận — đây là thứ
+   duy nhất làm cho việc thử lại sau `DEADLINE_EXCEEDED` an toàn trên một
+   pipeline có trạng thái.
 2. **Gói đầu tiên đặt `reset = true`**, các gói sau đặt `false`.
 3. **`stop_session` phải được gửi từ cùng luồng/cùng hàng đợi với vòng đẩy
    audio**, sau gói cuối cùng. Gửi từ luồng khác thì nó có thể vượt mặt gói
-   cuối và phiên bị chốt thiếu.
+   cuối và phiên bị chốt thiếu. Server buffer dựng lại đúng rào chắn ấy ở phía
+   nó — nó không gọi `stop_session` lên tầng suy luận cho tới khi hàng đợi của
+   phiên rỗng — nhưng nó chỉ bảo vệ được những gói **đã tới tay nó**.
 4. **Mở thiết bị thu trước, gọi `start_session` sau.** Đảo lại sẽ để một phiên
    rỗng treo trên server khi driver âm thanh lỗi.
 
+### 4.0 `push_audio` trả lời khi nào, và điều đó nghĩa là gì
+
+Server buffer trả lời `push_audio` **ngay khi gói nằm chắc chắn trong hàng đợi
+của nó**, không đợi tầng suy luận. Đó là toàn bộ lý do bộ đệm tồn tại: một sự
+cố mạng ở phía bạn tốn độ sâu hàng đợi chứ không tốn tiếng nói.
+
+Hệ quả với client của bạn:
+
+- **ACK nghĩa là "đã nhận và sẽ được gửi đi", không phải "đã suy luận xong".**
+  Đừng suy ra từ ACK rằng chữ đã sẵn sàng.
+- **Văn bản đến từ `get_live_state`, không từ phản hồi `push_audio`.** Điều này
+  vốn đã đúng trước khi tách — `s2t-qt-client` chưa bao giờ đọc chữ ra từ phản
+  hồi `push_audio` — nhưng bây giờ thì nó là bắt buộc: các trường văn bản trong
+  ACK của bộ đệm để trống.
+- **`source_seen_sec` trong ACK vẫn là con số của *tầng suy luận*.** Nó được
+  chép từ phản hồi `push_audio` gần nhất mà tầng suy luận thật sự trả lời. Lấy
+  `số giây đã gửi − source_seen_sec` cho ra độ trễ thật của đường ống, giờ đã
+  tính cả phần đang nằm trong bộ đệm.
+- **`timing.client_prepare_ms` / `client_wait_ms` được chuyển tiếp nguyên**, nên
+  ước lượng thời gian truyền tải của bạn vẫn trừ đi công việc thật của tầng suy
+  luận thay vì tính nó thành thời gian mạng.
+
+Muốn biết chính xác hàng đợi đang thế nào thì gọi
+[`get_buffer_status`](#6b2-get_buffer_status).
+
 ### 4.1 Deadline nên đặt
 
-Đây là các giá trị `s2t_qt` dùng, đã chạy thực tế:
+Đây là các giá trị `s2t-qt-client` dùng, đã chạy thực tế. Server buffer chuyển
+tiếp `grpc-timeout` của bạn lên tầng suy luận nguyên vẹn, nên các con số này
+vẫn giữ đúng ý nghĩa qua thêm một chặng:
 
 | RPC | Deadline | Vì sao |
 |---|---|---|
@@ -196,7 +317,7 @@ Bốn quy tắc thứ tự **không được phá**, mỗi cái tương ứng m�
 | `push_audio` | **5 s** | Ngắn có chủ ý: phát hiện đứt mạng sớm. Thử lại cùng `seq` là an toàn. |
 | `get_live_state` | 20 s | |
 | `get_review_state` | 20 s | |
-| `stop_session` | **3600 s** | Nó rút cạn hàng đợi bền trên server; sau một lần nạp tệp nhanh, hàng đợi đó có thể còn vài phút audio. Đặt ngắn là chốt thiếu phiên. |
+| `stop_session` | **3600 s** | Nó rút cạn **hai** hàng đợi — của Server buffer rồi của tầng suy luận; sau một lần nạp tệp nhanh, chúng có thể còn vài phút audio. Đặt ngắn là chốt thiếu phiên. Nếu hết hạn, bạn nhận `DEADLINE_EXCEEDED` kèm số gói còn lại và việc rút hàng đợi **vẫn tiếp tục** — gọi lại `stop_session` sẽ nhận đúng câu trả lời đã lưu, không phải một câu trả lời thứ hai khác. |
 | `apply_text_edit`, `rename_speaker` | 60 s | |
 | `get_audio_range`, `SaveSessionSpeakers` | 120 s | |
 | `EnrollSpeaker` | **120 s** | Bao trọn một lượt `rebuild_db` trên **toàn bộ** giọng đã có, không chỉ giọng vừa ghi. |
@@ -211,12 +332,25 @@ Một `Channel` gRPC ứng với một kết nối TCP. Đừng dồn mọi th�
   thì một lần tuần tự hoá trạng thái lớn sẽ nằm chắn trước một gói audio 160 ms.
 - Một `EnrollSpeaker` được phép chạy tới 120 giây và sẽ chắn mọi thứ phía sau.
 
-`s2t_qt` dùng **5 kênh**: một cho vòng đẩy audio, một cho poll trạng thái, và
-ba lane dùng chung cho các RPC theo yêu cầu.
+`s2t-qt-client` dùng **5 kênh**: một cho vòng đẩy audio, một cho poll trạng
+thái, và ba lane dùng chung cho các RPC theo yêu cầu. Server buffer dựng lại
+đúng hình dạng ấy ở phía nó: mỗi phiên một kênh riêng cho audio và một cho
+trạng thái, cộng một nhóm lane dùng chung cho mọi RPC chuyển tiếp.
 
 Trần kích thước phản hồi phía client nên đặt **64 MiB** (bản thân adapter đã
 chặn ở 4 MiB của gRPC); cửa sổ nhận HTTP/2 mức kết nối nên nâng lên 8 MiB, nếu
-không một `get_review_state` lớn sẽ nghẽn ở 64 KiB.
+không một `get_review_state` lớn sẽ nghẽn ở 64 KiB. Server buffer quảng cáo
+đúng những con số đó cho bạn.
+
+**Đừng pipeline nhiều request trên cùng một kết nối.** Server buffer phục vụ
+tuần tự trên mỗi kết nối và sẽ đóng kết nối với `PROTOCOL_ERROR` nếu một
+request mới tới trong lúc một phản hồi đang được ghi. Cần song song thì mở thêm
+kết nối — đó là điều mà bảng 5 kênh ở trên mô tả.
+
+**Poll `get_live_state` bao nhiêu cũng được.** Nó được đệm 200 ms ở Server
+buffer, nên mười client cùng theo dõi một cuộc họp chỉ tốn của tầng suy luận
+một lần đọc. Poll dày hơn 200 ms không làm tăng tải cho GPU, chỉ tăng tải cho
+chính máy đệm.
 
 ---
 
@@ -349,7 +483,7 @@ Cặp `has_*` tồn tại vì proto3 không phân biệt được "không đặt
 0" — mà 0 giây là một mốc hợp lệ. Muốn lấy cả phiên thì để cả hai `has_*` bằng
 `false`.
 
-Với cuộc họp dài, **hãy lấy theo cửa sổ**. `s2t_qt` cuốn theo từng cửa sổ và
+Với cuộc họp dài, **hãy lấy theo cửa sổ**. `s2t-qt-client` cuốn theo từng cửa sổ và
 dừng ở 200 cửa sổ (khoảng 33 giờ) để một phiên hỏng không kéo client đi mãi.
 
 ### 5.5 `get_audio_range`
@@ -687,6 +821,119 @@ trú, **mọi** giọng đều dưới chuẩn; nếu không tách `legacy` ra t
 
 ---
 
+## 6b. `BufferAdminService` — 3 RPC
+
+Ba RPC này mô tả **chính tiến trình Server buffer**, không phải tầng suy luận.
+Adapter không cài đặt chúng và không bao giờ được hỏi tới — nếu bạn nhận
+`UNIMPLEMENTED (12)` ở đây thì bạn đang nối vào adapter, không phải vào Server
+buffer.
+
+Cùng cổng, cùng token với hai service kia.
+
+### 6b.1 `ping`
+
+```
+/s2t.buffer.v1.BufferAdminService/ping
+PingRequest → PingResponse
+```
+
+**Request**: `1 client_ts (double)` — dấu thời gian Unix theo đồng hồ của bạn.
+
+**Response**: `1 client_ts`, `2 server_ts`, `3 server_version`,
+`4 upstream_ready (bool)`.
+
+`client_ts` được trả lại **nguyên vẹn**, nên bạn đo được vòng đi về mà không
+cần hai đồng hồ đồng ý với nhau.
+
+Đây là RPC nên dùng cho health-check và cho đèn báo kết nối, vì nó trả lời cả
+hai câu hỏi trong một vòng:
+
+| `grpc-status` | `upstream_ready` | Nghĩa | Client nên làm gì |
+|---|---|---|---|
+| `OK` | `true` | Cả hai chặng đều tốt. | Bình thường. |
+| `OK` | `false` | Server buffer sống, tầng suy luận thì không. | **Cứ gửi audio tiếp.** Nó được nhận và xếp hàng; chữ sẽ ra khi tầng suy luận trở lại. Báo cho người quản trị. |
+| `UNAUTHENTICATED` | – | Token của bạn sai. | Sửa cấu hình. |
+| `UNAVAILABLE` | – | Không tới được Server buffer. | Lỗi mạng phía bạn. |
+| `UNIMPLEMENTED` | – | Đây không phải Server buffer. | Sai cổng — kiểm tra lại `:8800` với `:8700`. |
+
+Một `get_model_status` chuyển tiếp **không** phân biệt được hai dòng đầu, vì cả
+hai chặng đều nằm giữa bạn và câu trả lời. Đó là lý do RPC này tồn tại.
+
+### 6b.2 `get_buffer_status`
+
+```
+/s2t.buffer.v1.BufferAdminService/get_buffer_status
+BufferStatusRequest → BufferStatusResponse
+```
+
+**Request**: `1 session_id` — để trống nghĩa là mọi phiên; điền vào thì chỉ
+phiên đó (và trả `NOT_FOUND` nếu không có).
+
+**Response**:
+
+| # | Trường | Ý nghĩa |
+|---|---|---|
+| 1 | `server_version` | |
+| 2 | `uptime_sec` | |
+| 3 | `upstream` (`UpstreamStatus`) | tình trạng tầng suy luận |
+| 4 | `active_connections` | kết nối HTTP/2 đang mở |
+| 5 | `total_connections` | tổng từ lúc khởi động |
+| 6 | `total_calls` | tổng số RPC đã phục vụ |
+| 7 | `rejected_calls` | số lần từ chối vì token sai |
+| 8 | `queue_capacity_bytes` | tổng sức chứa của mọi phiên đang mở |
+| 9 | `queue_used_bytes` | tổng đang dùng |
+| 10 | `spool_dir` | |
+| 11 | `spool_enabled` | |
+| 12 | `sessions` (repeated `BufferedSession`) | |
+
+`UpstreamStatus` = `1 target`, `2 reachable`, `3 latency_ms`, `4 detail`,
+`5 checked_at`, `6 consecutive_failures`.
+
+`BufferedSession` — đây là phần đáng đọc nhất:
+
+| # | Trường | Ý nghĩa |
+|---|---|---|
+| 1 | `session_id` | Cùng mã mà tầng suy luận dùng: bộ đệm không tự nghĩ ra mã mới. |
+| 2 | `client` | `host:port` của bên đã gọi `start_session` |
+| 3 | `title` | |
+| 4 | `started_at`, 5 `updated_at` | Unix giây |
+| 6 | `running` | |
+| 7 | `accepted_packets`, 8 `accepted_bytes` | đã ACK cho client — tức đã nằm chắc trong bộ đệm |
+| 9 | `forwarded_packets`, 10 `forwarded_bytes` | tầng suy luận đã thật sự trả lời |
+| 11 | `pending_packets`, 12 `pending_bytes` | đang nằm trong hàng đợi |
+| 13 | `spooled_bytes` | đã ghi ra bản sao đối chiếu |
+| 14 | `dropped_packets` | bỏ đi sau một lỗi chí mạng của phiên |
+| 15 | `retries` | số lần thử lại vì lỗi vận chuyển |
+| 16 | **`lag_sec`** | **số giây audio đã nhận nhưng tầng suy luận chưa xác nhận.** Đây là con số cho biết đường ống có theo kịp hay không. |
+| 17 | `forward_p50_ms`, 18 `forward_p95_ms` | độ trễ đẩy lên tầng suy luận, cửa sổ 256 gói gần nhất |
+| 19 | `last_error`, 20 `last_error_at` | |
+| 21 | `state_polls` | số lần bộ đệm thật sự hỏi tầng suy luận |
+| 22 | `state_age_sec` | tuổi của bộ nhớ đệm trạng thái |
+| 23 | `state_readers` | số lượt đọc trạng thái đã phục vụ |
+
+`state_readers` so với `state_polls` cho thấy trực tiếp lợi ích của việc đệm:
+tỉ lệ 10:1 nghĩa là mười lượt đọc chỉ tốn một lần hỏi GPU.
+
+Phiên đã dừng vẫn còn ở đây thêm 900 giây (cấu hình được) rồi bị quên đi.
+
+### 6b.3 `list_buffered_sessions`
+
+```
+/s2t.buffer.v1.BufferAdminService/list_buffered_sessions
+BufferSessionsRequest → BufferSessionsResponse
+```
+
+**Request**: `1 limit (uint32)` — 0 là không giới hạn; `2 include_finished
+(bool)`.
+
+**Response**: `1 sessions (repeated BufferedSession)`, sắp xếp theo
+`started_at` giảm dần.
+
+Bản rút gọn của `get_buffer_status` khi bạn chỉ cần danh sách phiên. Lưu ý nó
+liệt kê phiên **của mọi client**, không riêng của bạn — đó là chủ ý, vì một
+đường ống đình trệ đang giữ audio của bốn máy trạm khác là thứ đáng thấy.
+
+---
 ## 7. Nội dung `config_json`
 
 Chuỗi JSON compact truyền trong `start_session`. Mọi khoá đều tuỳ chọn:
@@ -862,7 +1109,7 @@ Tất cả đều `double`, đơn vị mili giây.
 ```python
 import grpc, wave, asr_session_pb2 as pb, asr_session_pb2_grpc as rpc
 
-TARGET, TOKEN = "192.168.1.47:8700", "<token>"
+TARGET, TOKEN = "192.168.1.47:8800", "<token>"   # Server buffer, không phải adapter
 META = (("authorization", f"Bearer {TOKEN}"),)
 
 # Kênh riêng cho audio, kênh riêng cho poll trạng thái - xem muc 4.2
@@ -913,14 +1160,15 @@ for row in final.state.rows:
 ngoài vòng lặp, nên lần gửi lại mang đúng `seq` cũ. Nếu tăng `seq` trong vòng
 lặp thử lại, phiên sẽ có lỗ hoặc chữ bị nhân đôi.
 
-### 9.2 C++ — dùng thẳng mã của `s2t_qt`
+### 9.2 C++ — dùng thẳng mã của dự án này
 
-Nếu ứng dụng của bạn cũng là Qt/C++, không cần thư viện gRPC làm gì: chép hai
-thư mục `proto/` và `grpc/` rồi dùng `AsrClient`. Cả hai không phụ thuộc gì
-ngoài Qt Core — không protobuf, không gRPC, không protoc.
+Nếu ứng dụng của bạn cũng là Qt/C++, không cần thư viện gRPC làm gì: chép cả
+thư mục `shared/` rồi `include(shared/shared.pri)` và dùng `AsrClient`. Nó
+không phụ thuộc gì ngoài Qt Core và Qt Network — không protobuf, không gRPC,
+không protoc.
 
 ```cpp
-AsrClient client(QStringLiteral("192.168.1.47:8700"), token);
+AsrClient client(QStringLiteral("192.168.1.47:8800"), token);   // Server buffer
 
 asr::StartSessionRequest start;
 start.configJson = QStringLiteral(R"({"session_title":"Demo"})");
@@ -948,20 +1196,30 @@ if (!st.ok() && st.isTransport()) {
 lựa chọn có chủ ý: mọi bên gọi đều đã có luồng riêng, nên một socket đồng bộ
 làm cả tầng giao thức gọn hơn nhiều so với một máy trạng thái callback.
 
-### 9.3 Thử mà không cần server thật
+### 9.3 Thử mà không cần GPU
 
-`tools/mock_adapter.js` là một server HTTP/2 thuần Node, không phụ thuộc gì,
-trả về đúng hình dạng thông điệp của adapter:
+Cách sát thực tế nhất là chạy **Server buffer thật** trước một adapter giả:
 
 ```
 node tools/mock_adapter.js 18700
-s2t_qt --selftest-net 127.0.0.1:18700
+s2t-qt-server --listen 127.0.0.1:18800 --token thu --upstream 127.0.0.1:18700 \
+              --upstream-token thu
+# rồi trỏ client của bạn vào 127.0.0.1:18800
 ```
 
-Client của bạn cũng trỏ vào cổng đó được. Nó cố tình trả về một payload ~2 MB
-(để ép chạy `WINDOW_UPDATE` thật), phản hồi lỗi dạng trailers-only, và một
-`grpc-message` tiếng Việt percent-encode — ba thứ hay làm vỡ một client mới
+Cách này cho bạn đúng hành vi sẽ gặp khi chạy thật — kể cả đệm, phát lại ACK và
+rào chắn drain — mà không cần GPU nào.
+
+`tools/mock_adapter.js` là một server HTTP/2 thuần Node, không phụ thuộc gì,
+trả về đúng hình dạng thông điệp của adapter. Nó cố tình trả về một payload
+~2 MB (để ép chạy `WINDOW_UPDATE` thật), phản hồi lỗi dạng trailers-only, và
+một `grpc-message` tiếng Việt percent-encode — ba thứ hay làm vỡ một client mới
 viết.
+
+Trỏ thẳng vào mock adapter cũng được, nhưng lưu ý nó dùng mã phiên cố định
+(`sess-live`, `sess-1`) và không hề đệm, nên nó **không** kiểm được lớp bộ đệm.
+Đó là lý do `s2t-qt-client --selftest-net` phải trỏ vào mock chứ không qua
+Server buffer.
 
 ---
 
@@ -980,18 +1238,28 @@ viết.
 | Sửa văn bản bị từ chối | Sửa vượt `commit_boundary_sec`, hoặc `base_revision` đã cũ |
 | Không thấy trace nào | Phiên không được tạo với `"pipeline_trace": true` |
 | Không đọc được lỗi (chuỗi rỗng) | Chỉ đọc trailer, bỏ qua phản hồi trailers-only |
+| `BufferAdminService` trả `UNIMPLEMENTED` | Nối vào adapter `:8700` thay vì Server buffer `:8800` |
+| Chờ mãi không thấy chữ dù `push_audio` đều `OK` | Suy ra chữ từ ACK. Chữ đến từ `get_live_state`; ACK chỉ nói gói đã vào hàng đợi — xem [mục 4.0](#40-push_audio-trả-lời-khi-nào-và-điều-đó-nghĩa-là-gì) |
+| "Hàng đợi server luôn bằng 0" | Tự tính từ ACK thay vì từ `source_seen_sec` trong ACK |
+| `RESOURCE_EXHAUSTED` rồi thử lại mãi | Đó là tín hiệu dừng, không phải lỗi tạm thời: bộ đệm phiên đã đầy vì tầng suy luận không theo kịp |
+| Kết nối bị đóng với `PROTOCOL_ERROR` | Pipeline nhiều request trên một kết nối. Mở thêm kết nối thay vì dồn vào một |
+| `NOT_FOUND` giữa một phiên đang chạy | Server buffer đã khởi động lại; phiên cũ không ghi tiếp được. Bắt đầu phiên mới — bản chép cũ vẫn soát lại được |
 
 ---
 
 ## Phụ lục A — tệp `.proto` tái dựng
 
 Dưới đây là hợp đồng ở dạng `.proto`, **tái dựng từ các struct chép tay trong
-`s2t_qt/proto/`** (số hiệu trường và kiểu dữ liệu lấy nguyên văn từ đó). Nó đủ
+`shared/proto/`** (số hiệu trường và kiểu dữ liệu lấy nguyên văn từ đó). Nó đủ
 để `protoc` sinh mã cho một client mới.
 
-Tệp gốc có thẩm quyền cao nhất vẫn là `ui_client/asr_session.proto` và
-`ui_client/speaker_registry.proto` trong kho `s2t-dgpu`. Nếu hai bên khác nhau
-thì tệp gốc đúng — và đó cũng là dấu hiệu tài liệu này cần được cập nhật.
+Với hai tệp đầu, bản gốc có thẩm quyền cao nhất vẫn là
+`ui_client/asr_session.proto` và `ui_client/speaker_registry.proto` trong kho
+`s2t-dgpu`. Nếu hai bên khác nhau thì tệp gốc đúng — và đó cũng là dấu hiệu tài
+liệu này cần được cập nhật.
+
+Tệp thứ ba, `buffer_admin.proto`, **không có bản gốc ở nơi khác**: nó mô tả
+Server buffer, và `shared/proto/BufferAdmin.cpp` chính là bản có thẩm quyền.
 
 ```protobuf
 // asr_session.proto
@@ -1498,16 +1766,116 @@ message GetSpeakerRegistryStatusResponse {
 
 ---
 
+```protobuf
+// buffer_admin.proto
+//
+// Chỉ s2t-qt-server cài đặt service này.  Nó mô tả bản thân Server buffer -
+// hàng đợi audio đang sâu bao nhiêu, tầng suy luận có tới được không - chứ
+// không mô tả tầng suy luận.
+syntax = "proto3";
+package s2t.buffer.v1;
+
+service BufferAdminService {
+  rpc ping                   (PingRequest)           returns (PingResponse);
+  rpc get_buffer_status      (BufferStatusRequest)   returns (BufferStatusResponse);
+  rpc list_buffered_sessions (BufferSessionsRequest) returns (BufferSessionsResponse);
+}
+
+message PingRequest {
+  // Unix giây theo đồng hồ của người gọi; được trả lại nguyên vẹn.
+  double client_ts = 1;
+}
+
+message PingResponse {
+  double client_ts      = 1;
+  double server_ts      = 2;
+  string server_version = 3;
+  // Server buffer hiện có tới được tầng suy luận không.  false không phải là
+  // lỗi: audio vẫn đang được nhận và xếp hàng.
+  bool   upstream_ready = 4;
+}
+
+message UpstreamStatus {
+  string target                = 1;
+  bool   reachable             = 2;
+  double latency_ms            = 3;
+  string detail                = 4;
+  double checked_at            = 5;
+  uint64 consecutive_failures  = 6;
+}
+
+message BufferedSession {
+  string session_id        = 1;
+  string client            = 2;
+  string title             = 3;
+  double started_at        = 4;
+  double updated_at        = 5;
+  bool   running           = 6;
+  uint64 accepted_packets  = 7;
+  uint64 accepted_bytes    = 8;
+  uint64 forwarded_packets = 9;
+  uint64 forwarded_bytes   = 10;
+  uint64 pending_packets   = 11;
+  uint64 pending_bytes     = 12;
+  uint64 spooled_bytes     = 13;
+  uint64 dropped_packets   = 14;
+  uint64 retries           = 15;
+  double lag_sec           = 16;
+  double forward_p50_ms    = 17;
+  double forward_p95_ms    = 18;
+  string last_error        = 19;
+  double last_error_at     = 20;
+  uint64 state_polls       = 21;
+  double state_age_sec     = 22;
+  uint64 state_readers     = 23;
+}
+
+message BufferStatusRequest {
+  // Rỗng nghĩa là mọi phiên.
+  string session_id = 1;
+}
+
+message BufferStatusResponse {
+  string                   server_version       = 1;
+  double                   uptime_sec           = 2;
+  UpstreamStatus           upstream             = 3;
+  uint32                   active_connections   = 4;
+  uint64                   total_connections    = 5;
+  uint64                   total_calls          = 6;
+  uint64                   rejected_calls       = 7;
+  uint64                   queue_capacity_bytes = 8;
+  uint64                   queue_used_bytes     = 9;
+  string                   spool_dir            = 10;
+  bool                     spool_enabled        = 11;
+  repeated BufferedSession sessions             = 12;
+}
+
+message BufferSessionsRequest {
+  uint32 limit             = 1;
+  bool   include_finished  = 2;
+}
+
+message BufferSessionsResponse {
+  repeated BufferedSession sessions = 1;
+}
+```
+
+---
+
 ## Phụ lục B — nơi đọc mã nguồn tham chiếu
 
 | Cần biết | Đọc tệp |
 |---|---|
-| Đường method của từng RPC | `grpc/AsrClient.cpp` |
-| Header, khung gRPC, mã lỗi | `grpc/GrpcChannel.cpp` |
-| HTTP/2 và HPACK | `grpc/Http2Client.cpp`, `grpc/Hpack.cpp` |
-| Số hiệu trường của mọi thông điệp | `proto/AsrSession.cpp`, `proto/SpeakerRegistry.cpp` |
-| Bộ mã hoá/giải mã proto3 | `proto/ProtoWire.cpp` |
-| Vòng đẩy audio, `seq`, chính sách thử lại | `core/SessionWorker.cpp` |
-| Vòng poll trạng thái | `core/StatePoller.cpp` |
-| Cách dựng `config_json` | `core/SessionWorker.cpp` — `buildConfigJson()` |
+| Đường method của từng RPC | `shared/grpc/Methods.h` — một chỗ duy nhất, dùng chung cho cả hai bên |
+| Header, khung gRPC, mã lỗi (bên gọi) | `shared/grpc/GrpcChannel.cpp` |
+| Header, khung gRPC, mã lỗi (bên nhận) | `shared/grpc/GrpcServer.cpp` |
+| HTTP/2 và HPACK | `shared/grpc/Http2Client.cpp`, `shared/grpc/Http2Server.cpp`, `shared/grpc/Hpack.cpp` |
+| Số hiệu trường của mọi thông điệp | `shared/proto/AsrSession.cpp`, `SpeakerRegistry.cpp`, `BufferAdmin.cpp` |
+| Bộ mã hoá/giải mã proto3 | `shared/proto/ProtoWire.cpp` |
+| RPC nào có đệm, RPC nào chuyển tiếp | `s2t-qt-server/BufferService.cpp` |
+| Hàng đợi, `seq`, rào chắn drain, phát lại ACK | `s2t-qt-server/SessionBuffer.cpp` |
+| Vòng đẩy audio phía client và chính sách thử lại | `s2t-qt-client/core/SessionWorker.cpp` |
+| Vòng poll trạng thái phía client | `s2t-qt-client/core/StatePoller.cpp` |
+| Cách dựng `config_json` | `s2t-qt-client/core/SessionWorker.cpp` — `buildConfigJson()` |
+| Một client tham chiếu chạy được, dùng làm khuôn | `s2t-qt-server/ServerSelfTest.cpp` — hàm `chain()` chạy trọn một phiên qua bộ đệm |
 | Server giả để thử | `tools/mock_adapter.js` |

@@ -1,0 +1,95 @@
+// Configuration for the Server buffer.
+//
+// A service, not a desktop app, so this is an INI file plus command-line
+// overrides rather than QSettings in the registry: the file can be reviewed,
+// diffed and put under configuration management, and the same binary can be
+// run twice on one host against two upstreams without either instance
+// rewriting the other's settings.
+//
+// Every key can be overridden on the command line, and the command line always
+// wins - a value typed by an operator right now outranks one saved earlier.
+#ifndef SERVERCONFIG_H
+#define SERVERCONFIG_H
+
+#include "core/Logger.h"
+
+#include <QString>
+#include <QStringList>
+
+// Reported over BufferAdminService/ping so a client can say what it is talking
+// to without an out-of-band question.
+#define S2T_SERVER_VERSION "1.0"
+
+struct ServerConfig
+{
+    // ---- listening side (what s2t-qt-client connects to) -------------------
+    QString listenAddress = QStringLiteral("0.0.0.0");
+    quint16 listenPort = 8800;
+    // Bearer token clients must present.  Empty accepts everyone, which is
+    // logged as a warning at startup rather than left to be discovered.
+    QString listenToken;
+    int maxConnections = 128;
+    // A client RPC lane can genuinely be idle for the length of a meeting, so
+    // this is deliberately long.
+    int idleTimeoutMs = 300000;
+
+    // ---- upstream side (the inference tier) --------------------------------
+    // grpc_session_adapter.py in front of Triton.  The Server buffer is the
+    // only thing that talks to it now.
+    QString upstreamTarget = QStringLiteral("192.168.1.47:8700");
+    QString upstreamToken;
+    // Channels kept open for relayed, request-scoped RPCs (review, audio,
+    // edit, enrolment, trace).  The audio path and the live-state poll are
+    // deliberately NOT in this pool - each session owns dedicated channels for
+    // those, so a slow review query can never sit in front of an audio packet.
+    int upstreamLanes = 4;
+    int upstreamTimeoutMs = 30000;
+    // How often the upstream reachability probe runs when nothing else is
+    // talking to it.  Backs the "upstream_ready" flag in ping.
+    int upstreamProbeMs = 5000;
+
+    // ---- buffering ---------------------------------------------------------
+    // How much audio one session may hold waiting for the pipeline before
+    // push_audio starts refusing.  Refusing is the point: an unbounded buffer
+    // turns a stalled pipeline into an out-of-memory kill, and the client
+    // already knows how to stop loudly.
+    double bufferSeconds = 300.0;
+    // Where audio that could not be forwarded is written while the upstream is
+    // unreachable.  Empty disables spooling, and then a full buffer is simply
+    // a full buffer.
+    QString spoolDir;
+    // Cache lifetime for get_live_state.  Below this age every client watching
+    // a meeting is answered from one upstream poll; above it, the first caller
+    // refreshes and the rest wait for that same refresh.
+    int statePollMs = 200;
+    // A stopped session is kept this long so a client can still read its final
+    // state and buffer counters before it is forgotten.
+    int finishedRetentionSec = 900;
+
+    // ---- logging -----------------------------------------------------------
+    applog::Mode logMode = applog::Mode::Debug;
+    applog::Level logLevel = applog::Level::Info;
+
+    // Where it was loaded from; empty when nothing was read.
+    QString sourcePath;
+
+    // Reads the INI file if it exists, then applies argv.  Returns false with
+    // *error set only for an argument that is wrong - a missing config file is
+    // not an error, because every value here has a working default.
+    bool load(const QStringList &args, QString *error);
+    void save(const QString &path, QString *error) const;
+
+    // The default file: /etc/s2t-qt-server.conf on Linux, next to the binary
+    // on Windows.  Named here rather than in main() so --write-config and the
+    // loader cannot disagree about it.
+    static QString defaultPath();
+
+    // One block, for the startup log and for --show-config.  The tokens are
+    // reduced to "đã đặt"/"chưa đặt" - a service log is read by more people
+    // than the config file is.
+    QStringList describe() const;
+
+    qint64 bufferBytesPerSession(int sampleRate, int channels) const;
+};
+
+#endif // SERVERCONFIG_H

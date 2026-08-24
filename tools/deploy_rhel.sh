@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copy this source tree to the RHEL host and build it there.
+# Copy this source tree to the RHEL host and build both halves there.
 #
 #   tools/deploy_rhel.sh            # copy + build
 #   tools/deploy_rhel.sh copy       # copy only
@@ -58,7 +58,8 @@ build() {
         "chmod +x ~/$DEST/tools/*.sh && OUT=~/$DEST/build-rhel ~/$DEST/tools/build_rhel9.sh"
     echo
     echo "==> selftest (không cần màn hình, không cần mạng)"
-    ssh -p "$PORT" "$USER_@$HOST" "~/$DEST/build-rhel/s2t_qt --selftest"
+    ssh -p "$PORT" "$USER_@$HOST" "~/$DEST/build-rhel/s2t-qt-server/s2t-qt-server --selftest"
+    ssh -p "$PORT" "$USER_@$HOST" "~/$DEST/build-rhel/s2t-qt-client/s2t-qt-client --selftest"
 }
 
 case $step in

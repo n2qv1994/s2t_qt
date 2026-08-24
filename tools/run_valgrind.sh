@@ -2,25 +2,26 @@
 #
 # Memcheck wrapper for the RHEL 9 host (valgrind 3.26).
 #
-# The default target is --selftest, and that is deliberate: the self-test
-# drives exactly the hand-written code that has no library standing behind it
-# - the proto3 codec, HPACK with its dynamic table, and the HTTP/2 framing -
-# with no GUI, no device and no network.  A leak or an invalid read there is
-# this project's own bug, which is the only kind of finding worth chasing.
+# The default target is s2t-qt-server --selftest, and that is deliberate: the
+# server's self-test drives exactly the hand-written code that has no library
+# standing behind it - the proto3 codec in both directions, HPACK with its
+# dynamic table, HTTP/2 framing on both sides of a real socket, and a whole
+# session through the buffer - with no GUI and no device.  A leak or an invalid
+# read there is this project's own bug, which is the only kind worth chasing.
 #
 #   tools/run_valgrind.sh                          # codec + HPACK
-#   tools/run_valgrind.sh --selftest-net 127.0.0.1:18700
-#   BIN=./s2t_qt tools/run_valgrind.sh --probe 192.168.1.47:8700 --token XXX
+#   BIN=./s2t-qt-client/s2t-qt-client tools/run_valgrind.sh --selftest-net 127.0.0.1:18700
+#   tools/run_valgrind.sh --probe 192.168.1.47:8700 --token XXX
 #
 # Build the binary with debug info first, or every frame reads as "???":
-#   qmake6 CONFIG+=memcheck ../s2t_qt.pro && make -j"$(nproc)"
+#   tools/build_rhel9.sh memcheck
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-bin=${BIN:-./s2t_qt}
+bin=${BIN:-./s2t-qt-server/s2t-qt-server}
 
 if [[ ! -x $bin ]]; then
-    echo "không tìm thấy binary: $bin (đặt BIN=... hoặc chạy trong thư mục build)" >&2
+    echo "không tìm thấy binary: $bin (đặt BIN=... hoặc chạy trong thư mục build-rhel)" >&2
     exit 2
 fi
 if ! command -v valgrind >/dev/null; then

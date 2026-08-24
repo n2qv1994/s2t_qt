@@ -1,0 +1,49 @@
+# systemd unit cho s2t-qt-server (Server buffer).
+#
+#   sudo install -m 644 tools/s2t-qt-server.service /etc/systemd/system/
+#   sudo install -m 600 tools/s2t-qt-server.conf.sample /etc/s2t-qt-server.conf
+#   sudo useradd --system --no-create-home --shell /sbin/nologin s2t
+#   sudo systemctl daemon-reload && sudo systemctl enable --now s2t-qt-server
+#   journalctl -u s2t-qt-server -f
+#
+# Binary mặc định ở /usr/local/bin, đúng chỗ `make install` của
+# s2t-qt-server.pro đặt vào.
+
+[Unit]
+Description=s2t-qt-server (Server buffer cho hệ thống ASR + Diarization)
+Documentation=file:/usr/local/share/doc/s2t-qt/luong-hoat-dong.md
+# Chỉ là "sau khi có mạng", không phải "phụ thuộc": server vẫn khởi động được
+# khi tầng suy luận chưa lên, và audio vẫn được nhận rồi xếp hàng - đó là điểm
+# tồn tại của nó.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=s2t
+Group=s2t
+ExecStart=/usr/local/bin/s2t-qt-server --config /etc/s2t-qt-server.conf
+# SIGTERM là đường tắt sạch sẽ: server dừng các luồng chuyển tiếp trước, để
+# client nào đang chờ drain được trả lời thay vì bị cắt giữa chừng.
+KillSignal=SIGTERM
+# Một cuộc họp đang drain có thể mất vài chục giây để đẩy nốt hàng đợi lên
+# tầng suy luận.  Đừng cắt ngắn hơn thế.
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=5
+
+# Nhật ký ở mode=debug đi thẳng ra stdout, journald lo phần còn lại.
+StandardOutput=journal
+StandardError=journal
+
+# Server không cần gì ngoài một socket và (nếu bật spool) một thư mục ghi.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Bỏ chú thích nếu bật buffer/spool_dir - đây là thư mục duy nhất nó ghi vào.
+# ReadWritePaths=/var/lib/s2t-qt-server
+# StateDirectory=s2t-qt-server
+
+[Install]
+WantedBy=multi-user.target

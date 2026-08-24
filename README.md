@@ -1,274 +1,339 @@
-# s2t_qt — native Qt/C++ client for the S2T pipeline
+# s2t_qt — Server buffer + client Qt/C++ cho hệ thống S2T
 
-A Qt 6 Widgets desktop application that replaces the two client-side pieces of
-`s2t-dgpu`:
+Hai chương trình Qt 6, một cây nguồn:
 
-| Replaced | Was | Now |
+| Dự án | Là gì | Cần gì |
 |---|---|---|
-| `ui_client/debug_ui_bridge.py` | Python HTTP bridge: mic capture, packetisation, retry, local JSON API | in-process C++ workers |
-| `ui_client/live_ui.html` + `enroll_ui.html` + `pipeline_trace_ui.html` + `pipeline_evidence_ui.html` | browser polling that bridge | native widgets |
-
-The browser and the local HTTP hop are gone. This app speaks **gRPC directly
-to the Linux adapter** (`grpc_session_adapter.py`, default `:8700`), which is
-one fewer process, one fewer port and one fewer serialisation boundary on the
-live audio path.
-
-Everything server-side is unchanged: the Triton GPU pipeline, the adapter, the
-CAM++ sidecar and both `.proto` contracts are exactly as they were.
+| **`s2t-qt-server`** | *Server buffer* trong sơ đồ luồng tổng thể (`docs/slide.pdf`). Nhận audio từ các client qua gRPC, đệm lại, rồi đẩy lên tầng suy luận. Không có giao diện. | Qt Core + Network |
+| **`s2t-qt-client`** | Giao diện điều hành viên: thu microphone, xem transcript trực tiếp, soát/sửa, đăng ký giọng. Chỉ nói chuyện với Server buffer. | Qt Widgets + Multimedia + Network |
 
 ```
-s2t_qt (this app)
-  │ unary gRPC/protobuf + Bearer token
-  ▼
-grpc_session_adapter.py (:8700)
-  │ Triton gRPC
-  ▼
-Triton (:8011)
+Windows/RHEL client        Server buffer            tầng suy luận
+┌────────────────┐        ┌──────────────┐        ┌──────────────────┐
+│ s2t-qt-client  │ gRPC   │ s2t-qt-server│ gRPC   │ grpc_session_    │  Triton
+│ mic, UI, sửa   │──────► │ hàng đợi     │──────► │ adapter.py :8700 │─────────►
+│                │ :8800  │ + chuyển tiếp│        │                  │ Denoise→VAD
+└────────────────┘        └──────────────┘        └──────────────────┘ →ASR→Diar
+                                                                        →Verify
 ```
 
-## Documentation
+Trước đây `s2t_qt` là một chương trình duy nhất nối thẳng lên adapter. Việc
+tách đôi đặt hàng đợi audio ra khỏi máy trạm, và đó là toàn bộ lý do:
 
-Three documents under `docs/`, in Vietnamese because that is the language of
-everyone who reads them:
+- **Sự cố mạng ở máy trạm không còn làm mất tiếng.** Client được trả lời ngay
+  khi gói audio nằm chắc chắn trong bộ đệm của server; từ đó trở đi việc thử
+  lại là chuyện của server, ở một chặng gần tầng suy luận hơn.
+- **Tầng suy luận sập không làm dừng cuộc họp.** Audio vẫn được nhận và xếp
+  hàng (mặc định 300 giây mỗi phiên). Đèn báo trên client chuyển vàng —
+  *đang đệm* — chứ không đỏ.
+- **Nhiều người xem một cuộc họp chỉ tốn một lần hỏi.** `get_live_state` được
+  đệm trong 200 ms, nên mười client cùng theo dõi vẫn chỉ là một lần đọc
+  trạng thái trên tầng suy luận.
+- **Máy trạm chỉ cần mở đúng một cổng ra ngoài**, tới Server buffer. Địa chỉ
+  và token của tầng suy luận không còn nằm trên máy của điều hành viên.
 
-| Document | Audience | Contents |
+Phía tầng suy luận không đổi một dòng nào: Triton, adapter, sidecar CAM++ và
+hai tệp `.proto` vẫn nguyên như cũ.
+
+## Tài liệu
+
+Ba tài liệu tiếng Việt trong `docs/`:
+
+| Tài liệu | Cho ai | Nội dung |
 |---|---|---|
-| [`docs/huong-dan-su-dung.md`](docs/huong-dan-su-dung.md) | operators | configuration, recording a meeting, review and editing, enrolment, troubleshooting |
-| [`docs/luong-hoat-dong.md`](docs/luong-hoat-dong.md) | maintainers of this repo | threads, channels, session lifecycle, protocol layer, the do-not-break list |
-| [`docs/danh-sach-api.md`](docs/danh-sach-api.md) | **integrators writing another client** | all 17 RPCs with every field number, error and retry policy, audio format, `config_json`, worked Python and C++ examples, and a reconstructed `.proto` |
+| [`docs/huong-dan-su-dung.md`](docs/huong-dan-su-dung.md) | điều hành viên | cấu hình, ghi cuộc họp, soát/sửa, đăng ký giọng, xử lý sự cố |
+| [`docs/luong-hoat-dong.md`](docs/luong-hoat-dong.md) | người bảo trì mã nguồn | luồng, kênh, vòng đời phiên qua cả hai tiến trình, tầng giao thức, danh sách ràng buộc không được phá |
+| [`docs/danh-sach-api.md`](docs/danh-sach-api.md) | **người viết client khác** | cả 20 RPC với từng số hiệu trường, chính sách lỗi/thử lại, định dạng audio, `config_json`, ví dụ Python và C++, và tệp `.proto` tái dựng |
 
-The API document is the one thing here read from outside this repository. Its
-field numbers are transcribed from `proto/AsrSession.cpp` and
-`proto/SpeakerRegistry.cpp`, so any change to those files has to be mirrored
-there in the same commit — the same rule that already binds `proto/` to the two
-`.proto` files in `s2t-dgpu`.
+`docs/slide.pdf` là bản mô tả kiến trúc gốc mà việc tách đôi này bám theo.
 
-## Why the protocol stack is hand written
+Tài liệu API là thứ duy nhất ở đây được đọc từ ngoài repo. Số hiệu trường
+trong đó được chép tay từ `shared/proto/*.cpp`, nên **mọi thay đổi dưới
+`shared/proto/` phải được sửa kèm trong cùng một commit** — đúng quy tắc đã
+ràng `shared/proto/` với hai tệp `.proto` bên `s2t-dgpu`.
 
-The Qt kit on the target machine ships **no Qt::Grpc, no Qt::Protobuf, no
-protoc, no vcpkg**. Rather than add a build-time dependency chain to a
-deployed workstation, `proto/` and `grpc/` implement what is needed directly:
+## Bố cục cây nguồn
 
-| Directory | Contents |
+```
+s2t_qt.pro              TEMPLATE = subdirs, build cả hai
+shared/                 dùng chung, nạp bằng include() chứ không phải thư viện tĩnh
+  shared.pri            proto3 + HPACK + HTTP/2 client + nhật ký
+  server.pri            shared.pri + HTTP/2 server + gRPC server
+  proto/                bộ mã proto3 và bản mirror C++ của ba service
+  grpc/                 HPACK, HTTP/2 (cả hai chiều), gRPC (cả hai chiều)
+  core/Logger.*         nhật ký, chung cho cả hai
+s2t-qt-server/          Server buffer
+s2t-qt-client/          giao diện điều hành viên
+tools/                  build/deploy, mock adapter, valgrind, unit systemd
+```
+
+`shared/` được nạp bằng `include(...pri)` vào từng `.pro` chứ không build
+thành thư viện tĩnh: hai kit (MinGW trên Windows, gcc trên RHEL 9) khi đó
+không phải thống nhất thứ tự link, và không có bước build nào phải nhớ. Đổi
+lại, phần dùng chung được biên dịch hai lần — với ~5000 dòng thì đó là cái giá
+không đáng bàn.
+
+## Vì sao tầng giao thức vẫn viết tay
+
+Kit Qt trên máy đích **không có Qt::Grpc, không có Qt::Protobuf, không có
+protoc, không có vcpkg**. Thay vì thêm một chuỗi phụ thuộc build vào máy đã
+triển khai, `shared/proto/` và `shared/grpc/` tự cài đặt phần cần dùng:
+
+| Thư mục | Nội dung |
 |---|---|
-| `proto/` | proto3 wire codec, plus C++ mirrors of `asr_session.proto` and `speaker_registry.proto` |
-| `grpc/` | HPACK (RFC 7541) with Huffman + dynamic table, a blocking HTTP/2 client, gRPC unary calls, and a typed façade over every RPC |
+| `shared/proto/` | bộ mã proto3 hai chiều, cùng bản mirror C++ của `asr_session.proto`, `speaker_registry.proto` và `buffer_admin.proto` |
+| `shared/grpc/` | HPACK (RFC 7541) có Huffman và bảng động; HTTP/2 **client** và **server**, cả hai đều chặn và mỗi kết nối một luồng; gRPC unary hai chiều |
 
-Total external dependencies: **none beyond Qt itself.**
+Tổng phụ thuộc ngoài: **không có gì ngoài Qt.**
 
-That answer survives the move to RHEL unchanged: `qt6-qtgrpc` and
-`qt6-qtprotobuf` are not in RHEL 9 AppStream either, so the alternative there
-would have been building a gRPC C++ stack from source on a production host.
-`dnf install qt6-qtbase-devel qt6-qtmultimedia-devel` is the whole dependency
-list.
+Việc tách đôi làm câu trả lời đó mạnh thêm chứ không yếu đi: nửa server không
+cần Qt Multimedia lẫn Qt Widgets, nên một máy chủ không giao diện chỉ cần
+`qt6-qtbase-devel`.
 
-## Threading
+## Luồng và kênh
 
-One concern per thread, each with its own gRPC channel — the same separation
-the Python bridge used, for the same reason: a multi-megabyte state
-serialisation must never queue in front of a 160 ms audio packet.
+Nguyên tắc không đổi ở cả hai bên: **một mối lo một luồng, một kênh gRPC một
+luồng**, để việc tuần tự hoá một khối trạng thái nhiều megabyte không bao giờ
+xếp trước một gói audio 160 ms.
 
-| Thread | Owns | Job |
+`s2t-qt-client`
+
+| Luồng | Sở hữu | Việc |
 |---|---|---|
-| GUI | `SessionController`, all widgets | render, dispatch |
-| `audio-capture` | `QAudioSource` | 20 ms buffers → bounded `AudioQueue` |
-| session worker | one channel | `start_session` → `push_audio` loop → `stop_session` |
-| state poller | one channel | `get_live_state` every 200 ms |
-| `rpc-lane-0..2` | one channel each | review, audio, edit, enrolment, trace |
+| GUI | `SessionController`, mọi widget | vẽ, điều phối |
+| `audio-capture` | `QAudioSource` | đệm 20 ms → `AudioQueue` có chặn |
+| session worker | một kênh | `start_session` → vòng `push_audio` → `stop_session` |
+| state poller | một kênh | `get_live_state` mỗi 200 ms |
+| `rpc-lane-0..2` | mỗi luồng một kênh | soát, audio, sửa, đăng ký, trace |
 
-## Behaviour carried over deliberately
+`s2t-qt-server`
 
-These are not incidental; each exists because of a specific failure it
-prevents, and the reasoning is in the comment at each site.
+| Luồng | Sở hữu | Việc |
+|---|---|---|
+| main | `QTcpServer`, `BufferHub` | nhận kết nối, dọn phiên đã hết hạn |
+| `http2-conn-N` | một socket client | đọc khung, gọi handler, ghi trả lời |
+| `forward-<phiên>` | một kênh lên tầng suy luận | rút hàng đợi, `push_audio`, rồi `stop_session` |
+| `state-<phiên>` | một kênh riêng | làm mới bộ đệm `get_live_state` |
+| `relay-lane-0..N` | mỗi luồng một kênh | mọi RPC chuyển tiếp |
+| `upstream-probe` | một kênh | kiểm tra tầng suy luận còn sống không |
 
-- **The device is opened before the session is created.** A driver failure
-  reads as "cannot record", instead of leaving an empty meeting open on the
-  server with nothing ever arriving for it.
-- **`seq` idempotency + transport-only retry.** Only `UNAVAILABLE`,
-  `DEADLINE_EXCEEDED` and `CANCELLED` are retried. `INTERNAL` is not: the
-  adapter returns it precisely when the server may already have consumed the
-  audio, so a blind retry duplicates words.
-- **Two queues reported separately.** `ACK` means *durably spooled*, never
-  *inferred*. "Hàng đợi máy này" and "Hàng đợi server AI" are different
-  numbers and are shown as such.
-- **Pause discards at capture time**, so speech spoken while paused is never
-  delivered later as if it had been live.
-- **Device identity is re-checked on a timer.** An OS can re-use an audio
-  endpoint after an unplug — a WASAPI endpoint id on Windows, a PipeWire or
-  PulseAudio node name on Linux — and a stale endpoint can keep a stream
-  "running" while delivering silence, so name, presence *and* byte progress
-  are all checked. A lost device pauses the session and waits; it never ends
-  it and never inserts silence.
-- **Tri-state `expected_speakers`.** Key absent = match the whole registry;
-  explicit empty list = assign no registered name. The start dialog makes the
-  difference explicit rather than implying it.
-- **Commit boundary is honoured client-side.** A word past it is shown
-  read-only, mirroring the server's own `edit_range_not_committed` rule,
-  instead of letting the operator type into a rejection.
-- **Optimistic concurrency on every edit** via `base_revision`.
-- **Operator name is never remembered between runs.** It is recorded as the
-  person answerable for a change; a field that refills itself would file one
-  person's work under another's.
-- **Denoise A/B restore is reported honestly.** The host-control tool cannot
-  read the current state back, so on a fresh start the prior state is genuinely
-  unknown and the dashboard says so instead of claiming a restore.
-- **Span stitching refuses rather than truncates.** Over 200 spans or 300 s is
-  a hard refusal, and a `..._truncated` payload flag is surfaced as a warning,
-  because playing back a third less audio than the model received while
-  labelling it "the real input" is worse than not playing it.
+Số luồng của server tăng theo *số điều hành viên và số cuộc họp*, không theo
+số request — mọi RPC ở đây đều là unary.
 
-## One bug fixed rather than ported
+## Những hành vi được giữ lại có chủ ý
 
-`live_ui.html` deleted a superseded `sid:N` lane once verification produced a
-real identity, then immediately re-created it from `state.speaker_ids` on the
-next loop — so an identified speaker appeared twice, once under their name and
-once as an empty `speaker_N` row. `TranscriptModel::rebuild()` skips
-re-creating a slot that verification has superseded. This is what the
-`two speaker lanes built` assertion in `--selftest-net` covers.
+Mỗi mục dưới đây tồn tại vì một sự cố cụ thể, và lý do nằm ngay tại chỗ trong
+mã nguồn. Việc tách đôi **di chuyển** vài mục sang server chứ không bỏ mục nào.
+
+- **Mở thiết bị trước khi tạo phiên.** Lỗi driver đọc thành "không ghi được",
+  thay vì để lại một cuộc họp rỗng trên server mà chẳng bao giờ có gì tới.
+- **`seq` bất biến + chỉ thử lại lỗi vận chuyển.** Chỉ `UNAVAILABLE`,
+  `DEADLINE_EXCEEDED` và `CANCELLED` được thử lại. `INTERNAL` thì không: đó
+  chính là mã adapter trả về khi server *có thể* đã tiêu thụ audio, nên thử
+  lại mù sẽ nhân đôi từ. **Quy tắc này giờ chạy ở cả hai chặng** — client với
+  buffer, và buffer với tầng suy luận.
+- **Hai hàng đợi báo riêng.** `ACK` nghĩa là *đã nằm chắc trong bộ đệm*, không
+  bao giờ là *suy ra*. "Hàng đợi máy này" và "Hàng đợi server AI" là hai con
+  số khác nhau và được hiện như vậy. Sau khi tách, con số thứ hai đọc thẳng từ
+  `sourceSeenSec` của tầng suy luận, nên nó tính cả phần đang nằm trong bộ đệm.
+- **Rào chắn drain trước `stop_session`.** `stop_session` chỉ được gọi lên
+  tầng suy luận sau khi gói cuối cùng đã đi; điều đó được bảo đảm bằng cách
+  giữ cả hai trên **cùng một luồng** của `SessionBuffer`.
+- **Tạm dừng thì bỏ audio ngay lúc thu**, để lời nói lúc đang tạm dừng không
+  bao giờ được gửi muộn như thể nó là trực tiếp.
+- **Nhận dạng thiết bị được kiểm tra lại theo chu kỳ.** Hệ điều hành có thể
+  tái sử dụng một endpoint audio sau khi rút, và một endpoint cũ vẫn có thể
+  giữ luồng "đang chạy" trong khi chỉ đưa ra im lặng.
+- **`expected_speakers` ba trạng thái.** Không có khoá = khớp toàn bộ registry;
+  danh sách rỗng tường minh = không gán tên đã đăng ký nào.
+- **Ranh giới commit được tôn trọng ở phía client.** Từ nằm sau ranh giới hiện
+  ở dạng chỉ đọc.
+- **Đồng thuận lạc quan cho mọi lần sửa** qua `base_revision`.
+- **Tên người thao tác không bao giờ được nhớ giữa các lần chạy.**
+- **Ghép đoạn thì từ chối chứ không cắt bớt.** Quá 200 đoạn hoặc 300 giây là
+  từ chối thẳng.
+- **Bộ đệm có giới hạn thì dừng ồn ào.** Đầy bộ đệm phiên là
+  `RESOURCE_EXHAUSTED`, không phải im lặng bỏ gói: một lỗ trong audio là thứ
+  không tầng nào phía sau phát hiện được.
 
 ## Build
 
-Two supported toolchains. The sources are the same on both; the only
-platform-specific code is the console shim in `main.cpp`, the display check
-beside it, and the file filter for the reSpeaker host-control tool.
+Cùng một cây nguồn cho hai kit. Phần duy nhất phụ thuộc nền tảng nằm ở
+`s2t-qt-client`: lớp đệm console trong `main.cpp`, phép kiểm tra màn hình bên
+cạnh nó, và bộ lọc tệp cho công cụ điều khiển reSpeaker.
 
-**RHEL 9** (target: 9.8, glibc 2.34, gcc 11.5, x86_64):
+**RHEL 9** (đích đã kiểm: 9.8, glibc 2.34, gcc 11.5, x86_64):
 
+```bash
+# chỉ server (máy không giao diện):
+sudo dnf install gcc-c++ make qt6-qtbase-devel
+tools/build_rhel9.sh server
+
+# thêm client:
+sudo dnf install qt6-qtmultimedia-devel qt6-qtbase-gui
+tools/build_rhel9.sh                      # cả hai, vào ../build-rhel
 ```
-sudo dnf install gcc-c++ make qt6-qtbase-devel qt6-qtmultimedia-devel qt6-qtbase-gui
-tools/build_rhel9.sh                 # → ../build-rhel/s2t_qt
-```
 
-The script exists for one reason: RHEL 9 carries Qt 5 and Qt 6 side by side
-and plain `qmake` is the Qt 5 one, which cannot build this app. It locates a
-Qt 6 `qmake` (`qmake6`, `qmake-qt6`, `/usr/lib64/qt6/bin/qmake`, or `$QMAKE6`)
-and verifies the version before using it. By hand it is:
+Script tồn tại vì một lý do: RHEL 9 để Qt 5 và Qt 6 cạnh nhau và `qmake` trần
+ở đó là của Qt 5. Nó tìm một `qmake` của Qt 6 (`qmake6`, `qmake-qt6`,
+`/usr/lib64/qt6/bin/qmake`, hoặc `$QMAKE6`) và kiểm tra phiên bản trước khi
+dùng. Làm tay thì là:
 
-```
+```bash
 mkdir ../build-rhel && cd ../build-rhel
-qmake6 ../s2t_qt/s2t_qt.pro
-make -j"$(nproc)"
+qmake6 ../s2t_qt/s2t_qt.pro && make -j"$(nproc)"
 ```
 
-`-std=c++17` is all this needs, so gcc 11.5 is comfortably enough. Optional
-at runtime: `nodejs` (the mock adapter used by `--selftest-net`),
-`ffmpeg-free` (`.m4a` replay), `valgrind` and `gdb`.
+`-std=c++17` là đủ, nên gcc 11.5 thoải mái.
 
-**Windows** (the deployed workstation kit):
+**Windows** (kit máy trạm đã triển khai):
 
 ```
 qmake s2t_qt.pro
 mingw32-make -j8
 ```
 
-Qt 6.11.2 MinGW 64-bit, GCC 13.1. Qt 6.2 is the floor on either platform —
-`s2t_qt.pro` checks the version and the presence of Qt Multimedia up front and
-stops with a named reason rather than a page of missing headers. `-Wall
--Wextra` is set in the `.pro` rather than left to the kit, and the tree builds
-clean under it.
+Qt 6.11.2 MinGW 64-bit, GCC 13.1. Qt 6.2 là sàn trên cả hai nền tảng — mỗi
+`.pro` kiểm tra phiên bản trước và dừng với lý do có tên, thay vì để lộ ra một
+trang lỗi thiếu header. `-Wall -Wextra` được đặt trong `.pro` chứ không phó
+mặc cho kit, và cây nguồn build sạch dưới nó trên cả hai kit.
 
-## Self-tests
+## Chạy Server buffer
 
-```
-s2t_qt --selftest                         # proto3 + HPACK, no network
-s2t_qt --selftest-net 127.0.0.1:18700     # end-to-end against the mock
-s2t_qt --probe 192.168.1.47:8700 --token <token>   # real adapter
-```
-
-`--selftest` checks the proto3 codec and HPACK against the **RFC 7541 C.4.1
-and C.6.1 reference vectors**, including Huffman decoding and dynamic-table
-indexing.
-
-`--selftest-net` runs against `tools/mock_adapter.js`, a dependency-free Node
-HTTP/2 server. Node's http2 is nghttp2, so it Huffman-encodes responses and
-uses its own HPACK dynamic table — which is the point: it proves the client
-interoperates with an independent implementation, not just with itself. It
-also returns a ~2 MB payload (forcing real `WINDOW_UPDATE` flow control),
-trailers-only error responses, and a percent-encoded Vietnamese
-`grpc-message`.
-
-```
-node tools/mock_adapter.js 18700
-s2t_qt --selftest-net 127.0.0.1:18700
+```bash
+s2t-qt-server --listen 0.0.0.0:8800 --token <token-client> \
+              --upstream 192.168.1.47:8700 --upstream-token <token-adapter>
+s2t-qt-server --help          # mọi tuỳ chọn
+s2t-qt-server --show-config   # cấu hình đã nạp, không khởi động
 ```
 
-`--probe` is also a field diagnostic: it answers "is the adapter reachable and
-is this token accepted" without starting a session.
+Hoặc bằng tệp cấu hình, cách nên dùng khi triển khai:
 
-## Memory checking and debugging on RHEL
-
-The RHEL host has gdb 16.3 and valgrind 3.26, and neither is much use against
-an `-O2` build with no frame pointers, so the build carries a mode for them:
-
+```bash
+sudo install -m 600 tools/s2t-qt-server.conf.sample /etc/s2t-qt-server.conf
+sudo install -m 644 tools/s2t-qt-server.service /etc/systemd/system/
+sudo systemctl enable --now s2t-qt-server
+journalctl -u s2t-qt-server -f
 ```
+
+Tệp cấu hình chứa hai token dạng chữ thường, nên để quyền `600`.
+`.gitignore` đã chặn tên `s2t-qt-server.conf` để một bản thật không lọt vào
+repo.
+
+## Self-test
+
+```bash
+s2t-qt-server --selftest         # bộ mã hai chiều + đóng khung + loopback + cả chuỗi
+s2t-qt-server --selftest-codec   # chỉ bộ mã, không mở socket
+s2t-qt-server --probe 192.168.1.47:8700 --token <token>
+
+s2t-qt-client --selftest                       # proto3 + HPACK
+s2t-qt-client --selftest-net 127.0.0.1:18700   # với tools/mock_adapter.js
+s2t-qt-client --probe 192.168.1.47:8800 --token <token>
+```
+
+`s2t-qt-server --selftest` là bài kiểm tra đáng giá nhất ở đây, vì nó chạy
+đúng phần mã không có thư viện nào đứng sau:
+
+1. **Bộ mã** — proto3 vòng tròn theo *cả hai chiều* (client ghi/server đọc và
+   ngược lại), đóng khung gRPC, và mã hoá phần trăm cho `grpc-message` tiếng
+   Việt.
+2. **Loopback** — dựng một `grpc::Server` thật trên cổng loopback rồi lấy
+   chính `Http2Client` đã có gọi vào: round trip, deadline, một trả lời vài
+   megabyte (ép chạy điều khiển luồng HTTP/2 thật), phương thức không tồn tại,
+   token sai, token thiếu.
+3. **Cả chuỗi** — một tầng suy luận giả, `BufferHub` và `BufferService` thật
+   đứng trước nó, và một client thật lái cả hai. Kiểm những thứ chỉ riêng bộ
+   đệm mới có thể làm sai: thứ tự gói, rào chắn drain trước `stop_session`,
+   phát lại ACK cho `seq` gửi lại, và bộ đệm trạng thái phục vụ nhiều người
+   đọc bằng một lần hỏi.
+
+`s2t-qt-client --selftest-net` chạy với `tools/mock_adapter.js`, một máy chủ
+HTTP/2 bằng Node không cần phụ thuộc. http2 của Node là nghttp2, nên nó mã hoá
+Huffman và dùng bảng động HPACK của riêng nó — đó chính là điểm cần: nó chứng
+minh client làm việc được với một cài đặt độc lập, chứ không chỉ với chính nó.
+
+## Kiểm tra tương thích với gRPC thật
+
+`tools/interop_check.py` làm điều mà không self-test nào làm được: cho **grpc
+C-core thật** (grpcio 1.80) gọi vào Server buffer tự viết. Client và server ở
+đây dùng chung một bản HPACK và một bộ mã proto3, nên chúng có thể đồng ý với
+nhau mà cả hai cùng sai; grpc C-core thì không đồng ý với ai cả.
+
+Nó cũng kiểm luôn rằng tệp `.proto` in trong `docs/danh-sach-api.md` là thật —
+các stub dùng ở đó được sinh ra từ chính khối văn bản đó bằng `protoc`. Xem
+phần chú thích đầu tệp để biết cách chạy. Máy RHEL có sẵn `python3 -m
+grpc_tools.protoc`; máy Windows thì không có protoc lẫn Python.
+
+Chạy lần gần nhất (2026-08-25, trên RHEL): 9/9 khẳng định đạt, bao gồm việc
+`grpc-message` tiếng Việt giải mã đúng và một mã trạng thái từ tầng suy luận đi
+xuyên qua bộ đệm về tới người gọi.
+
+## Kiểm tra bộ nhớ và gỡ lỗi trên RHEL
+
+Máy RHEL có gdb 16.3 và valgrind 3.26, và cả hai đều không được việc với bản
+build `-O2` không có frame pointer, nên build có sẵn một chế độ cho chúng:
+
+```bash
 tools/build_rhel9.sh memcheck        # -O1 -g3 -fno-omit-frame-pointer
-cd ../build-rhel && ../s2t_qt/tools/run_valgrind.sh
+cd ../build-rhel && ../s2t-qt/tools/run_valgrind.sh
 ```
 
-`run_valgrind.sh` defaults to `--selftest` on purpose. That mode drives
-exactly the code with no library standing behind it — the proto3 codec, HPACK
-with its dynamic table, HTTP/2 framing — with no GUI, no device and no
-network, so anything memcheck reports there is this project's own bug.
-`tools/run_valgrind.sh --selftest-net 127.0.0.1:18700` extends the same run
-over a real socket against the mock adapter.
+`run_valgrind.sh` mặc định chạy `s2t-qt-server --selftest` có chủ ý: chế độ đó
+lái đúng phần mã tự viết — bộ mã proto3 hai chiều, HPACK với bảng động, đóng
+khung HTTP/2 ở cả hai đầu một socket thật, và cả một phiên đi qua bộ đệm — mà
+không cần GUI, không cần thiết bị.
 
-`tools/valgrind.supp` suppresses only third-party noise: the dynamic loader,
-Qt's plugin loader, glib/GStreamer/FFmpeg registries, PulseAudio/PipeWire,
-fontconfig and Mesa. Nothing under `proto/`, `grpc/`, `core/`, `audio/` or
-`ui/` is suppressed, which is the point of keeping the list short.
+`tools/valgrind.supp` chỉ chặn tiếng ồn của bên thứ ba. Không có gì dưới
+`shared/`, `s2t-qt-server/` hay `s2t-qt-client/` bị chặn, và đó là lý do danh
+sách đó được giữ ngắn.
 
-Under gdb, the worker threads are named (`audio-capture`, `session-worker`,
-`state-poller`, `rpc-lane-0..2`), so `thread apply all bt` reads as the
-threading table above rather than as a list of numbers.
+Dưới gdb, mọi luồng đều có tên (`http2-conn-N`, `forward-<phiên>`,
+`relay-lane-N`, `upstream-probe`, `audio-capture`, `state-poller`), nên
+`thread apply all bt` đọc ra như hai bảng luồng ở trên chứ không phải một danh
+sách số.
 
-## Configuration
+## Cấu hình client
 
-Settings are edited in **Cấu hình** and stored by `QSettings` in whatever the
-platform's own place is — the registry under `HKCU\Software\s2t\s2t_qt` on
-Windows, `~/.config/s2t/s2t_qt.conf` on RHEL. Same keys either way: server
-`host:port`, Bearer token, microphone, the device-name substring the bound
-device must match, sample rate/channels, the bounded queue length, the
-`xvf_host` path, pipeline trace, and file-replay pacing.
+Sửa trong **Cấu hình** và lưu bằng `QSettings` vào chỗ của từng nền tảng —
+registry `HKCU\Software\s2t\s2t_qt` trên Windows, `~/.config/s2t/s2t_qt.conf`
+trên RHEL. Cùng bộ khoá: `host:port` **của Server buffer**, Bearer token,
+microphone, chuỗi con tên thiết bị phải khớp, tần số/kênh, độ dài hàng đợi có
+chặn, đường dẫn `xvf_host`, pipeline trace, và nhịp phát lại tệp.
 
-The token is stored in that file in plain text, so on the Linux host the file
-should be `chmod 600` — `QSettings` creates it `0600` already, but a config
-directory copied between machines will not keep that.
+Token lưu dạng chữ thường trong tệp đó, nên trên Linux tệp nên là `chmod 600`
+— `QSettings` tạo nó ở `0600` sẵn, nhưng một thư mục config chép giữa hai máy
+sẽ không giữ quyền đó.
 
-These are the same knobs `run_windows_ui.ps1` passed on the command line,
-minus everything that only existed because the UI was a browser talking to a
-local HTTP bridge — there is no UI port, upload directory or token file to
-point at any more.
+Client **không còn** biết địa chỉ hay token của tầng suy luận: đó là việc của
+Server buffer và không bao giờ rời khỏi nó.
 
-## Low-confidence words
+## Từ có độ tin cậy thấp
 
-The browser UI dropped every token below **0.75** confidence from the timeline
-entirely (`token_low_threshold` in the bridge's snapshot), which also made its
-own "low confidence" styling unreachable. That default is preserved so the
-timeline reads the same, but the **HIỆN TỪ YẾU** toggle now lets an operator
-see everything, drawn in the low-confidence style, without a rebuild. The
-Highlights panel is unaffected either way — it comes from the server.
+Giao diện trình duyệt cũ bỏ hẳn mọi token dưới **0.75** khỏi dòng thời gian,
+khiến chính kiểu hiển thị "độ tin cậy thấp" của nó không bao giờ dùng tới. Mặc
+định đó được giữ nguyên, nhưng nút **HIỆN TỪ YẾU** giờ cho điều hành viên thấy
+tất cả, vẽ theo kiểu độ-tin-cậy-thấp, mà không cần build lại.
 
-## Known gaps
+## Những chỗ còn thiếu
 
-- `.m4a` decoding needs `ffmpeg` on `PATH`. Without it the app says so plainly
-  rather than reporting a corrupt file; plain 16-bit PCM WAV needs nothing.
-  On RHEL 9 that is `dnf install ffmpeg-free` (or the RPM Fusion build).
-- Ticker mode is a flowing coloured transcript rather than the browser's
-  horizontal teleprompter blocks.
-- The evidence dashboard's model **architecture** labels are compiled in (they
-  were `ASR_MODEL_LABEL` &c. environment overrides on the bridge). The model
-  **status** table next to them is read live from Triton and is the actual
-  evidence.
-- **Qt 6 only.** Capture is `QAudioSource`/`QMediaDevices` and playback is
-  `QMediaPlayer::setAudioOutput`; there is no Qt 5 spelling of those to fall
-  back to, so `s2t_qt.pro` fails fast with a named reason rather than letting
-  RHEL's default Qt 5 `qmake` produce a wall of missing-header errors.
-- **The GUI needs a display.** Over a bare `ssh` session the app now exits
-  with an explanation and the list of headless modes, instead of aborting
-  inside the Qt platform plugin. Use `ssh -X`, the machine's own console, or
-  a VNC session.
-- **The reSpeaker host-control tool is optional on Linux.** Left blank, the
-  denoise toggle and the A/B evidence recorder report that no tool is
-  configured; everything else works. Point it at the ELF `xvf_host` binary
-  (no `.exe`) and make sure the execute bit is set — the app now says so by
-  name when it is not.
+- **Phiên không sống qua lần khởi động lại của server.** Bộ đệm nằm trong RAM
+  và bản đồ phiên cũng vậy, nên sau khi khởi động lại, `push_audio` cho một
+  phiên cũ trả về `NOT_FOUND` với thông báo nói rõ điều đó. Tầng suy luận vẫn
+  còn phiên ấy; chỉ bộ đệm là không.
+- **`buffer/spool_dir` là bản sao để đối chiếu, không phải nơi hàng đợi tràn
+  vào.** Đầy bộ đệm vẫn là `RESOURCE_EXHAUSTED` dù có bật spool hay không.
+- **Giải mã `.m4a` cần `ffmpeg` trên `PATH`.** Không có thì ứng dụng nói thẳng
+  ra thay vì báo tệp hỏng; WAV PCM 16-bit thì không cần gì.
+- **Chế độ ticker là dải chữ chảy có màu**, không phải các khối teleprompter
+  ngang như của trình duyệt.
+- **Nhãn *kiến trúc* mô hình trong bảng nghiệm thu được biên dịch cứng.** Bảng
+  *trạng thái* mô hình bên cạnh mới là bằng chứng đọc trực tiếp từ Triton.
+- **Chỉ Qt 6.** Thu là `QAudioSource`/`QMediaDevices`, phát là
+  `QMediaPlayer::setAudioOutput`; không có cách viết Qt 5 nào để lùi về.
+- **Client cần màn hình.** Qua một phiên `ssh` trần, nó thoát kèm giải thích và
+  danh sách chế độ không cần màn hình. `s2t-qt-server` thì ngược lại: nó không
+  bao giờ cần màn hình.
+- **Công cụ điều khiển reSpeaker là tuỳ chọn trên Linux.** Để trống thì nút
+  denoise và bộ ghi bằng chứng A/B báo là chưa cấu hình công cụ; mọi thứ khác
+  vẫn chạy.
