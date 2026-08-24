@@ -5,8 +5,13 @@
 qua gRPC, hiển thị bản chép trực tiếp, và cho phép soát lại, sửa và lưu vết
 mọi chỉnh sửa.
 
-Tài liệu này dành cho người vận hành. Phần mô tả bên trong hệ thống nằm ở
-[luong-hoat-dong.md](luong-hoat-dong.md).
+Tài liệu này dành cho người vận hành.
+
+| Tài liệu | Dành cho |
+|---|---|
+| **huong-dan-su-dung.md** (tài liệu này) | người vận hành ứng dụng |
+| [luong-hoat-dong.md](luong-hoat-dong.md) | người bảo trì mã nguồn |
+| [danh-sach-api.md](danh-sach-api.md) | người tích hợp một client bên ngoài |
 
 ---
 
@@ -322,3 +327,31 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 7.3
   dụng có hỏi lại trước khi làm.
 - **Tên người thao tác không được nhớ giữa các lần chạy** — xem mục 1.2.
 - **Mức bảo mật chỉ là nhãn**, không thay cho phân quyền phía server.
+- **Ứng dụng này không phải là server.** Nó không mở cổng nào và không có API
+  để phần mềm khác gọi vào. Muốn một hệ thống khác dùng dịch vụ xử lý âm thanh
+  thì hệ thống đó nói chuyện thẳng với AI server bằng đúng hợp đồng mà ứng dụng
+  này đang dùng — xem [danh-sach-api.md](danh-sach-api.md).
+- **Một phiên chỉ nên có một client đang ghi.** Hai chương trình cùng đẩy audio
+  vào một `session_id` sẽ làm hỏng bản chép, vì bộ đếm gói của mỗi bên là độc
+  lập với bên kia.
+
+---
+
+## 10. Cho bộ phận tích hợp
+
+Nếu đơn vị bạn cần đưa dịch vụ này vào một phần mềm khác (tổng đài, hệ thống
+lưu trữ cuộc họp, quy trình xử lý hàng loạt), thì thứ cần đọc là
+[danh-sach-api.md](danh-sach-api.md). Tài liệu đó liệt kê toàn bộ 17 RPC, định
+dạng audio, chính sách thử lại và một tệp `.proto` sẵn sàng biên dịch.
+
+Hai thông tin người vận hành cần cấp cho bộ phận tích hợp, lấy ngay trong
+**Cấu hình** của ứng dụng này:
+
+| Cần | Lấy ở đâu |
+|---|---|
+| Địa chỉ AI server (`host:port`) | ô **AI server** |
+| Bearer token | ô **Bearer token** |
+
+Token là bí mật: gửi qua kênh nội bộ, đừng dán vào tài liệu dùng chung, và
+đừng để nó lọt vào log. Nếu nghi ngờ lộ, đề nghị quản trị AI server cấp lại —
+đổi token không ảnh hưởng tới các phiên đã lưu.

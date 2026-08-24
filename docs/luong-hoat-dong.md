@@ -2,8 +2,13 @@
 
 Tài liệu này mô tả bên trong ứng dụng: các luồng (thread), các kênh kết nối,
 vòng đời một phiên, và lý do đằng sau những chỗ trông có vẻ lạ. Dành cho người
-bảo trì mã nguồn. Phần dành cho người vận hành nằm ở
-[huong-dan-su-dung.md](huong-dan-su-dung.md).
+bảo trì mã nguồn.
+
+| Tài liệu | Dành cho |
+|---|---|
+| [huong-dan-su-dung.md](huong-dan-su-dung.md) | người vận hành ứng dụng |
+| **luong-hoat-dong.md** (tài liệu này) | người bảo trì mã nguồn |
+| [danh-sach-api.md](danh-sach-api.md) | người tích hợp một client bên ngoài |
 
 ---
 
@@ -315,6 +320,12 @@ Vài lựa chọn đáng nhớ:
   kết nối chứ không riêng từng stream; bỏ qua một header block của stream khác
   sẽ làm lệch bộ giải mã cho mọi phản hồi về sau.
 
+Danh sách đầy đủ 17 RPC, số hiệu từng trường của mọi thông điệp, mã lỗi, chính
+sách thử lại và một tệp `.proto` tái dựng nằm ở
+[danh-sach-api.md](danh-sach-api.md). Khi sửa bất cứ thứ gì trong `proto/` hay
+`grpc/`, tài liệu đó phải được cập nhật cùng lúc — nó là thứ duy nhất người
+ngoài đọc.
+
 ---
 
 ## 9. Đường ghi: RpcExecutor
@@ -468,7 +479,8 @@ còn kẹt trên socket:
 | `grpc/` | `AsrClient`, `GrpcChannel`, `Http2Client`, `Hpack` |
 | `proto/` | `ProtoWire` (proto3 tay), `AsrSession`, `SpeakerRegistry` — struct chép tay theo `.proto` |
 | `ui/` | `TimelineView`, `Dialogs`, `ReviewPanel`, `EnrollDialog`, `TraceWindow`, `EvidenceWindow`, `DiagnosticsWindow`, `LogControls` (combo chế độ/mức log dùng chung) |
-| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `run_valgrind.sh` |
+| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp` |
+| `docs/` | `huong-dan-su-dung.md` (vận hành), `luong-hoat-dong.md` (tài liệu này), `danh-sach-api.md` (hợp đồng gRPC cho client bên ngoài) |
 
 ### Build
 
@@ -524,7 +536,12 @@ Cả ba đều gọi được từ tab **Chẩn đoán** trong cửa sổ *Nhậ
 8. **Ràng buộc tên thiết bị.** Bỏ đi sẽ thu nhầm thiết bị sau khi rút USB mic.
 9. **Không thêm phụ thuộc protobuf/gRPC.** Cả tầng giao thức viết tay tồn tại là
    để ứng dụng build được chỉ với Qt trên một máy trạm đã triển khai.
-10. **`DiagnosticsRunner` không được xoá khi còn chạy.** `runProbe` và
+10. **Số hiệu trường trong `proto/` là hợp đồng, không phải chi tiết cài đặt.**
+    Kể từ khi [danh-sach-api.md](danh-sach-api.md) tồn tại, chúng còn là hợp
+    đồng với những client không nằm trong kho mã này. Đổi một số hiệu, hoặc tái
+    sử dụng số 7 và 9 đã `reserved` của `DisplayRow`, là làm hỏng âm thầm mọi
+    bên đang chạy — proto3 không báo lỗi, nó chỉ đọc ra giá trị khác.
+11. **`DiagnosticsRunner` không được xoá khi còn chạy.** `runProbe` và
     `runNetworkTests` nhận `const QString&`, còn `run()` truyền thẳng
     `m_target`/`m_token` — tức chúng giữ tham chiếu vào chính object runner suốt
     hàng chục giây. Xoá nó giữa chừng là use-after-free đọc ruột `QString`, âm

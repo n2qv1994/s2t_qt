@@ -26,6 +26,23 @@ grpc_session_adapter.py (:8700)
 Triton (:8011)
 ```
 
+## Documentation
+
+Three documents under `docs/`, in Vietnamese because that is the language of
+everyone who reads them:
+
+| Document | Audience | Contents |
+|---|---|---|
+| [`docs/huong-dan-su-dung.md`](docs/huong-dan-su-dung.md) | operators | configuration, recording a meeting, review and editing, enrolment, troubleshooting |
+| [`docs/luong-hoat-dong.md`](docs/luong-hoat-dong.md) | maintainers of this repo | threads, channels, session lifecycle, protocol layer, the do-not-break list |
+| [`docs/danh-sach-api.md`](docs/danh-sach-api.md) | **integrators writing another client** | all 17 RPCs with every field number, error and retry policy, audio format, `config_json`, worked Python and C++ examples, and a reconstructed `.proto` |
+
+The API document is the one thing here read from outside this repository. Its
+field numbers are transcribed from `proto/AsrSession.cpp` and
+`proto/SpeakerRegistry.cpp`, so any change to those files has to be mirrored
+there in the same commit — the same rule that already binds `proto/` to the two
+`.proto` files in `s2t-dgpu`.
+
 ## Why the protocol stack is hand written
 
 The Qt kit on the target machine ships **no Qt::Grpc, no Qt::Protobuf, no
