@@ -1,0 +1,6 @@
+# Normalise line endings in the repository to LF and let each checkout use
+# its own platform's endings - except the shell scripts, which are streamed
+# from this Windows working copy to the RHEL host by tools/deploy_rhel.sh and
+# would fail to run there with CRLF.
+* text=auto
+*.sh text eol=lf

@@ -1,0 +1,141 @@
+# Suppressions for running s2t_qt under valgrind 3.26 on RHEL 9.
+#
+# Nothing here suppresses this project's own code.  Every entry is a
+# third-party allocation that is either never freed by design (one-shot
+# loader/plugin/font state) or is a known-noisy interior pointer in glibc or
+# in a Qt back end.  Keeping the list this narrow is the point: a leak in
+# proto/, grpc/, core/ or ui/ must still be reported.
+#
+# Regenerate additions with: valgrind --gen-suppressions=all
+
+{
+   dl-open-keeps-loaded-object-state
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   fun:_dl_open
+}
+
+{
+   dlopen-plugin-tls-block
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   fun:_dl_allocate_tls
+}
+
+{
+   qt-plugin-loader-keeps-plugins-for-process-lifetime
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   fun:_ZN14QFactoryLoader*
+}
+
+{
+   qt-qlibrary-load
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   fun:_ZN15QLibraryPrivate*
+}
+
+# Qt Multimedia on Linux sits on GStreamer or FFmpeg, and both keep global
+# registries alive until exit.  s2t_qt only touches them through QMediaPlayer.
+{
+   glib-type-system-never-freed
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/libglib-2.0.so*
+}
+{
+   gobject-type-registration
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/libgobject-2.0.so*
+}
+{
+   gstreamer-registry
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/libgst*.so*
+}
+{
+   ffmpeg-global-state
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   obj:*/libav*.so*
+}
+
+# PulseAudio / PipeWire client libraries: the mic path.
+{
+   pulse-client-context
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/libpulse*.so*
+}
+{
+   pipewire-client-context
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/libpipewire*.so*
+}
+{
+   pipewire-spa-plugins
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/spa-0.2/*
+}
+
+# X11 / fontconfig / Mesa: only reached when the GUI is up.
+{
+   fontconfig-cache
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/libfontconfig.so*
+}
+{
+   freetype-globals
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   obj:*/libfreetype.so*
+}
+{
+   xcb-connection-state
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   obj:*/libxcb*.so*
+}
+{
+   x11-display-state
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   obj:*/libX11.so*
+}
+{
+   mesa-dri-driver
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible,definite
+   ...
+   obj:*/dri/*.so
+}
+
+# glibc reads /etc/nsswitch.conf modules once per process and keeps them.
+{
+   nss-module-once
+   Memcheck:Leak
+   match-leak-kinds: reachable,possible
+   ...
+   fun:__nss_*
+}

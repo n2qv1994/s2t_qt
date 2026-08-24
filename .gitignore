@@ -1,0 +1,45 @@
+# ---- Build output (qmake / MinGW on Windows, gcc on RHEL) ----
+build/
+build-*/
+debug/
+release/
+Makefile
+Makefile.Debug
+Makefile.Release
+.qmake.stash
+object_script.*
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dll
+*.exe
+*.pdb
+
+# ---- qmake / moc generated sources ----
+moc_*.cpp
+moc_*.h
+moc_predefs.h
+qrc_*.cpp
+ui_*.h
+compile_commands.json
+
+# ---- Qt Creator per-user state ----
+.qtcreator/
+*.pro.user
+*.pro.user.*
+*.autosave
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Runtime output ----
+*.log
+vgcore.*
+core.[0-9]*
