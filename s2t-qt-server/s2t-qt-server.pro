@@ -51,6 +51,7 @@ SOURCES += \
     ServerConfig.cpp \
     RpcLane.cpp \
     UpstreamPool.cpp \
+    SessionJournal.cpp \
     SessionBuffer.cpp \
     BufferHub.cpp \
     BufferService.cpp \
@@ -60,6 +61,7 @@ HEADERS += \
     ServerConfig.h \
     RpcLane.h \
     UpstreamPool.h \
+    SessionJournal.h \
     SessionBuffer.h \
     BufferHub.h \
     BufferService.h \

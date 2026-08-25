@@ -20,17 +20,26 @@ grpc::Status invalidRequest(const QString &method)
     return status;
 }
 
-grpc::Status noSuchSession(const QString &sessionId)
+// A session the pipeline still has but this buffer does not is a different
+// problem from a typo, and an operator can act on the difference - so the
+// message says which.  What "different" means depends on whether journalling is
+// on: with it, a restart no longer loses meetings and the honest explanations
+// are retention or a clean stop.  Claiming otherwise would send someone looking
+// for a restart that never happened.
+grpc::Status noSuchSession(const QString &sessionId, bool durable)
 {
     grpc::Status status;
     status.code = grpc::NotFound;
-    // Says which of the two things went wrong.  A session the pipeline still
-    // has but this buffer does not - after a server restart, say - is a
-    // different problem from a typo, and an operator can act on the difference.
-    status.message =
-        QStringLiteral("máy chủ đệm không giữ phiên '%1' (phiên bắt đầu trước khi máy chủ này "
-                       "khởi động lại sẽ không còn ở đây)")
-            .arg(sessionId);
+    if (durable) {
+        status.message = QStringLiteral("máy chủ đệm không giữ phiên '%1' (phiên đã kết thúc, "
+                                        "hoặc đã quá hạn giữ sau khi dừng)")
+                             .arg(sessionId);
+    } else {
+        status.message = QStringLiteral("máy chủ đệm không giữ phiên '%1' (nhật ký phiên đang "
+                                        "TẮT, nên phiên bắt đầu trước khi máy chủ này khởi động "
+                                        "lại sẽ không còn ở đây - xem buffer/journal_dir)")
+                             .arg(sessionId);
+    }
     return status;
 }
 
@@ -61,6 +70,9 @@ BufferService::BufferService(BufferHub *hub, grpc::Server *server) : m_hub(hub),
 void BufferService::registerMethods()
 {
     BufferHub *hub = m_hub;
+    // Fixed for the life of the process, so it is read once here rather than on
+    // every miss.
+    const bool durable = !m_hub->config().journalDir.trimmed().isEmpty();
 
     // The client's own deadline, when it sent one.  Passing it upstream rather
     // than substituting our own means a caller that has already given up is
@@ -96,36 +108,36 @@ void BufferService::registerMethods()
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::PushAudio),
-        [hub](const grpc::ServerCall &call, QByteArray *out) {
+        [hub, durable](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::PushAudioRequest, asr::PushAudioResponse>(
                 call, out, [&](const asr::PushAudioRequest &req, asr::PushAudioResponse *resp) {
                     const SessionRef session = hub->find(req.sessionId);
                     if (!session)
-                        return noSuchSession(req.sessionId);
+                        return noSuchSession(req.sessionId, durable);
                     return session->push(req, resp);
                 });
         });
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetLiveState),
-        [hub](const grpc::ServerCall &call, QByteArray *out) {
+        [hub, durable](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::SessionRequest, asr::StateResponse>(
                 call, out, [&](const asr::SessionRequest &req, asr::StateResponse *resp) {
                     const SessionRef session = hub->find(req.sessionId);
                     if (!session)
-                        return noSuchSession(req.sessionId);
+                        return noSuchSession(req.sessionId, durable);
                     return session->liveState(resp);
                 });
         });
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::StopSession),
-        [hub, deadline](const grpc::ServerCall &call, QByteArray *out) {
+        [hub, deadline, durable](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::SessionRequest, asr::StopSessionResponse>(
                 call, out, [&](const asr::SessionRequest &req, asr::StopSessionResponse *resp) {
                     const SessionRef session = hub->find(req.sessionId);
                     if (!session)
-                        return noSuchSession(req.sessionId);
+                        return noSuchSession(req.sessionId, durable);
                     // The drain barrier: everything the client sent reaches the
                     // pipeline before this returns.
                     return session->stop(deadline(call), resp);
@@ -306,7 +318,7 @@ void BufferService::registerMethods()
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetBufferStatus),
-        [hub, server](const grpc::ServerCall &call, QByteArray *out) {
+        [hub, server, durable](const grpc::ServerCall &call, QByteArray *out) {
             return serve<buf::BufferStatusRequest, buf::BufferStatusResponse>(
                 call, out, [&](const buf::BufferStatusRequest &req, buf::BufferStatusResponse *resp) {
                     resp->serverVersion = QStringLiteral(S2T_SERVER_VERSION);
@@ -318,14 +330,14 @@ void BufferService::registerMethods()
                     resp->rejectedCalls = server->rejectedCalls();
                     resp->queueCapacityBytes = hub->queueCapacityBytes();
                     resp->queueUsedBytes = hub->queueUsedBytes();
-                    resp->spoolDir = hub->config().spoolDir;
-                    resp->spoolEnabled = !hub->config().spoolDir.trimmed().isEmpty();
+                    resp->spoolDir = hub->config().journalDir;
+                    resp->spoolEnabled = !hub->config().journalDir.trimmed().isEmpty();
                     if (req.sessionId.isEmpty()) {
                         resp->sessions = hub->snapshots(true, 0);
                     } else {
                         const SessionRef session = hub->find(req.sessionId);
                         if (!session)
-                            return noSuchSession(req.sessionId);
+                            return noSuchSession(req.sessionId, durable);
                         resp->sessions.append(session->snapshot());
                     }
                     return grpc::Status();

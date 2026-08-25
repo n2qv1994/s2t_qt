@@ -15,6 +15,7 @@
 
 #include <QElapsedTimer>
 #include <QHash>
+#include <QLockFile>
 #include <QList>
 #include <QMutex>
 #include <QObject>
@@ -69,6 +70,13 @@ public:
     const ServerConfig &config() const { return m_config; }
     UpstreamPool &pool() { return *m_pool; }
 
+    // False when the journal directory is already held by another instance.
+    // The caller must then refuse to start: two servers replaying one journal
+    // would both re-send the same packets and duplicate words in a transcript,
+    // which is the worst failure this project has.
+    bool ok() const { return m_ok; }
+    QString error() const { return m_error; }
+
     // Relays start_session upstream and, if it succeeds, opens a buffer for the
     // session it created.  The id in the reply is the pipeline's own id: this
     // server never invents one, so a session can be looked up on the adapter by
@@ -97,13 +105,31 @@ public:
 
     // Stops every forwarder and waits for them.  Called before the gRPC server
     // stops accepting, so a client draining a meeting is not cut off first.
+    // Journals are left on disk: that is what the next start reads.
     void shutdown();
+
+    // Sessions read back from disk at startup, for the log line and the tests.
+    int recoveredCount() const { return m_recoveredCount; }
 
 private slots:
     void reap();
 
 private:
+    // Reads every journal in the configured directory back into a live session.
+    // Runs in the constructor, before the gRPC server starts listening, so a
+    // client that reconnects the instant the port opens finds its meeting
+    // already there.
+    void recoverSessions();
+    SessionBuffer::Settings settingsFor(const QString &client) const;
+
     ServerConfig m_config;
+    int m_recoveredCount = 0;
+    bool m_ok = true;
+    QString m_error;
+    // Held for the life of the process.  QLockFile stores the pid and clears a
+    // lock whose owner is gone, so a SIGKILL does not leave a stale lock that
+    // blocks the very restart this journal exists to make possible.
+    std::unique_ptr<QLockFile> m_lock;
     UpstreamPool *m_pool = nullptr;
     UpstreamProbe *m_probe = nullptr;
 

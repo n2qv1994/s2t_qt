@@ -3,6 +3,7 @@
 #include "core/Logger.h"
 
 #include <QDateTime>
+#include <QDir>
 
 namespace {
 
@@ -89,13 +90,130 @@ BufferHub::BufferHub(const ServerConfig &config, QObject *parent)
 {
     m_uptime.start();
     m_upstream.target = config.upstreamTarget;
+
+    // First, before any thread exists: a start that is going to be refused
+    // should not have spun up a relay pool and a probe only to stop them again.
+    //
+    // Two instances over one journal directory would each recover the same
+    // sessions and each re-send the same packets, duplicating words in a
+    // transcript.  That is the worst failure mode this project has, and it is
+    // cheap to make impossible.
+    //
+    // QLockFile and not an O_EXCL file: it records the pid and takes over a
+    // lock whose owner is gone, so a SIGKILL cannot leave behind a stale lock
+    // that blocks the very restart this journal exists to make possible.
+    if (!m_config.journalDir.trimmed().isEmpty()) {
+        QDir dir(m_config.journalDir);
+        if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+            m_ok = false;
+            m_error = QStringLiteral("không tạo được thư mục nhật ký '%1'")
+                          .arg(m_config.journalDir);
+            return;
+        }
+        m_lock = std::make_unique<QLockFile>(dir.filePath(QStringLiteral(".s2t-qt-server.lock")));
+        m_lock->setStaleLockTime(0); // rely on the pid check, not on a timeout
+        if (!m_lock->tryLock(0)) {
+            qint64 pid = 0;
+            QString host;
+            QString app;
+            m_lock->getLockInfo(&pid, &host, &app);
+            m_ok = false;
+            m_error = QStringLiteral("thư mục nhật ký '%1' đang được tiến trình %2 trên '%3' giữ "
+                                     "- hai máy chủ dùng chung một nhật ký sẽ gửi trùng audio")
+                          .arg(m_config.journalDir)
+                          .arg(pid)
+                          .arg(host.isEmpty() ? QStringLiteral("?") : host);
+            m_lock.reset();
+            return;
+        }
+    }
+
     m_pool = new UpstreamPool(config.upstreamLanes, config.upstreamTarget, config.upstreamToken);
     m_probe = new UpstreamProbe(this, config.upstreamTarget, config.upstreamToken,
                                 config.upstreamProbeMs);
     m_probe->start();
 
+    // Before the reaper, and before anything can listen: a meeting read back
+    // from disk has to exist by the time a client can ask for it.
+    recoverSessions();
+
     connect(&m_reaper, &QTimer::timeout, this, &BufferHub::reap);
     m_reaper.start(5000);
+}
+
+SessionBuffer::Settings BufferHub::settingsFor(const QString &client) const
+{
+    SessionBuffer::Settings settings;
+    settings.upstreamTarget = m_config.upstreamTarget;
+    settings.upstreamToken = m_config.upstreamToken;
+    settings.client = client;
+    settings.capacityBytes =
+        m_config.bufferBytesPerSession(kAssumedSampleRate, kAssumedChannels);
+    settings.upstreamTimeoutMs = m_config.upstreamTimeoutMs;
+    settings.statePollMs = m_config.statePollMs;
+    settings.journalDir = m_config.journalDir;
+    settings.durability = m_config.durability;
+    settings.journalKeep = m_config.journalKeep;
+    settings.segmentBytes = m_config.segmentBytes;
+    return settings;
+}
+
+void BufferHub::recoverSessions()
+{
+    if (m_config.journalDir.trimmed().isEmpty())
+        return;
+
+    const QStringList handles = jrn::store::handles(m_config.journalDir);
+    if (handles.isEmpty()) {
+        LOG_INFO(applog::cat::Session)
+            << "journal directory" << m_config.journalDir << "holds no sessions";
+        return;
+    }
+    LOG_INFO(applog::cat::Session)
+        << "reading" << handles.size() << "session journal(s) from" << m_config.journalDir;
+
+    for (const QString &handle : handles) {
+        jrn::Recovered recovered;
+        QString error;
+        if (!jrn::store::recover(m_config.journalDir, handle, &recovered, &error)) {
+            // A journal we cannot read is left on disk rather than deleted: it
+            // may be the only copy of a meeting's audio, and an operator can
+            // look at it.  It is skipped on every start until they do.
+            LOG_ERROR(applog::cat::Session)
+                << "cannot recover" << handle << "-" << error << "- left on disk, skipped";
+            continue;
+        }
+        if (recovered.truncated) {
+            // Expected after a crash: the last record was half written.  Worth
+            // one line, because it is also what a failing disk looks like.
+            LOG_WARN(applog::cat::Session)
+                << "journal" << handle << "ends in a torn record - everything before it was read";
+        }
+        if (recovered.stopped) {
+            LOG_INFO(applog::cat::Session)
+                << "session" << recovered.meta.sessionId << "had already finished - forgetting it";
+            jrn::store::remove(m_config.journalDir, handle);
+            continue;
+        }
+        if (recovered.meta.sessionId.isEmpty()) {
+            LOG_WARN(applog::cat::Session) << "journal" << handle << "has no session id - skipped";
+            continue;
+        }
+
+        auto buffer = std::make_shared<SessionBuffer>(
+            recovered, settingsFor(recovered.meta.client));
+        {
+            QMutexLocker lock(&m_mutex);
+            m_sessions.insert(recovered.meta.sessionId, buffer);
+        }
+        ++m_recoveredCount;
+    }
+
+    if (m_recoveredCount > 0) {
+        LOG_INFO(applog::cat::Session)
+            << "recovered" << m_recoveredCount
+            << "session(s) - their backlogs go upstream before anything new";
+    }
 }
 
 BufferHub::~BufferHub()
@@ -139,17 +257,7 @@ grpc::Status BufferHub::startSession(const asr::StartSessionRequest &request,
     }
     noteUpstream(true, 0.0, QString());
 
-    SessionBuffer::Settings settings;
-    settings.upstreamTarget = m_config.upstreamTarget;
-    settings.upstreamToken = m_config.upstreamToken;
-    settings.client = client;
-    settings.capacityBytes =
-        m_config.bufferBytesPerSession(kAssumedSampleRate, kAssumedChannels);
-    settings.upstreamTimeoutMs = m_config.upstreamTimeoutMs;
-    settings.statePollMs = m_config.statePollMs;
-    settings.spoolDir = m_config.spoolDir;
-
-    auto buffer = std::make_shared<SessionBuffer>(out->sessionId, *out, settings);
+    auto buffer = std::make_shared<SessionBuffer>(out->sessionId, *out, settingsFor(client));
     {
         QMutexLocker lock(&m_mutex);
         m_sessions.insert(out->sessionId, buffer);
@@ -172,9 +280,15 @@ void BufferHub::forget(const QString &sessionId)
         QMutexLocker lock(&m_mutex);
         dropped = m_sessions.take(sessionId);
     }
+    const QString handle = dropped ? dropped->journalHandle() : QString();
     // Released outside the lock: the last reference joins a thread, and doing
     // that while holding m_mutex would block every other call in the process.
     dropped.reset();
+    // Only after the buffer is gone, so its journal is closed before the files
+    // are unlinked.  Forgetting a session and leaving its journal behind would
+    // resurrect it at the next start.
+    if (!handle.isEmpty() && !m_config.journalDir.trimmed().isEmpty())
+        jrn::store::remove(m_config.journalDir, handle);
 }
 
 void BufferHub::noteUpstream(bool reachable, double latencyMs, const QString &detail)
@@ -280,19 +394,43 @@ int BufferHub::sessionCount() const
 
 void BufferHub::reap()
 {
-    QStringList expired;
+    QList<SessionRef> live;
     {
         QMutexLocker lock(&m_mutex);
-        for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
-            const SessionRef &ref = it.value();
-            if (!ref)
-                continue;
-            if (ref->isFinished()
-                && ref->finishedSecondsAgo() > double(m_config.finishedRetentionSec)) {
-                expired.append(it.key());
-            }
+        live = m_sessions.values();
+    }
+
+    QStringList expired;
+    QList<SessionRef> orphans;
+    for (const SessionRef &ref : std::as_const(live)) {
+        if (!ref)
+            continue;
+        if (ref->isFinished()) {
+            if (ref->finishedSecondsAgo() > double(m_config.finishedRetentionSec))
+                expired.append(ref->sessionId());
+            continue;
+        }
+        // A session read back from a journal whose client never reconnected.
+        // Its backlog has still been delivered - that happens the moment the
+        // forwarder starts - but nobody is going to end it, so it is ended
+        // here.  Only recovered sessions qualify: a live client that has gone
+        // quiet is a different situation and is left alone.
+        if (m_config.orphanTimeoutSec > 0 && ref->awaitingClient()
+            && ref->idleSeconds() > double(m_config.orphanTimeoutSec)) {
+            orphans.append(ref);
         }
     }
+
+    for (const SessionRef &ref : std::as_const(orphans)) {
+        LOG_WARN(applog::cat::Session)
+            << "recovered session" << ref->sessionId() << "was never claimed after"
+            << m_config.orphanTimeoutSec << "seconds - closing it upstream";
+        // Asked for, not waited for.  This runs on the thread that accepts
+        // connections; the forwarder does the drain and the stop_session on its
+        // own thread, and the next reap tick sees the session finished.
+        ref->requestStop();
+    }
+
     for (const QString &id : std::as_const(expired)) {
         LOG_INFO(applog::cat::Session)
             << "forgetting finished session" << id << "after"

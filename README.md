@@ -23,6 +23,10 @@ tách đôi đặt hàng đợi audio ra khỏi máy trạm, và đó là toàn 
 - **Sự cố mạng ở máy trạm không còn làm mất tiếng.** Client được trả lời ngay
   khi gói audio nằm chắc chắn trong bộ đệm của server; từ đó trở đi việc thử
   lại là chuyện của server, ở một chặng gần tầng suy luận hơn.
+- **Khởi động lại máy chủ đệm không làm hỏng cuộc họp.** Bật
+  `buffer/journal_dir` thì mỗi gói được ghi xuống đĩa *trước* khi client được
+  ACK; lần khởi động sau đọc lại, đẩy nốt phần chưa gửi, và client ghi tiếp như
+  chưa có gì xảy ra.
 - **Tầng suy luận sập không làm dừng cuộc họp.** Audio vẫn được nhận và xếp
   hàng (mặc định 300 giây mỗi phiên). Đèn báo trên client chuyển vàng —
   *đang đệm* — chứ không đỏ.
@@ -220,6 +224,61 @@ Tệp cấu hình chứa hai token dạng chữ thường, nên để quyền `6
 `.gitignore` đã chặn tên `s2t-qt-server.conf` để một bản thật không lọt vào
 repo.
 
+## Phiên sống sót qua lần khởi động lại
+
+Mặc định hàng đợi chỉ nằm trong RAM. Đặt `buffer/journal_dir` (hoặc
+`--journal-dir`) là bật tính năng này:
+
+```ini
+[buffer]
+journal_dir=/var/lib/s2t-qt-server
+durability=os          # os | fsync
+journal_keep=queue     # queue | session
+segment_bytes=16777216
+orphan_timeout_sec=1800
+```
+
+Mỗi phiên có một nhật ký nối-thêm, chia thành phân đoạn. Hai quy tắc về **thứ
+tự** làm nên toàn bộ tính đúng đắn:
+
+1. Bản ghi gói được ghi **trước** khi client được ACK. ACK nghĩa là "đã nằm
+   chắc trong bộ đệm", và điều đó phải còn đúng sau khi khởi động lại — nếu
+   không thì nó chưa bao giờ đúng. Ghi hỏng là **từ chối gói**, không phải ghi
+   một dòng cảnh báo.
+2. Bản ghi tiến độ được ghi **sau** khi đẩy lên tầng suy luận thành công. Chết
+   giữa hai việc đó thì `seq` ấy được gửi lại ở lần khởi động sau, và tính bất
+   biến theo `seq` của tầng suy luận biến bản trùng thành vô hại. Ghi ngược lại
+   thì mất hẳn gói.
+
+Với client thì **một lần khởi động lại là vô hình**: nó nhận vài lỗi vận
+chuyển, vòng thử lại sẵn có gửi lại đúng `seq` cũ, và cuộc họp đi tiếp. Hàng
+đợi 60 giây mặc định của client hấp thụ trọn một lần khởi động lại thông thường.
+
+| Chọn | Chịu được | Giá |
+|---|---|---|
+| `durability=os` (mặc định) | tiến trình chết, máy chủ khởi động lại | không đáng kể |
+| `durability=fsync` | thêm cả mất điện đột ngột | một `fsync` mỗi gói |
+| `journal_keep=queue` (mặc định) | — | đĩa bám theo độ sâu hàng đợi |
+| `journal_keep=session` | — | giữ cả cuộc họp làm bản lưu (~96 kB/giây) |
+
+**Những gì nhật ký không làm.** Nó không làm bộ đệm chứa được nhiều hơn — đầy
+vẫn là `RESOURCE_EXHAUSTED`. Nó không cứu được một phiên mà **tầng suy luận**
+đã bỏ: nếu adapter quên phiên trong lúc máy chủ đệm nằm xuống, gói đầu tiên
+được gửi lại sẽ nhận một lỗi không phải lỗi vận chuyển và phiên kết thúc ồn ào,
+đúng như mọi lỗi chí mạng khác.
+
+Một phiên được khôi phục mà không client nào quay lại nhận sẽ bị đóng sau
+`orphan_timeout_sec` (mặc định 30 phút) — phần chưa gửi vẫn được đẩy lên trước
+khi đóng. Không có mốc này thì một máy chủ khởi động lại vài lần sẽ tích lại
+những cuộc họp không bao giờ kết thúc.
+
+**Một thư mục nhật ký chỉ một máy chủ.** Hai tiến trình dùng chung sẽ cùng khôi
+phục một phiên và cùng gửi lại một gói, tức nhân đôi chữ trong bản chép — hỏng
+theo kiểu tệ nhất mà dự án này biết. Máy chủ giữ một `QLockFile` trong thư mục
+đó và **từ chối khởi động** nếu đã có ai giữ, kèm pid và tên máy. Khoá ghi pid
+chứ không dựa vào thời gian, nên một cú `SIGKILL` không để lại khoá chết chặn
+mất đúng cái lần khởi động lại mà nhật ký sinh ra để phục vụ.
+
 ## Self-test
 
 ```bash
@@ -247,6 +306,12 @@ s2t-qt-client --probe 192.168.1.47:8800 --token <token>
    đệm mới có thể làm sai: thứ tự gói, rào chắn drain trước `stop_session`,
    phát lại ACK cho `seq` gửi lại, và bộ đệm trạng thái phục vụ nhiều người
    đọc bằng một lần hỏi.
+4. **Khởi động lại** — hạ một máy chủ đệm giữa cuộc họp với gói còn đang chờ,
+   dựng một cái mới trên cùng thư mục nhật ký, rồi kiểm: phần tồn đọng đi lên
+   đúng thứ tự, không trùng, không thiếu; `seq` gửi lại vẫn phát lại ACK cũ; và
+   client ghi tiếp từ `seq` kế. Kèm một nhật ký kết thúc bằng bản ghi ghi dở —
+   hình dạng bình thường sau một cú chết — phải đọc ra được mọi thứ trước chỗ
+   rách.
 
 `s2t-qt-client --selftest-net` chạy với `tools/mock_adapter.js`, một máy chủ
 HTTP/2 bằng Node không cần phụ thuộc. http2 của Node là nghttp2, nên nó mã hoá
@@ -268,6 +333,16 @@ grpc_tools.protoc`; máy Windows thì không có protoc lẫn Python.
 Chạy lần gần nhất (2026-08-25, trên RHEL): 9/9 khẳng định đạt, bao gồm việc
 `grpc-message` tiếng Việt giải mã đúng và một mã trạng thái từ tầng suy luận đi
 xuyên qua bộ đệm về tới người gọi.
+
+`tools/restart_check.py` là bài thứ hai cùng loại, cho phần sống-sót-qua-khởi-
+động-lại: nó **giết máy chủ bằng `SIGKILL`** giữa cuộc họp, với grpc thật ở cả
+hai đầu. `--selftest` trong C++ kiểm toàn bộ logic khôi phục nhưng chỉ *tháo
+đối tượng*, nên nó không chứng minh được điều quan trọng nhất — rằng bản ghi đã
+nằm ngoài tiến trình trước khi client được ACK. `SIGKILL` không chạy destructor
+và không flush gì cả.
+
+Chạy lần gần nhất (2026-08-25, trên RHEL): đạt ở cả `durability=os` lẫn
+`durability=fsync`, và ở cả hai chế độ `journal_keep`.
 
 ## Kiểm tra bộ nhớ và gỡ lỗi trên RHEL
 
@@ -317,12 +392,13 @@ tất cả, vẽ theo kiểu độ-tin-cậy-thấp, mà không cần build lạ
 
 ## Những chỗ còn thiếu
 
-- **Phiên không sống qua lần khởi động lại của server.** Bộ đệm nằm trong RAM
-  và bản đồ phiên cũng vậy, nên sau khi khởi động lại, `push_audio` cho một
-  phiên cũ trả về `NOT_FOUND` với thông báo nói rõ điều đó. Tầng suy luận vẫn
-  còn phiên ấy; chỉ bộ đệm là không.
-- **`buffer/spool_dir` là bản sao để đối chiếu, không phải nơi hàng đợi tràn
-  vào.** Đầy bộ đệm vẫn là `RESOURCE_EXHAUSTED` dù có bật spool hay không.
+- **Phiên chỉ sống qua lần khởi động lại khi `buffer/journal_dir` được đặt.**
+  Để trống thì hàng đợi chỉ nằm trong RAM và một lần khởi động lại mất mọi
+  cuộc họp đang mở — `push_audio` cho phiên cũ trả `NOT_FOUND`, và thông báo
+  lỗi nói rõ là do nhật ký đang tắt.
+- **Nhật ký không làm bộ đệm to ra.** Đầy bộ đệm vẫn là `RESOURCE_EXHAUSTED`;
+  nhật ký làm cho phần đang chờ *sống sót*, chứ không làm nó *chứa được nhiều
+  hơn*.
 - **Giải mã `.m4a` cần `ffmpeg` trên `PATH`.** Không có thì ứng dụng nói thẳng
   ra thay vì báo tệp hỏng; WAV PCM 16-bit thì không cần gì.
 - **Chế độ ticker là dải chữ chảy có màu**, không phải các khối teleprompter

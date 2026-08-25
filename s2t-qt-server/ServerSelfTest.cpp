@@ -9,8 +9,10 @@
 #include "grpc/Methods.h"
 #include "proto/BufferAdmin.h"
 
+#include <QDir>
 #include <QElapsedTimer>
 #include <QObject>
+#include <QTemporaryDir>
 #include <QTextStream>
 #include <QThread>
 
@@ -473,6 +475,10 @@ struct UpstreamRecord
     QList<int> sizes;
     int livePolls = 0;
     double sourceSeenSec = 0.0;
+    // When set, push_audio answers UNAVAILABLE.  That is a *transport* status,
+    // so the buffer holds the packet and keeps retrying it - which is how the
+    // restart test gets a backlog to survive a restart with.
+    bool refuse = false;
 };
 
 void registerFakeUpstream(grpc::Server *server, UpstreamRecord *record)
@@ -501,6 +507,12 @@ void registerFakeUpstream(grpc::Server *server, UpstreamRecord *record)
             pw::Reader reader(call.message);
             request.parse(reader);
             QMutexLocker lock(&record->mutex);
+            if (record->refuse) {
+                grpc::Status status;
+                status.code = grpc::Unavailable;
+                status.message = QStringLiteral("tầng suy luận đang từ chối (thử nghiệm)");
+                return status;
+            }
             record->events << QStringLiteral("push");
             record->seqs << request.seq;
             record->sizes << request.pcm.size();
@@ -853,6 +865,423 @@ int runBufferTests()
     out().flush();
     return g_failures == 0 ? 0 : 1;
 }
+
+// ---------------------------------------------------------------------------
+// Restart: does a meeting survive the Server buffer going down under it?
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// One Server buffer, on its own thread, over a given journal directory.  Built
+// twice by the test below - once before the "restart" and once after - so the
+// second instance sees only what the first left on disk.
+class BufferInstance
+{
+public:
+    BufferInstance(const ServerConfig &config)
+    {
+        m_thread.setObjectName(QStringLiteral("selftest-buffer"));
+        m_thread.start();
+        m_anchor.moveToThread(&m_thread);
+        QMetaObject::invokeMethod(
+            &m_anchor,
+            [this, config]() {
+                m_hub = new BufferHub(config);
+                m_server = new grpc::Server();
+                m_server->setToken(config.listenToken);
+                m_service = new BufferService(m_hub, m_server);
+                m_service->registerMethods();
+                m_up = m_server->start(QHostAddress::LocalHost, config.listenPort, &m_error);
+                m_port = m_server->port();
+                m_recovered = m_hub->recoveredCount();
+            },
+            Qt::BlockingQueuedConnection);
+    }
+
+    ~BufferInstance()
+    {
+        QMetaObject::invokeMethod(
+            &m_anchor,
+            [this]() {
+                if (m_hub)
+                    m_hub->shutdown();
+                if (m_server)
+                    m_server->stop();
+                delete m_service;
+                delete m_server;
+                delete m_hub;
+                m_service = nullptr;
+                m_server = nullptr;
+                m_hub = nullptr;
+            },
+            Qt::BlockingQueuedConnection);
+        m_thread.quit();
+        m_thread.wait(15000);
+    }
+
+    BufferInstance(const BufferInstance &) = delete;
+    BufferInstance &operator=(const BufferInstance &) = delete;
+
+    bool ok() const { return m_up; }
+    QString error() const { return m_error; }
+    quint16 port() const { return m_port; }
+    int recovered() const { return m_recovered; }
+    QString target() const { return QStringLiteral("127.0.0.1:%1").arg(m_port); }
+
+private:
+    QThread m_thread;
+    QObject m_anchor;
+    BufferHub *m_hub = nullptr;
+    grpc::Server *m_server = nullptr;
+    BufferService *m_service = nullptr;
+    bool m_up = false;
+    int m_recovered = 0;
+    quint16 m_port = 0;
+    QString m_error;
+};
+
+// Waits for the stand-in pipeline to have received `count` packets.
+bool waitForSeqs(UpstreamRecord *record, int count, int timeoutMs)
+{
+    QElapsedTimer clock;
+    clock.start();
+    for (;;) {
+        {
+            QMutexLocker lock(&record->mutex);
+            if (record->seqs.size() >= count)
+                return true;
+        }
+        if (clock.elapsed() > timeoutMs)
+            return false;
+        QThread::msleep(25);
+    }
+}
+
+grpc::Status pushOne(AsrClient &client, const QString &sessionId, quint64 seq, int bytes)
+{
+    asr::PushAudioRequest push;
+    push.sessionId = sessionId;
+    push.pcm = QByteArray(bytes, char(seq & 0x7f));
+    push.sampleRate = 48000;
+    push.channels = 1;
+    push.audioFormat = QStringLiteral("s16le");
+    push.reset = (seq == 1);
+    push.vadChunkMs = 160;
+    push.seq = seq;
+    asr::PushAudioResponse ack;
+    return client.pushAudio(push, &ack, 10000);
+}
+
+int restart()
+{
+    const int kBeforeStall = 4;   // forwarded normally
+    const int kDuringStall = 6;   // accepted, journalled, never forwarded
+    const int kPacketBytes = 4096;
+
+    QTemporaryDir journalDir;
+    check(journalDir.isValid(), "a journal directory can be created");
+    if (!journalDir.isValid())
+        return 1;
+
+    // ---- the stand-in inference tier, which outlives the "restart" ---------
+    UpstreamRecord record;
+    QThread upstreamThread;
+    upstreamThread.setObjectName(QStringLiteral("selftest-upstream"));
+    upstreamThread.start();
+    QObject upstreamAnchor;
+    upstreamAnchor.moveToThread(&upstreamThread);
+
+    grpc::Server *upstream = nullptr;
+    quint16 upstreamPort = 0;
+    bool upstreamUp = false;
+    QString error;
+    QMetaObject::invokeMethod(
+        &upstreamAnchor,
+        [&]() {
+            upstream = new grpc::Server();
+            registerFakeUpstream(upstream, &record);
+            upstreamUp = upstream->start(QHostAddress::LocalHost, 0, &error);
+            upstreamPort = upstream->port();
+        },
+        Qt::BlockingQueuedConnection);
+    check(upstreamUp, QStringLiteral("stand-in inference tier listens (%1)")
+                          .arg(upstreamUp ? QStringLiteral("port %1").arg(upstreamPort) : error));
+    if (!upstreamUp) {
+        QMetaObject::invokeMethod(
+            &upstreamAnchor, [&]() { delete upstream; }, Qt::BlockingQueuedConnection);
+        upstreamThread.quit();
+        upstreamThread.wait();
+        return 1;
+    }
+
+    ServerConfig config;
+    config.listenAddress = QStringLiteral("127.0.0.1");
+    config.listenPort = 0;
+    config.listenToken = QString::fromLatin1(kToken);
+    config.upstreamTarget = QStringLiteral("127.0.0.1:%1").arg(upstreamPort);
+    config.upstreamLanes = 2;
+    config.upstreamTimeoutMs = 5000;
+    config.upstreamProbeMs = 300000;
+    config.bufferSeconds = 60.0;
+    config.statePollMs = 5000;
+    config.journalDir = journalDir.path();
+    // Small enough that this handful of packets rolls a segment, so segment
+    // rolling is on the tested path rather than only on the deployed one.
+    config.segmentBytes = 256 * 1024;
+
+    QString sessionId;
+
+    // ---- phase 1: a meeting, then the server dies mid-backlog -------------
+    {
+        BufferInstance first(config);
+        check(first.ok(), QStringLiteral("Server buffer listens (%1)")
+                              .arg(first.ok() ? QStringLiteral("port %1").arg(first.port())
+                                              : first.error()));
+        check(first.recovered() == 0, "an empty journal directory recovers nothing");
+        if (!first.ok())
+            return 1;
+
+        AsrClient client(first.target(), QString::fromLatin1(kToken));
+        asr::StartSessionRequest startRequest;
+        startRequest.configJson = QStringLiteral("{\"title\":\"Khởi động lại\"}");
+        asr::StartSessionResponse started;
+        grpc::Status status = client.startSession(startRequest, &started, 10000);
+        check(status.ok(), QStringLiteral("start_session (%1)").arg(status.toString()));
+        sessionId = started.sessionId;
+
+        for (int i = 1; i <= kBeforeStall && status.ok(); ++i)
+            status = pushOne(client, sessionId, quint64(i), kPacketBytes);
+        check(status.ok(), QStringLiteral("%1 packets accepted before the stall").arg(kBeforeStall));
+        check(waitForSeqs(&record, kBeforeStall, 5000),
+              QStringLiteral("the pipeline received the first %1").arg(kBeforeStall));
+
+        // From here the pipeline refuses.  The buffer must keep accepting from
+        // the client and keep the packets - that is the whole point of it.
+        {
+            QMutexLocker lock(&record.mutex);
+            record.refuse = true;
+        }
+        for (int i = kBeforeStall + 1; i <= kBeforeStall + kDuringStall && status.ok(); ++i)
+            status = pushOne(client, sessionId, quint64(i), kPacketBytes);
+        check(status.ok(),
+              QStringLiteral("%1 more packets accepted while the pipeline refuses (%2)")
+                  .arg(kDuringStall)
+                  .arg(status.toString()));
+
+        // Give the forwarder a moment to be sure it is stuck retrying rather
+        // than quietly succeeding.
+        QThread::msleep(300);
+        {
+            QMutexLocker lock(&record.mutex);
+            check(record.seqs.size() == kBeforeStall,
+                  QStringLiteral("the pipeline still has only %1 packets (%2)")
+                      .arg(kBeforeStall)
+                      .arg(record.seqs.size()));
+        }
+        // `first` goes out of scope here: hub shutdown, server stop, threads
+        // joined.  Exactly what a restart does, minus the process exiting.
+    }
+
+    const QStringList handles = jrn::store::handles(journalDir.path());
+    check(handles.size() == 1,
+          QStringLiteral("one journal survived the shutdown (%1)").arg(handles.size()));
+
+    // ---- phase 2: the pipeline recovers, and so does the server -----------
+    {
+        QMutexLocker lock(&record.mutex);
+        record.refuse = false;
+    }
+
+    {
+        BufferInstance second(config);
+        check(second.ok(), QStringLiteral("Server buffer restarts (%1)")
+                               .arg(second.ok() ? QStringLiteral("port %1").arg(second.port())
+                                                : second.error()));
+        check(second.recovered() == 1,
+              QStringLiteral("the session was read back from disk (%1 recovered)")
+                  .arg(second.recovered()));
+        if (!second.ok())
+            return 1;
+
+        // The backlog goes upstream on its own, with no client involved at all.
+        const bool drained = waitForSeqs(&record, kBeforeStall + kDuringStall, 15000);
+        int delivered = 0;
+        {
+            QMutexLocker lock(&record.mutex);
+            delivered = record.seqs.size();
+        }
+        check(drained, QStringLiteral("the backlog reached the pipeline after the restart "
+                                      "(%1 of %2, with no client attached)")
+                           .arg(delivered)
+                           .arg(kBeforeStall + kDuringStall));
+
+        {
+            QMutexLocker lock(&record.mutex);
+            bool ordered = true;
+            for (int i = 0; i < record.seqs.size(); ++i) {
+                if (record.seqs.at(i) != quint64(i + 1))
+                    ordered = false;
+            }
+            check(ordered, "every packet arrived exactly once, in order, across the restart");
+            bool whole = true;
+            for (int size : record.sizes) {
+                if (size != kPacketBytes)
+                    whole = false;
+            }
+            check(whole, "every packet arrived whole");
+        }
+
+        AsrClient client(second.target(), QString::fromLatin1(kToken));
+
+        // A client that retries the last seq it sent - which is exactly what
+        // its transport-retry loop does after the connection came back - must
+        // get the stored ACK, not a second copy of the audio.
+        grpc::Status status =
+            pushOne(client, sessionId, quint64(kBeforeStall + kDuringStall), kPacketBytes);
+        check(status.ok(), QStringLiteral("a resent seq is accepted after the restart (%1)")
+                               .arg(status.toString()));
+
+        // And the meeting simply carries on from the next seq.
+        const quint64 next = quint64(kBeforeStall + kDuringStall + 1);
+        status = pushOne(client, sessionId, next, kPacketBytes);
+        check(status.ok(), QStringLiteral("the meeting continues at seq %1 (%2)")
+                               .arg(next)
+                               .arg(status.toString()));
+        check(waitForSeqs(&record, kBeforeStall + kDuringStall + 1, 5000),
+              "the continued packet reached the pipeline");
+        {
+            QMutexLocker lock(&record.mutex);
+            check(record.seqs.size() == kBeforeStall + kDuringStall + 1,
+                  QStringLiteral("no duplicate was delivered by the replay (%1 packets total)")
+                      .arg(record.seqs.size()));
+        }
+
+        buf::BufferStatusResponse bufferStatus;
+        status = client.getBufferStatus(buf::BufferStatusRequest(), &bufferStatus, 10000);
+        check(status.ok() && bufferStatus.sessions.size() == 1,
+              "the recovered session shows in the admin view");
+        if (bufferStatus.sessions.size() == 1) {
+            check(bufferStatus.sessions.at(0).sessionId == sessionId,
+                  "under its original session id");
+        }
+
+        asr::SessionRequest sessionRequest;
+        sessionRequest.sessionId = sessionId;
+        asr::StopSessionResponse stopped;
+        status = client.stopSession(sessionRequest, &stopped, 30000);
+        check(status.ok(), QStringLiteral("stop_session after recovery (%1)")
+                               .arg(status.toString()));
+        {
+            QMutexLocker lock(&record.mutex);
+            check(!record.events.isEmpty() && record.events.last() == QStringLiteral("stop"),
+                  "stop_session still reached the pipeline last");
+        }
+    }
+
+    // ---- phase 3: a finished meeting is not resumed again -----------------
+    {
+        BufferInstance third(config);
+        check(third.recovered() == 0,
+              QStringLiteral("a session that ended cleanly is not resumed (%1 recovered)")
+                  .arg(third.recovered()));
+    }
+    check(jrn::store::handles(journalDir.path()).isEmpty(),
+          "and its journal is gone from disk");
+
+    QMetaObject::invokeMethod(
+        &upstreamAnchor,
+        [&]() {
+            delete upstream;
+            upstream = nullptr;
+        },
+        Qt::BlockingQueuedConnection);
+    upstreamThread.quit();
+    upstreamThread.wait(15000);
+    return 0;
+}
+
+// A crash leaves the last record half written.  That is the normal shape of a
+// journal after the thing this feature exists for, so it has to read back as
+// "everything before the tear", not as a failure.
+void tornTail()
+{
+    QTemporaryDir dir;
+    if (!dir.isValid()) {
+        check(false, "a journal directory can be created");
+        return;
+    }
+    const QString handle = jrn::store::handleFor(QStringLiteral("phiên-rách"));
+
+    {
+        jrn::Journal journal;
+        jrn::Meta meta;
+        meta.sessionId = QStringLiteral("phiên-rách");
+        meta.client = QStringLiteral("127.0.0.1:1");
+        QString error;
+        check(journal.create(dir.path(), handle, meta, jrn::Durability::Os, jrn::Keep::Session,
+                             1024 * 1024, &error),
+              QStringLiteral("a journal can be created (%1)").arg(error));
+        for (quint64 seq = 1; seq <= 5; ++seq) {
+            jrn::Packet packet;
+            packet.seq = seq;
+            packet.pcm = QByteArray(512, char(seq));
+            packet.sampleRate = 48000;
+            packet.channels = 1;
+            packet.audioFormat = QStringLiteral("s16le");
+            journal.appendPacket(packet, &error);
+        }
+        jrn::Progress progress;
+        progress.seq = 2;
+        progress.sourceSeenSec = 1.5;
+        journal.appendProgress(progress, &error);
+    }
+
+    // Half a record, as a power cut or a SIGKILL mid-write would leave.
+    {
+        const QDir target(dir.path());
+        QStringList names =
+            target.entryList(QStringList{handle + QStringLiteral(".*.jrn")}, QDir::Files);
+        names.sort();
+        QFile last(target.filePath(names.last()));
+        check(last.open(QIODevice::WriteOnly | QIODevice::Append), "the last segment can be opened");
+        last.write(QByteArray("\x02\x00\x00\x10\x00partial", 12));
+        last.close();
+    }
+
+    jrn::Recovered recovered;
+    QString error;
+    check(jrn::store::recover(dir.path(), handle, &recovered, &error),
+          QStringLiteral("a journal with a torn tail still recovers (%1)").arg(error));
+    check(recovered.truncated, "and reports that it was torn");
+    check(recovered.meta.sessionId == QStringLiteral("phiên-rách"),
+          "the session id survives (Vietnamese)");
+    check(recovered.lastAcceptedSeq == 5,
+          QStringLiteral("all five complete packets were read (last seq %1)")
+              .arg(recovered.lastAcceptedSeq));
+    check(recovered.progress.seq == 2,
+          QStringLiteral("the progress watermark survives (%1)").arg(recovered.progress.seq));
+    check(recovered.backlog.size() == 3,
+          QStringLiteral("the backlog is what the pipeline had not acknowledged (%1)")
+              .arg(recovered.backlog.size()));
+    check(!recovered.backlog.isEmpty() && recovered.backlog.first().seq == 3,
+          "and it starts at the packet after the watermark");
+    check(!recovered.backlog.isEmpty() && recovered.backlog.first().pcm.size() == 512,
+          "with its audio intact");
+}
+
+} // namespace
+
+int runRestartTests()
+{
+    g_failures = 0;
+    out() << "== s2t-qt-server: a meeting survives a restart ==\n";
+    tornTail();
+    restart();
+    out() << (g_failures == 0 ? "restart: OK\n"
+                              : QStringLiteral("restart: %1 lỗi\n").arg(g_failures));
+    out().flush();
+    return g_failures == 0 ? 0 : 1;
+}
 int runCodecTests()
 {
     g_failures = 0;
@@ -882,7 +1311,8 @@ int runAll()
     const int codec = runCodecTests();
     const int loop = runLoopbackTests();
     const int chainCode = runBufferTests();
-    return codec != 0 || loop != 0 || chainCode != 0 ? 1 : 0;
+    const int restartCode = runRestartTests();
+    return codec != 0 || loop != 0 || chainCode != 0 || restartCode != 0 ? 1 : 0;
 }
 
 int runProbe(const QString &target, const QString &token)

@@ -330,12 +330,29 @@ phiên đã đầy"* — lại là chủ ý, cùng lý do như trên.
 
 ### "Máy chủ đệm không giữ phiên …"
 
-Server buffer đã được khởi động lại giữa chừng. Hàng đợi và bản đồ phiên nằm
-trong bộ nhớ, nên phiên bắt đầu trước lần khởi động lại không còn ở đó.
+Đọc kỹ phần trong ngoặc của thông báo, vì có hai nguyên nhân khác hẳn nhau:
 
-Bản chép **không mất**: tầng suy luận vẫn giữ phiên ấy, nên nó vẫn nằm trong
-danh sách ở màn hình **SOÁT LẠI** và vẫn sửa được. Chỉ việc ghi tiếp vào phiên
-cũ là không được — bắt đầu một phiên mới.
+- **"…nhật ký phiên đang TẮT…"** — Server buffer đã khởi động lại giữa chừng và
+  nó đang chạy **không** có nhật ký, nên hàng đợi chỉ nằm trong bộ nhớ. Báo cho
+  người quản trị: đặt `buffer/journal_dir` là hết hẳn tình trạng này.
+- **"…phiên đã kết thúc, hoặc đã quá hạn giữ…"** — phiên đã dừng bình thường từ
+  trước, hoặc đã dừng quá lâu và bị quên đi. Không phải sự cố.
+
+Trong cả hai trường hợp, bản chép **không mất**: tầng suy luận vẫn giữ phiên
+ấy, nên nó vẫn nằm trong danh sách ở màn hình **SOÁT LẠI** và vẫn sửa được. Chỉ
+việc ghi tiếp vào phiên cũ là không được — bắt đầu một phiên mới.
+
+### Server buffer khởi động lại giữa lúc đang ghi
+
+Nếu người quản trị đã bật nhật ký phiên (`buffer/journal_dir`), **không cần làm
+gì cả**. Đèn báo đỏ vài giây, ứng dụng tự kết nối lại và gửi lại đúng phần còn
+dở, rồi cuộc họp đi tiếp. Không mất chữ.
+
+Chỉ khi lần khởi động lại kéo dài hơn **Hàng đợi tối đa** (mặc định 60 giây)
+thì hàng đợi trên máy này mới đầy và phiên dừng ồn ào — vẫn là dừng có báo, chứ
+không phải mất tiếng âm thầm.
+
+Nếu nhật ký đang tắt thì phiên không sống sót; xem mục ngay trên.
 
 ### "Hàng đợi microphone bị tràn"
 
@@ -389,8 +406,10 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 7.3
   một lần đọc.
 - **Máy trạm chỉ cần mở một cổng ra ngoài**, tới Server buffer. Địa chỉ và
   token của tầng suy luận GPU không còn nằm trên máy của người vận hành.
-- **Phiên không sống qua lần khởi động lại của Server buffer** — xem mục 8.
-  Bản chép thì có; chỉ hàng đợi là không.
+- **Phiên có sống qua lần khởi động lại của Server buffer hay không là do cấu
+  hình phía server** (`buffer/journal_dir`). Bật thì một lần khởi động lại gần
+  như vô hình với người đang ghi; tắt thì mất cuộc họp đang mở. Thông báo lỗi
+  nói rõ đang ở trường hợp nào — xem mục 8.
 
 ---
 

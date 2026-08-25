@@ -418,8 +418,14 @@ QString renderBufferStatus(const buf::BufferStatusResponse &status)
                   : QStringLiteral("Đệm đang dùng : %1 / %2")
                         .arg(humanBytes(status.queueUsedBytes),
                              humanBytes(status.queueCapacityBytes)));
-    lines << QStringLiteral("Lưu bản sao   : %1")
-                 .arg(status.spoolEnabled ? status.spoolDir : QStringLiteral("(tắt)"));
+    // Worth spelling out rather than showing a path: it is the difference
+    // between a server restart being invisible to the operator and it ending
+    // the meeting, and nothing else on this screen says which one they are on.
+    lines << QStringLiteral("Nhật ký phiên : %1")
+                 .arg(status.spoolEnabled
+                          ? QStringLiteral("%1  (phiên sống sót qua lần khởi động lại)")
+                                .arg(status.spoolDir)
+                          : QStringLiteral("(tắt - khởi động lại máy chủ là mất phiên đang mở)"));
     lines << QString();
 
     if (status.sessions.isEmpty()) {

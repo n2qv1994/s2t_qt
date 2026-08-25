@@ -48,7 +48,14 @@ void usage()
         << "  --upstream-token TOKEN  token gửi lên tầng suy luận\n"
         << "  --upstream-lanes N      số kênh dùng lại cho các RPC chuyển tiếp\n"
         << "  --buffer-seconds N      dung lượng đệm mỗi phiên, tính bằng giây audio\n"
-        << "  --spool-dir THƯ_MỤC     lưu bản sao audio đã nhận vào đây\n"
+        << "  --journal-dir THƯ_MỤC   ghi nhật ký phiên vào đây; ĐẶT MỚI CÓ chuyện\n"
+        << "                          phiên sống sót qua lần khởi động lại máy chủ\n"
+        << "  --durability os|fsync   os: chịu được tiến trình chết (mặc định)\n"
+        << "                          fsync: chịu được mất điện, tốn 1 fsync/gói\n"
+        << "  --journal-keep queue|session\n"
+        << "                          queue: xoá phân đoạn đã đẩy xong (mặc định)\n"
+        << "                          session: giữ cả cuộc họp làm bản lưu\n"
+        << "  --orphan-timeout-sec N  đóng phiên khôi phục mà không ai quay lại nhận\n"
         << "  --state-poll-ms N       tuổi tối đa của bộ nhớ đệm get_live_state\n"
         << "  --max-connections N     số kết nối tối đa\n"
         << "  --log-mode debug|develop, --log-level trace|debug|info|warn|error\n"
@@ -175,7 +182,13 @@ int main(int argc, char *argv[])
         BufferService service(&hub, &server);
         service.registerMethods();
 
-        if (!server.start(address, config.listenPort, &error)) {
+        if (!hub.ok()) {
+            // Same rule as the listen failure below: not an early return.  The
+            // scope has to end normally so the logger is shut down last.
+            QTextStream(stderr) << "Không khởi động được: " << hub.error() << "\n";
+            LOG_ERROR(applog::cat::App) << "cannot start:" << hub.error();
+            code = 2;
+        } else if (!server.start(address, config.listenPort, &error)) {
             QTextStream(stderr) << "Không mở được cổng " << config.listenPort << ": " << error
                                 << "\n";
             LOG_ERROR(applog::cat::App) << "cannot listen on port" << config.listenPort << ":"

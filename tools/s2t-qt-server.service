@@ -28,6 +28,10 @@ ExecStart=/usr/local/bin/s2t-qt-server --config /etc/s2t-qt-server.conf
 KillSignal=SIGTERM
 # Một cuộc họp đang drain có thể mất vài chục giây để đẩy nốt hàng đợi lên
 # tầng suy luận.  Đừng cắt ngắn hơn thế.
+#
+# Nếu có bật journal_dir thì việc bị cắt ngang cũng không mất audio - phần chưa
+# gửi nằm trên đĩa và được đẩy nốt ở lần khởi động sau - nhưng để nó dừng gọn
+# vẫn hơn.
 TimeoutStopSec=90
 Restart=on-failure
 RestartSec=5
@@ -36,14 +40,21 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
-# Server không cần gì ngoài một socket và (nếu bật spool) một thư mục ghi.
+# Server không cần gì ngoài một socket và (nếu bật nhật ký) một thư mục ghi.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Bỏ chú thích nếu bật buffer/spool_dir - đây là thư mục duy nhất nó ghi vào.
-# ReadWritePaths=/var/lib/s2t-qt-server
+
+# Bật hai dòng này để phiên sống sót qua lần khởi động lại, rồi đặt
+#   journal_dir=/var/lib/s2t-qt-server
+# trong /etc/s2t-qt-server.conf.  systemd tạo thư mục với đúng chủ sở hữu, và
+# ProtectSystem=strict ở trên khiến đây là chỗ duy nhất dịch vụ ghi được.
+#
+# Nhớ chừa đĩa: mỗi phiên đang chờ giữ tối đa buffer/seconds giây audio
+# (300 giây ≈ 28 MB), và journal_keep=session thì giữ cả cuộc họp.
 # StateDirectory=s2t-qt-server
+# ReadWritePaths=/var/lib/s2t-qt-server
 
 [Install]
 WantedBy=multi-user.target

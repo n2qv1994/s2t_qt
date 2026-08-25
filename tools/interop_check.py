@@ -83,7 +83,12 @@ try:
 except grpc.RpcError as e:
     check(e.code() == grpc.StatusCode.NOT_FOUND,
           "unknown session is NOT_FOUND (%s)" % e.code())
-    check("khởi động lại" in e.details(),
+    # Deliberately checks the half that is true whatever the server's
+    # durability setting is.  The parenthetical differs - with a journal
+    # configured the message no longer blames a restart, because a restart no
+    # longer loses meetings - and asserting on that half would make this test
+    # fail for the right reason at the wrong time.
+    check("máy chủ đệm không giữ phiên" in e.details(),
           "grpc-message percent-decodes to Vietnamese (%s)" % e.details()[:60])
 
 # --- a bad token -----------------------------------------------------------

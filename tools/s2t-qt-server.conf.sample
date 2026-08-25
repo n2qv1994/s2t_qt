@@ -42,9 +42,49 @@ probe_ms=5000
 # Đầy thì push_audio bị từ chối - có chủ ý, vì client được viết để dừng ồn ào
 # chứ không im lặng bỏ audio.
 seconds=300
-# Nơi lưu bản sao mọi gói audio đã nhận (<phiên>.pcm).  Để trống là tắt.
-# Đây là bản sao để đối chiếu, KHÔNG phải nơi hàng đợi tràn vào.
-spool_dir=
+# Nơi ghi nhật ký phiên.  ĐỂ TRỐNG LÀ TẮT, và khi tắt thì hàng đợi chỉ nằm
+# trong RAM: khởi động lại máy chủ là mất mọi cuộc họp đang mở.
+#
+# Đặt vào đây thì mỗi gói audio được ghi xuống đĩa TRƯỚC khi client được ACK,
+# nên một lần khởi động lại (nâng cấp, đổi cấu hình, hay tiến trình chết) chỉ
+# tốn của client vài lần thử lại - thứ mà vòng thử lại của nó vốn đã chịu được
+# - chứ không làm hỏng cuộc họp.  Máy chủ đọc lại thư mục này lúc khởi động,
+# đẩy nốt phần chưa gửi lên tầng suy luận, rồi client ghi tiếp như chưa có gì.
+#
+# Cần quyền ghi cho user chạy dịch vụ.  Xem phần ReadWritePaths trong
+# tools/s2t-qt-server.service.
+#
+# MỘT thư mục nhật ký chỉ được MỘT tiến trình dùng.  Hai máy chủ dùng chung sẽ
+# cùng khôi phục một phiên và cùng gửi lại một gói, tức nhân đôi chữ trong bản
+# chép.  Máy chủ giữ một khoá ở đây và từ chối khởi động nếu đã có ai giữ, kèm
+# pid và tên máy trong thông báo lỗi.  Chạy hai instance trên cùng một máy thì
+# mỗi cái một journal_dir.
+journal_dir=
+
+# Ghi tới đâu thì coi là an toàn để ACK cho client:
+#   os    - write() đã trả về.  Chịu được tiến trình chết và máy chủ khởi động
+#           lại (đúng thứ tính năng này sinh ra để lo), KHÔNG chịu được mất
+#           điện đột ngột.  Mặc định.
+#   fsync - fsync() đã trả về.  Chịu được cả mất điện, đổi lại mỗi gói tốn một
+#           lần fsync (6 gói/giây mỗi phiên).
+durability=os
+
+# Phân đoạn nhật ký đã được tầng suy luận nhận hết thì làm gì:
+#   queue   - xoá đi.  Dung lượng đĩa khi đó bám theo độ sâu hàng đợi, vốn đã
+#             có trần; một phiên khoẻ mạnh chỉ giữ một hai phân đoạn.  Mặc định.
+#   session - giữ tới khi quên hẳn phiên.  Nhật ký thành bản lưu của cả cuộc
+#             họp, đổi lại tốn đĩa bằng đúng độ dài cuộc họp (~96 kB mỗi giây).
+journal_keep=queue
+
+# Kích thước một phân đoạn nhật ký, tính bằng byte.  16 MB ≈ 170 giây audio.
+segment_bytes=16777216
+
+# Phiên được khôi phục sau khi khởi động lại mà KHÔNG client nào quay lại nhận
+# thì bị đóng sau bấy nhiêu giây (phần chưa gửi vẫn được đẩy lên trước khi
+# đóng).  Không có mốc này thì một máy chủ khởi động lại vài lần sẽ tích lại
+# những cuộc họp không bao giờ kết thúc.  0 là tắt.
+orphan_timeout_sec=1800
+
 # Tuổi tối đa của bộ nhớ đệm get_live_state.  Dưới ngưỡng này, mười client
 # cùng xem một cuộc họp chỉ tốn của tầng suy luận đúng một lần hỏi.
 state_poll_ms=200
@@ -57,3 +97,4 @@ finished_retention_sec=900
 # Chạy dưới systemd thì để debug: journald đã lo phần lưu trữ.
 mode=debug
 level=info
+

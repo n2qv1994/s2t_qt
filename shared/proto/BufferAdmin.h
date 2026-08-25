@@ -75,6 +75,9 @@ struct BufferedSession
     quint64 forwardedBytes = 0;
     quint64 pendingPackets = 0;
     quint64 pendingBytes = 0;
+    // Bytes written to this session's journal.  Named for the write-only audio
+    // archive it used to be; the journal replaced that and does more, but the
+    // field number is on the wire and does not get renamed for tidiness.
     quint64 spooledBytes = 0;
     quint64 droppedPackets = 0;
     quint64 retries = 0;

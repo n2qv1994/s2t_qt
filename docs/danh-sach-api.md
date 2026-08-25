@@ -182,11 +182,27 @@ hết bộ nhớ, và một lỗ trong audio là thứ không tầng nào phía 
 được. Client nên **kết thúc phiên và báo cho người dùng**, đúng như
 `s2t-qt-client` làm.
 
-**`NOT_FOUND` trên `push_audio`, `get_live_state` hay `stop_session`** có thể
-nghĩa là Server buffer đã khởi động lại. Hàng đợi và bản đồ phiên nằm trong bộ
-nhớ, nên phiên bắt đầu trước lần khởi động lại không còn ở đó — thông điệp lỗi
-nói rõ điều này. Tầng suy luận vẫn giữ phiên ấy, nên `get_review_state` và
-`apply_text_edit` vẫn chạy được; chỉ việc ghi tiếp là không.
+**`NOT_FOUND` trên `push_audio`, `get_live_state` hay `stop_session`** có hai
+nguyên nhân, và thông điệp lỗi nói rõ đang là cái nào:
+
+- *"…nhật ký phiên đang TẮT…"* — Server buffer đã khởi động lại và nó đang chạy
+  không có nhật ký, nên hàng đợi chỉ nằm trong bộ nhớ. Đây là lựa chọn cấu hình
+  phía server (`buffer/journal_dir`), không phải lỗi của client.
+- *"…phiên đã kết thúc, hoặc đã quá hạn giữ…"* — phiên đã dừng, hoặc đã dừng
+  quá lâu và bị quên.
+
+Tầng suy luận vẫn giữ phiên ấy trong cả hai trường hợp, nên `get_review_state`
+và `apply_text_edit` vẫn chạy được; chỉ việc ghi tiếp là không.
+
+**Khi nhật ký được bật, một lần khởi động lại của Server buffer gần như vô hình
+với bạn.** Mỗi gói được ghi xuống đĩa trước khi bạn nhận ACK; lần khởi động sau
+đọc lại, đẩy nốt phần chưa gửi lên tầng suy luận theo đúng thứ tự, rồi nhận
+tiếp từ `seq` kế. Client của bạn chỉ thấy vài lỗi vận chuyển — thứ mà vòng thử
+lại ở mục 2 vốn đã xử lý — và `seq` gửi lại vẫn nhận đúng ACK đã lưu, kể cả khi
+ACK đó được ghi trước lần khởi động lại.
+
+Không cần làm gì đặc biệt để hưởng điều này. Chỉ cần **đừng tăng `seq` khi thử
+lại**, đúng như quy tắc đã có.
 
 Server buffer **không** chuyển tiếp mù `push_audio` cho một phiên nó không
 giữ: làm thế thì mọi bộ đếm — độ trễ, số gói, số byte — sẽ nói dối, và đó là
@@ -882,8 +898,8 @@ phiên đó (và trả `NOT_FOUND` nếu không có).
 | 7 | `rejected_calls` | số lần từ chối vì token sai |
 | 8 | `queue_capacity_bytes` | tổng sức chứa của mọi phiên đang mở |
 | 9 | `queue_used_bytes` | tổng đang dùng |
-| 10 | `spool_dir` | |
-| 11 | `spool_enabled` | |
+| 10 | `spool_dir` | thư mục nhật ký phiên |
+| 11 | `spool_enabled` | nhật ký có bật không - tức phiên có sống sót qua lần khởi động lại của máy chủ không |
 | 12 | `sessions` (repeated `BufferedSession`) | |
 
 `UpstreamStatus` = `1 target`, `2 reachable`, `3 latency_ms`, `4 detail`,
@@ -901,7 +917,7 @@ phiên đó (và trả `NOT_FOUND` nếu không có).
 | 7 | `accepted_packets`, 8 `accepted_bytes` | đã ACK cho client — tức đã nằm chắc trong bộ đệm |
 | 9 | `forwarded_packets`, 10 `forwarded_bytes` | tầng suy luận đã thật sự trả lời |
 | 11 | `pending_packets`, 12 `pending_bytes` | đang nằm trong hàng đợi |
-| 13 | `spooled_bytes` | đã ghi ra bản sao đối chiếu |
+| 13 | `spooled_bytes` | đã ghi vào nhật ký phiên. Bằng 0 nghĩa là nhật ký đang tắt, tức phiên **không** sống sót qua lần khởi động lại của máy chủ |
 | 14 | `dropped_packets` | bỏ đi sau một lỗi chí mạng của phiên |
 | 15 | `retries` | số lần thử lại vì lỗi vận chuyển |
 | 16 | **`lag_sec`** | **số giây audio đã nhận nhưng tầng suy luận chưa xác nhận.** Đây là con số cho biết đường ống có theo kịp hay không. |
@@ -1243,7 +1259,8 @@ Server buffer.
 | "Hàng đợi server luôn bằng 0" | Tự tính từ ACK thay vì từ `source_seen_sec` trong ACK |
 | `RESOURCE_EXHAUSTED` rồi thử lại mãi | Đó là tín hiệu dừng, không phải lỗi tạm thời: bộ đệm phiên đã đầy vì tầng suy luận không theo kịp |
 | Kết nối bị đóng với `PROTOCOL_ERROR` | Pipeline nhiều request trên một kết nối. Mở thêm kết nối thay vì dồn vào một |
-| `NOT_FOUND` giữa một phiên đang chạy | Server buffer đã khởi động lại; phiên cũ không ghi tiếp được. Bắt đầu phiên mới — bản chép cũ vẫn soát lại được |
+| `NOT_FOUND` giữa một phiên đang chạy | Server buffer khởi động lại **và** nhật ký phiên đang tắt. Bắt đầu phiên mới — bản chép cũ vẫn soát lại được. Với nhật ký bật thì việc này không xảy ra |
+| Chữ bị nhân đôi sau khi máy chủ khởi động lại | Tăng `seq` ở lần gửi lại. Phát lại ACK chỉ an toàn khi `seq` giữ nguyên |
 
 ---
 
@@ -1845,6 +1862,8 @@ message BufferStatusResponse {
   uint64                   rejected_calls       = 7;
   uint64                   queue_capacity_bytes = 8;
   uint64                   queue_used_bytes     = 9;
+  // Thư mục nhật ký phiên, và nó có được bật không.  Hai trường này giữ tên
+  // cũ vì số hiệu đã nằm trên dây; ý nghĩa nay là nhật ký, không phải bản lưu.
   string                   spool_dir            = 10;
   bool                     spool_enabled        = 11;
   repeated BufferedSession sessions             = 12;

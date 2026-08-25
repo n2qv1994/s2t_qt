@@ -43,33 +43,124 @@ double percentile(QList<double> values, double fraction)
 
 } // namespace
 
+// Seeds the live-state cache from whatever the pipeline last told us.  Doing it
+// here means the first get_live_state after a start - or after a restart - is
+// answered without a round trip, which is exactly when the client polls hardest.
+void SessionBuffer::seedState()
+{
+    m_state.sessionId = m_sessionId;
+    m_state.streamId = m_started.streamId;
+    m_state.stateVersion = m_started.stateVersion;
+    m_state.state = m_started.state;
+    m_haveState = true;
+    m_stateAge.start();
+}
+
 SessionBuffer::SessionBuffer(const QString &sessionId, const asr::StartSessionResponse &started,
                              const Settings &settings)
-    : m_sessionId(sessionId), m_started(started), m_settings(settings)
+    : m_sessionId(sessionId), m_handle(jrn::store::handleFor(sessionId)), m_started(started),
+      m_settings(settings)
 {
     m_startedAt = nowSeconds();
     m_updatedAt = m_startedAt;
     m_stateVersion = started.stateVersion;
     m_title = started.state.title;
-    // The state that came back from start_session is a real state; seeding the
-    // cache with it means the first get_live_state after a start is answered
-    // without a round trip, which is when the client polls hardest.
-    m_state.sessionId = sessionId;
-    m_state.streamId = started.streamId;
-    m_state.stateVersion = started.stateVersion;
-    m_state.state = started.state;
-    m_haveState = true;
-    m_stateAge.start();
+    m_clientReturned = true;
+    seedState();
+
+    if (!m_settings.journalDir.trimmed().isEmpty()) {
+        jrn::Meta meta;
+        meta.sessionId = sessionId;
+        meta.client = settings.client;
+        meta.startedAt = m_startedAt;
+        meta.startResponse = started.serialize();
+        QString error;
+        if (!m_journal.create(m_settings.journalDir, m_handle, meta, m_settings.durability,
+                              m_settings.journalKeep, m_settings.segmentBytes, &error)) {
+            // Not survivable quietly.  push() promises the client that an ACK
+            // means the packet is durable; without a journal that promise is
+            // false, and a session that silently downgrades is worse than one
+            // that refuses - see the check in push().
+            m_journalFailed = true;
+            m_lastError = error;
+            m_lastErrorAt = nowSeconds();
+            LOG_ERROR(applog::cat::Session)
+                << "session" << sessionId << "has no journal:" << error
+                << "- push_audio will be refused";
+        }
+    }
 
     m_stateLane = new RpcLane(QStringLiteral("state-%1").arg(sessionId.left(8)),
                               settings.upstreamTarget, settings.upstreamToken);
-    openSpool();
 
     setObjectName(QStringLiteral("forward-%1").arg(sessionId.left(8)));
     start();
     LOG_INFO(applog::cat::Session)
         << "buffered session" << sessionId << "opened for" << settings.client << "- capacity"
-        << settings.capacityBytes << "bytes";
+        << settings.capacityBytes << "bytes, journal"
+        << (m_journal.isOpen() ? m_settings.journalDir : QStringLiteral("(off)"));
+}
+
+SessionBuffer::SessionBuffer(const jrn::Recovered &recovered, const Settings &settings)
+    : m_sessionId(recovered.meta.sessionId), m_handle(recovered.handle),
+      m_started(recovered.started), m_settings(settings)
+{
+    m_settings.client = recovered.meta.client;
+    m_startedAt = recovered.meta.startedAt > 0.0 ? recovered.meta.startedAt : nowSeconds();
+    m_updatedAt = nowSeconds();
+    m_recovered = true;
+    m_clientReturned = false;
+
+    m_stateVersion = qMax(recovered.started.stateVersion, recovered.progress.stateVersion);
+    m_title = recovered.started.state.title;
+    seedState();
+
+    // Everything the pipeline had already acknowledged before the restart.
+    m_upstreamSourceSeenSec = recovered.progress.sourceSeenSec;
+    m_upstreamSpeechSeenSec = recovered.progress.speechSeenSec;
+    m_lastAcceptedSeq = recovered.lastAcceptedSeq;
+    m_acceptedPackets = recovered.acceptedPackets;
+    m_acceptedBytes = recovered.acceptedBytes;
+    m_forwardedPackets = recovered.forwardedPackets;
+
+    for (const jrn::Packet &packet : recovered.backlog) {
+        m_queue.append(packet);
+        m_pendingBytes += packet.pcm.size();
+        m_sampleRate = packet.sampleRate ? packet.sampleRate : m_sampleRate;
+        m_channels = packet.channels ? packet.channels : m_channels;
+        if (!packet.audioFormat.isEmpty())
+            m_lastAudioFormat = packet.audioFormat;
+    }
+
+    // The ACK a client would get for replaying its last seq has to be the same
+    // one it got before the restart, or the retry it is about to make looks
+    // like a different answer to the same question.
+    m_lastAck.sessionId = m_sessionId;
+    m_lastAck.streamId = m_started.streamId;
+    m_lastAck.stateVersion = m_stateVersion;
+    m_lastAck.sourceSeenSec = m_upstreamSourceSeenSec;
+    m_lastAck.speechSeenSec = m_upstreamSpeechSeenSec;
+
+    QString error;
+    if (!m_journal.reopen(m_settings.journalDir, m_handle, recovered.meta, m_settings.durability,
+                          m_settings.journalKeep, m_settings.segmentBytes, &error)) {
+        m_journalFailed = true;
+        m_lastError = error;
+        m_lastErrorAt = nowSeconds();
+        LOG_ERROR(applog::cat::Session)
+            << "recovered session" << m_sessionId << "cannot reopen its journal:" << error
+            << "- the backlog will still be delivered, but no new audio is accepted";
+    }
+
+    m_stateLane = new RpcLane(QStringLiteral("state-%1").arg(m_sessionId.left(8)),
+                              m_settings.upstreamTarget, m_settings.upstreamToken);
+
+    setObjectName(QStringLiteral("forward-%1").arg(m_sessionId.left(8)));
+    start();
+    LOG_INFO(applog::cat::Session)
+        << "recovered session" << m_sessionId << "from" << recovered.handle << "-"
+        << recovered.backlog.size() << "packets to re-send (seq" << (recovered.progress.seq + 1)
+        << ".." << recovered.lastAcceptedSeq << "), originally from" << m_settings.client;
 }
 
 SessionBuffer::~SessionBuffer()
@@ -82,44 +173,13 @@ SessionBuffer::~SessionBuffer()
         wait(2000);
     }
     delete m_stateLane;
-    if (m_spool.isOpen())
-        m_spool.close();
+    m_journal.close();
 }
 
-void SessionBuffer::openSpool()
+bool SessionBuffer::awaitingClient() const
 {
-    if (m_settings.spoolDir.trimmed().isEmpty())
-        return;
-    QDir dir(m_settings.spoolDir);
-    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
-        LOG_WARN(applog::cat::Session)
-            << "cannot create the spool directory" << m_settings.spoolDir << "- archiving is off";
-        return;
-    }
-    m_spool.setFileName(dir.filePath(m_sessionId + QStringLiteral(".pcm")));
-    if (!m_spool.open(QIODevice::WriteOnly | QIODevice::Append)) {
-        LOG_WARN(applog::cat::Session) << "cannot open" << m_spool.fileName() << "-"
-                                       << m_spool.errorString() << "- archiving is off";
-        return;
-    }
-    LOG_INFO(applog::cat::Session) << "archiving accepted audio to" << m_spool.fileName();
-}
-
-// Called with m_mutex held.
-void SessionBuffer::archive(const QByteArray &pcm)
-{
-    if (!m_spool.isOpen())
-        return;
-    const qint64 written = m_spool.write(pcm);
-    if (written < 0) {
-        // Losing the archive is not a reason to lose the meeting; say so once
-        // and carry on serving the pipeline.
-        LOG_WARN(applog::cat::Session)
-            << "archive write failed for" << m_sessionId << "-" << m_spool.errorString();
-        m_spool.close();
-        return;
-    }
-    m_spooledBytes += quint64(written);
+    QMutexLocker lock(&m_mutex);
+    return m_recovered && !m_clientReturned;
 }
 
 // Called with m_mutex held.
@@ -166,6 +226,20 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
         return grpc::Status();
     }
 
+    if (m_journalFailed) {
+        // The durability promise cannot be kept for this session.  Refusing is
+        // the honest answer: an ACK here would mean "safe across a restart" and
+        // it would not be true.  The client stops loudly, which is what it does
+        // with any rejection.
+        grpc::Status status;
+        status.code = grpc::Internal;
+        status.message =
+            QStringLiteral("máy chủ đệm không ghi được nhật ký cho phiên này (%1) - từ chối nhận "
+                           "audio thay vì hứa suông là đã lưu bền")
+                .arg(m_lastError);
+        return status;
+    }
+
     if (m_pendingBytes + request.pcm.size() > m_settings.capacityBytes) {
         // Refuse out loud.  Dropping the packet instead would leave a hole in
         // the audio that nothing downstream could detect, and the client is
@@ -194,6 +268,25 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
     // idempotency and ours then agree about which packet is which.
     packet.seq = request.seq;
 
+    // On disk before the ACK, never after.  An ACK means "durably in this
+    // buffer", and after a restart that has to still be true - so the write
+    // happens first and a failed write is a refusal, not a warning.
+    if (m_journal.isOpen()) {
+        QString error;
+        if (!m_journal.appendPacket(packet, &error)) {
+            m_journalFailed = true;
+            m_lastError = error;
+            m_lastErrorAt = nowSeconds();
+            LOG_ERROR(applog::cat::Session)
+                << "journal write failed for" << m_sessionId << "seq=" << request.seq << "-"
+                << error << "- refusing the packet";
+            grpc::Status status;
+            status.code = grpc::Internal;
+            status.message = QStringLiteral("máy chủ đệm không ghi được nhật ký: %1").arg(error);
+            return status;
+        }
+    }
+
     m_queue.append(packet);
     m_pendingBytes += packet.pcm.size();
     m_acceptedPackets += 1;
@@ -203,7 +296,11 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
     m_channels = request.channels ? request.channels : m_channels;
     m_lastAudioFormat = request.audioFormat.isEmpty() ? m_lastAudioFormat : request.audioFormat;
     m_updatedAt = nowSeconds();
-    archive(packet.pcm);
+    if (!m_clientReturned) {
+        m_clientReturned = true;
+        LOG_INFO(applog::cat::Session)
+            << "client came back for recovered session" << m_sessionId << "at seq=" << request.seq;
+    }
 
     asr::PushAudioResponse ack;
     ack.sessionId = m_sessionId;
@@ -273,6 +370,17 @@ grpc::Status SessionBuffer::liveState(asr::StateResponse *out)
     LOG_WARN(applog::cat::Poll) << "live state for" << m_sessionId << "failed:"
                                 << status.toString();
     return status;
+}
+
+void SessionBuffer::requestStop()
+{
+    QMutexLocker lock(&m_mutex);
+    if (m_stopDone || m_stopRequested.loadRelaxed())
+        return;
+    LOG_INFO(applog::cat::Session) << "stop requested for" << m_sessionId << "-"
+                                   << m_queue.size() << "packets still queued";
+    m_stopRequested.storeRelease(1);
+    m_notEmpty.wakeAll();
 }
 
 grpc::Status SessionBuffer::stop(int timeoutMs, asr::StopSessionResponse *out)
@@ -370,6 +478,26 @@ bool SessionBuffer::forward(AsrClient &client, const Packet &packet, grpc::Statu
                 m_stateVersion = response.stateVersion;
             recordForwardMs(ms);
             m_updatedAt = nowSeconds();
+            // After the forward, never before.  A crash between the two
+            // re-sends this seq on the next start and the pipeline's own seq
+            // idempotency turns the duplicate into a no-op; writing this first
+            // would instead lose the packet outright.
+            if (m_journal.isOpen()) {
+                jrn::Progress progress;
+                progress.seq = packet.seq;
+                progress.sourceSeenSec = m_upstreamSourceSeenSec;
+                progress.speechSeenSec = m_upstreamSpeechSeenSec;
+                progress.stateVersion = m_stateVersion;
+                QString journalError;
+                if (!m_journal.appendProgress(progress, &journalError)) {
+                    // Losing the watermark costs a replay after a restart, not
+                    // data - so it is a warning, unlike a lost packet record.
+                    LOG_WARN(applog::cat::Session)
+                        << "journal progress write failed for" << m_sessionId << "-"
+                        << journalError << "- a restart would re-send from seq"
+                        << (packet.seq + 1);
+                }
+            }
             if (announced) {
                 LOG_INFO(applog::cat::Session)
                     << "reconnected to the inference tier - continuing" << m_sessionId
@@ -486,6 +614,16 @@ void SessionBuffer::run()
                 m_lastError = status.toString();
                 m_lastErrorAt = m_finishedAt;
             }
+            // Marks the meeting as over, so the next start does not resume it.
+            // This one is always fsynced: replaying a finished session is worse
+            // than the cost of a single sync.
+            if (m_journal.isOpen()) {
+                QString journalError;
+                if (!m_journal.appendStopped(status.ok(), &journalError)) {
+                    LOG_WARN(applog::cat::Session) << "journal stop record failed for"
+                                                   << m_sessionId << "-" << journalError;
+                }
+            }
             m_stopped.wakeAll();
             break;
         }
@@ -505,8 +643,9 @@ void SessionBuffer::run()
         }
         m_stopped.wakeAll();
     }
-    if (m_spool.isOpen())
-        m_spool.close();
+    // Deliberately not closed on the shutdown path before this point: the
+    // journal is what the next start reads to pick this meeting back up.
+    m_journal.close();
     LOG_INFO(applog::cat::Session)
         << "forwarder for" << m_sessionId << "finished -" << m_forwardedPackets << "of"
         << m_acceptedPackets << "packets delivered," << m_droppedPackets << "dropped,"
@@ -535,7 +674,9 @@ buf::BufferedSession SessionBuffer::snapshot() const
     out.forwardedBytes = m_forwardedBytes;
     out.pendingPackets = quint64(m_queue.size());
     out.pendingBytes = quint64(m_pendingBytes);
-    out.spooledBytes = m_spooledBytes;
+    // Reported as "bytes written to the journal", which is what the field now
+    // means: the journal replaced the old write-only archive.
+    out.spooledBytes = m_journal.bytesWritten();
     out.droppedPackets = m_droppedPackets;
     out.retries = m_retries;
     const double bytesPerSec =

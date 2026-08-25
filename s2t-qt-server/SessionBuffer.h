@@ -24,11 +24,11 @@
 #define SESSIONBUFFER_H
 
 #include "RpcLane.h"
+#include "SessionJournal.h"
 #include "proto/BufferAdmin.h"
 
 #include <QAtomicInt>
 #include <QElapsedTimer>
-#include <QFile>
 #include <QList>
 #include <QMutex>
 #include <QString>
@@ -52,18 +52,32 @@ public:
         qint64 capacityBytes = 0;
         int upstreamTimeoutMs = 30000;
         int statePollMs = 200;
-        // Empty disables the archive.  When set, every accepted packet is also
-        // appended to <spoolDir>/<session>.pcm, so the audio the pipeline was
-        // given still exists after the fact.
-        QString spoolDir;
+        // Empty disables durability: the queue then lives only in RAM and a
+        // restart loses every open session, which is how this server behaved
+        // before journalling existed.  When set, every accepted packet is
+        // written here before the client is ACKed, and a restart picks the
+        // meeting back up - see SessionJournal.h.
+        QString journalDir;
+        jrn::Durability durability = jrn::Durability::Os;
+        jrn::Keep journalKeep = jrn::Keep::Queue;
+        qint64 segmentBytes = 16 * 1024 * 1024;
     };
 
     SessionBuffer(const QString &sessionId, const asr::StartSessionResponse &started,
                   const Settings &settings);
+    // Rebuilds a session from its journal after a restart.  The backlog is put
+    // straight into the queue, so the forwarder sends it before anything the
+    // client pushes next - order across the restart is preserved.
+    SessionBuffer(const jrn::Recovered &recovered, const Settings &settings);
     ~SessionBuffer() override;
 
     QString sessionId() const { return m_sessionId; }
+    QString journalHandle() const { return m_handle; }
     const asr::StartSessionResponse &startResponse() const { return m_started; }
+    // True until the client touches this session again.  A recovered session
+    // nobody comes back for has to be closed eventually, or a server that
+    // restarts a few times accumulates meetings that will never end.
+    bool awaitingClient() const;
 
     // ---- called from connection threads ------------------------------------
 
@@ -82,8 +96,15 @@ public:
     // that sent the audio, and returns the pipeline's own answer.
     grpc::Status stop(int timeoutMs, asr::StopSessionResponse *out);
 
+    // The same thing without waiting for it.  Used by the reaper, which runs on
+    // the thread that accepts connections and must never block there for the
+    // length of an upstream call.
+    void requestStop();
+
     // Ends the thread without a stop_session: used when the whole server is
     // going down, where pretending to close the meeting cleanly would be a lie.
+    // The journal is left intact, which is exactly what makes the next start
+    // able to pick the meeting up again.
     void shutdown();
 
     bool isFinished() const;
@@ -95,16 +116,10 @@ protected:
     void run() override;
 
 private:
-    struct Packet
-    {
-        QByteArray pcm;
-        quint32 sampleRate = 0;
-        quint32 channels = 0;
-        QString audioFormat;
-        bool reset = false;
-        quint32 vadChunkMs = 0;
-        quint64 seq = 0;
-    };
+    // The queue element and the journal record are the same type on purpose: a
+    // packet read back after a restart is then indistinguishable from one that
+    // just arrived, and the forwarder needs no idea which it is holding.
+    using Packet = jrn::Packet;
 
     // Sends one packet, retrying the same seq through transport failures only.
     // Returns false when the session must end; *fatal then holds the status
@@ -112,10 +127,10 @@ private:
     bool forward(AsrClient &client, const Packet &packet, grpc::Status *fatal);
     void recordForwardMs(double ms);
     void noteError(const grpc::Status &status);
-    void openSpool();
-    void archive(const QByteArray &pcm);
+    void seedState();
 
     QString m_sessionId;
+    QString m_handle;
     asr::StartSessionResponse m_started;
     Settings m_settings;
 
@@ -145,7 +160,7 @@ private:
     quint64 m_forwardedBytes = 0;
     quint64 m_droppedPackets = 0;
     quint64 m_retries = 0;
-    quint64 m_spooledBytes = 0;
+
     quint64 m_statePolls = 0;
     quint64 m_stateReaders = 0;
     QList<double> m_forwardMs;
@@ -177,7 +192,11 @@ private:
     bool m_haveState = false;
     QElapsedTimer m_stateAge;
 
-    QFile m_spool;
+    // Written under m_mutex, like everything else it protects.
+    jrn::Journal m_journal;
+    bool m_journalFailed = false;
+    bool m_recovered = false;
+    bool m_clientReturned = false;
 };
 
 #endif // SESSIONBUFFER_H

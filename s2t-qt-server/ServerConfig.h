@@ -11,6 +11,7 @@
 #ifndef SERVERCONFIG_H
 #define SERVERCONFIG_H
 
+#include "SessionJournal.h"
 #include "core/Logger.h"
 
 #include <QString>
@@ -54,10 +55,24 @@ struct ServerConfig
     // turns a stalled pipeline into an out-of-memory kill, and the client
     // already knows how to stop loudly.
     double bufferSeconds = 300.0;
-    // Where audio that could not be forwarded is written while the upstream is
-    // unreachable.  Empty disables spooling, and then a full buffer is simply
-    // a full buffer.
-    QString spoolDir;
+    // Where the per-session journal lives.  Empty means the queue is RAM only
+    // and a restart loses every open meeting; set it and a meeting survives the
+    // server restarting under it.  See SessionJournal.h.
+    QString journalDir;
+    // How far a packet is pushed before the client is told it is safe.
+    // Os survives this process dying; Fsync survives the machine losing power,
+    // at the cost of one fsync per packet.
+    jrn::Durability durability = jrn::Durability::Os;
+    // Whether a journal segment is deleted once the pipeline has acknowledged
+    // everything in it (Queue, the default) or kept until the session is
+    // forgotten (Session, which makes the journal an archive of the meeting and
+    // costs the whole meeting in disk).
+    jrn::Keep journalKeep = jrn::Keep::Queue;
+    qint64 segmentBytes = 16 * 1024 * 1024;
+    // A recovered session nobody comes back for is stopped after this long.
+    // Without it, a server that restarts a few times accumulates meetings that
+    // will never end.  0 disables it.
+    int orphanTimeoutSec = 1800;
     // Cache lifetime for get_live_state.  Below this age every client watching
     // a meeting is answered from one upstream poll; above it, the first caller
     // refreshes and the rest wait for that same refresh.

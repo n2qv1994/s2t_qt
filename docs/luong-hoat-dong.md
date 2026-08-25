@@ -505,15 +505,106 @@ Nếu drain chưa xong trong deadline của client, bộ đệm trả `DEADLINE_
 kèm số gói còn lại và vẫn tiếp tục drain. Lần `stop_session` sau đó nhận lại
 đúng câu trả lời đã lưu, không phải một câu trả lời thứ hai khác.
 
-### 7b.7 Phiên không sống qua lần khởi động lại
+### 7b.7 Phiên sống sót qua lần khởi động lại
 
-Hàng đợi nằm trong RAM và bản đồ phiên cũng vậy. Sau khi server khởi động lại,
-`push_audio` cho một phiên cũ trả `NOT_FOUND`, và thông báo nói thẳng rằng phiên
-bắt đầu trước lần khởi động lại thì không còn ở đây. Tầng suy luận vẫn còn phiên
-ấy — chỉ bộ đệm là không — nên bản chép vẫn soát lại được qua `get_review_state`.
+Mặc định hàng đợi chỉ nằm trong RAM, và khi đó khởi động lại là mất mọi cuộc
+họp đang mở: `push_audio` cho phiên cũ trả `NOT_FOUND` với thông báo nói rõ
+nguyên nhân là nhật ký đang tắt. Đặt `buffer/journal_dir` thì khác hẳn.
+
+**Hình dạng trên đĩa** (`SessionJournal.h`): mỗi phiên một nhật ký nối-thêm,
+chia thành phân đoạn.
+
+```
+<dir>/<handle>.000001.jrn
+<dir>/<handle>.000002.jrn
+
+  đầu phân đoạn  "S2TJ" | version u32 | segment u32 | dự trữ u32
+  bản ghi        type u8 | length u32 | payload | crc32 u32
+```
+
+Bốn loại bản ghi: `Meta` (một lần ở đầu mỗi phân đoạn), `Packet`, `Progress`,
+`Stopped`. Payload mã hoá bằng chính bộ mã proto3 của dự án — số hiệu trường ở
+đây là nội bộ, không ai ngoài tiến trình này đọc, nên chúng đổi được cùng với
+số phiên bản trong đầu phân đoạn.
+
+`handle` **không phải** `session_id`: mã phiên do tầng suy luận cấp nên không
+được tin là an toàn cho tên tệp. Ký tự lạ bị thay, và một digest ngắn của mã
+gốc được nối vào — vừa giữ hai mã khác nhau không đụng tên, vừa làm ánh xạ đó
+tái lập được sau mỗi lần khởi động.
+
+**Hai quy tắc về thứ tự, và toàn bộ tính đúng đắn nằm ở đó:**
+
+1. **`Packet` được ghi TRƯỚC khi client được ACK.** ACK nghĩa là "đã nằm chắc
+   trong bộ đệm"; điều đó phải còn đúng sau khi khởi động lại, nếu không thì nó
+   chưa bao giờ đúng. Ghi hỏng là **từ chối gói** (`INTERNAL`), không phải một
+   dòng cảnh báo — một phiên âm thầm hạ cấp xuống "không bền" còn tệ hơn một
+   phiên từ chối thẳng.
+2. **`Progress` được ghi SAU khi đẩy lên tầng suy luận thành công.** Chết giữa
+   hai việc đó thì `seq` ấy được gửi lại ở lần khởi động sau, và tính bất biến
+   theo `seq` của tầng suy luận biến bản trùng thành vô hại. Ghi ngược lại thì
+   mất hẳn gói — bản ghi nói "đã gửi" trong khi chưa.
+
+**Bản ghi rách ở cuối là bình thường, không phải hỏng.** Một cú chết giữa lúc
+ghi để lại đúng một bản ghi dở. CRC bắt được, và bộ đọc coi đó là hết dữ liệu.
+Đây là hình dạng thường gặp nhất của một nhật ký sau đúng cái sự cố mà tính
+năng này sinh ra để lo, nên nó phải đọc được, không phải báo lỗi.
+
+**Khôi phục** chạy trong constructor của `BufferHub`, trước khi cổng được mở —
+một client kết nối lại ngay giây đầu tiên phải thấy cuộc họp đã ở đó. Với mỗi
+nhật ký: đọc `Meta`, lấy `Progress` cao nhất làm mốc, nạp mọi `Packet` có `seq`
+lớn hơn mốc vào thẳng hàng đợi. Vòng đẩy vì thế gửi phần tồn đọng **trước** bất
+cứ thứ gì client đẩy tiếp — thứ tự xuyên qua lần khởi động lại được giữ nguyên.
+
+Có `Stopped` nghĩa là cuộc họp đã kết thúc sạch sẽ: nhật ký bị xoá, phiên không
+được dựng lại. Bản ghi đó luôn được `fsync`, bất kể chế độ, vì dựng lại một
+phiên đã xong còn tệ hơn cái giá của một lần đồng bộ.
+
+**Với client thì một lần khởi động lại là vô hình.** Nó nhận vài lỗi vận
+chuyển, vòng thử lại sẵn có gửi lại đúng `seq` cũ, bộ đệm phát lại ACK đã lưu,
+và cuộc họp đi tiếp. Hàng đợi 60 giây mặc định của client hấp thụ trọn một lần
+khởi động lại thông thường.
+
+**Độ bền là một lựa chọn, và tài liệu nói thật về nó:**
+
+| `buffer/durability` | Chịu được | Giá |
+|---|---|---|
+| `os` (mặc định) | tiến trình chết, máy chủ khởi động lại | không đáng kể |
+| `fsync` | thêm cả mất điện đột ngột | một `fsync` mỗi gói |
+
+Ngay cả ở chế độ `os`, `Journal::write()` vẫn gọi `QFile::flush()` sau mỗi bản
+ghi. Không có nó thì bản ghi "bền" vẫn còn nằm trong tiến trình lúc nó chết —
+đúng cái tình huống duy nhất mà cả tệp này sinh ra để chống.
+
+**Dung lượng đĩa** bị chặn bởi chính cái trần đã chặn hàng đợi. Với
+`journal_keep=queue` (mặc định), một phân đoạn bị xoá ngay khi tầng suy luận đã
+nhận hết mọi thứ trong đó, nên đĩa bám theo độ sâu hàng đợi chứ không theo độ
+dài cuộc họp. `journal_keep=session` giữ lại tất cả và biến nhật ký thành bản
+lưu của cả cuộc họp, đổi lại ~96 kB mỗi giây.
+
+**Những gì nhật ký không làm.** Nó không làm bộ đệm chứa được nhiều hơn — đầy
+vẫn là `RESOURCE_EXHAUSTED`. Và nó không cứu được một phiên mà **tầng suy luận**
+đã bỏ: nếu adapter quên phiên trong lúc bộ đệm nằm xuống, gói đầu tiên gửi lại
+nhận một lỗi không phải lỗi vận chuyển, và phiên kết thúc ồn ào đúng như mọi
+lỗi chí mạng khác.
 
 Chuyển tiếp mù `push_audio` cho một phiên không có bộ đệm sẽ làm mọi bộ đếm nói
-dối, nên nó không được phép.
+dối, nên nó vẫn không được phép — kể cả khi tầng suy luận vẫn còn giữ phiên ấy.
+Bản chép cũ thì vẫn soát lại được qua `get_review_state`, vì đó là RPC chuyển
+tiếp và không cần bộ đệm.
+
+### 7b.7b Phiên mồ côi
+
+Một phiên được khôi phục mà không client nào quay lại nhận sẽ bị đóng sau
+`buffer/orphan_timeout_sec` (mặc định 1800 giây) — phần tồn đọng vẫn được đẩy
+lên trước, vì việc đó xảy ra ngay khi vòng đẩy chạy. Không có mốc này thì một
+máy chủ khởi động lại vài lần sẽ tích lại những cuộc họp không bao giờ kết thúc.
+
+Chỉ phiên **được khôi phục** mới bị tính là mồ côi. Một client đang sống mà im
+lặng một lúc là chuyện khác và được để yên.
+
+Bộ dọn chạy trên luồng `main` — luồng nhận kết nối — nên nó gọi `requestStop()`
+chứ không phải `stop()`: đặt cờ rồi đi tiếp. Vòng đẩy làm phần drain và
+`stop_session` trên luồng của chính nó, và nhịp dọn sau thấy phiên đã kết thúc.
 
 ### 7b.8 Dọn dẹp và tắt
 
@@ -789,11 +880,11 @@ còn kẹt trên socket:
 | `shared/proto/` | `ProtoWire` (proto3 tay, hai chiều), `AsrSession`, `SpeakerRegistry`, `BufferAdmin` — struct chép tay theo `.proto` |
 | `shared/grpc/` | `Hpack`, `Http2Client`, `GrpcChannel`, `AsrClient` (gọi đi); `Http2Server`, `GrpcServer` (nhận); `Methods.h` (đường method dùng chung cho cả hai bên) |
 | `shared/core/` | `Logger` — hệ thống nhật ký, chung cho cả hai chương trình |
-| `s2t-qt-server/` | `main`, `ServerConfig`, `RpcLane`, `UpstreamPool`, `SessionBuffer`, `BufferHub`, `BufferService`, `ServerSelfTest` |
+| `s2t-qt-server/` | `main`, `ServerConfig`, `RpcLane`, `UpstreamPool`, `SessionJournal` (bản ghi trên đĩa cho việc khôi phục), `SessionBuffer`, `BufferHub`, `BufferService`, `ServerSelfTest` |
 | `s2t-qt-client/core/` | `SessionController` (mặt tiền), `SessionWorker`, `StatePoller`, `RpcExecutor`, `AudioQueue`, `TranscriptModel`, `AppConfig`, `SelfTest` |
 | `s2t-qt-client/audio/` | `AudioCapture`, `MicDenoise` (điều khiển xvf3800), `WavIo`, `Transcode` (ffmpeg) |
 | `s2t-qt-client/ui/` | `TimelineView`, `Dialogs`, `ReviewPanel`, `EnrollDialog`, `TraceWindow`, `EvidenceWindow`, `DiagnosticsWindow`, `LogControls` (combo chế độ/mức log dùng chung) |
-| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp`, `s2t-qt-server.service`, `s2t-qt-server.conf.sample` |
+| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp`, `s2t-qt-server.service`, `s2t-qt-server.conf.sample`, `interop_check.py` (grpc thật gọi vào server này), `restart_check.py` (SIGKILL giữa cuộc họp) |
 | `docs/` | `huong-dan-su-dung.md` (vận hành), `luong-hoat-dong.md` (tài liệu này), `danh-sach-api.md` (hợp đồng gRPC cho client bên ngoài), `slide.pdf` (mô tả kiến trúc gốc) |
 
 `shared/` được nạp bằng `include(shared/shared.pri)` hoặc
@@ -850,7 +941,26 @@ Chẩn đoán*, cùng nút **Đọc trạng thái đệm** hiển thị `get_buf
 `s2t-qt-server --selftest` là bài đáng giá nhất: nó dựng một tầng suy luận giả,
 đặt `BufferHub` và `BufferService` **thật** trước nó, rồi lấy một client thật
 lái cả hai — nên nó kiểm được những thứ chỉ riêng bộ đệm mới có thể làm sai:
-thứ tự gói, rào chắn drain, phát lại ACK, và bộ đệm trạng thái.
+thứ tự gói, rào chắn drain, phát lại ACK, bộ đệm trạng thái, và việc khôi phục
+sau khi khởi động lại.
+
+Hai bài nữa cần `python3` + `grpcio-tools` (máy RHEL có sẵn), và cả hai đều
+kiểm được những thứ mà một bài tự-kiểm không thể:
+
+```bash
+python3 tools/interop_check.py 127.0.0.1:8800 <token>
+python3 tools/restart_check.py ./s2t-qt-server [--durability fsync]
+```
+
+- `interop_check.py` cho **grpc C-core thật** gọi vào server tự viết. Client và
+  server ở đây dùng chung một bản HPACK và một bộ mã proto3, nên chúng có thể
+  đồng ý với nhau mà cả hai cùng sai; grpc C-core thì không đồng ý với ai cả.
+  Stub được sinh từ chính `.proto` in trong `danh-sach-api.md`, nên nó cũng
+  kiểm luôn tài liệu.
+- `restart_check.py` **giết máy chủ bằng `SIGKILL`** giữa cuộc họp. Bài
+  `--selftest` chỉ tháo đối tượng, nên nó không chứng minh được điều quan trọng
+  nhất: rằng bản ghi đã nằm ngoài tiến trình trước khi client được ACK.
+  `SIGKILL` không chạy destructor và không flush gì cả.
 
 ---
 
@@ -915,3 +1025,23 @@ thứ tự gói, rào chắn drain, phát lại ACK, và bộ đệm trạng th�
 17. **`grpc::Server` luôn trả `:status 200`, và lỗi đi bằng dạng
     trailers-only.** Đổi sang một mã HTTP khác sẽ khiến mọi client đúng chuẩn
     báo lỗi truyền tải thay vì báo đúng trạng thái gRPC.
+18. **Bản ghi `Packet` phải nằm trên đĩa trước khi client được ACK, và bản ghi
+    `Progress` phải nằm sau khi đẩy lên tầng suy luận thành công.** Đảo quy tắc
+    thứ nhất thì ACK thành lời hứa suông; đảo quy tắc thứ hai thì một cú chết
+    đúng lúc làm mất hẳn một gói. Xem mục 7b.7.
+19. **Ghi nhật ký hỏng là từ chối gói, không phải ghi cảnh báo.** Một phiên âm
+    thầm hạ cấp xuống "không bền" nói dối client về ý nghĩa của ACK; một phiên
+    từ chối thẳng thì không. Với `Progress` thì ngược lại — mất nó chỉ tốn một
+    lần gửi lại, nên đó mới là chỗ dùng cảnh báo.
+20. **Bản ghi rách ở cuối nhật ký là bình thường.** Đó là hình dạng của một
+    nhật ký sau đúng cái sự cố mà nó sinh ra để lo. Coi nó là hỏng và từ chối
+    khôi phục sẽ vứt bỏ cả cuộc họp vì mười ba byte cuối.
+21. **Bộ dọn chạy trên luồng nhận kết nối, nên nó không được chờ bất cứ thứ gì
+    trên mạng.** Đóng một phiên mồ côi là `requestStop()` chứ không phải
+    `stop()`.
+22. **Một thư mục nhật ký chỉ được một tiến trình dùng.** Hai máy chủ dùng
+    chung sẽ cùng khôi phục một phiên và cùng gửi lại một gói, nhân đôi chữ.
+    `BufferHub` giữ một `QLockFile` ở đó và từ chối khởi động nếu đã có ai giữ.
+    Phải là `QLockFile` chứ không phải một tệp `O_EXCL`: nó ghi pid và chiếm
+    lại khoá của một tiến trình đã chết, nên `SIGKILL` không để lại khoá chết
+    chặn mất đúng cái lần khởi động lại mà nhật ký sinh ra để phục vụ.

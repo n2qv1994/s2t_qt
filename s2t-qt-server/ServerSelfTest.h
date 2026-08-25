@@ -30,7 +30,15 @@ int runLoopbackTests();
 // one upstream poll out to many readers.
 int runBufferTests();
 
-// All three.
+// Kills a Server buffer mid-meeting with packets still queued, brings a new one
+// up over the same journal, and checks the meeting carries on: the backlog goes
+// upstream in order with no duplicates and no gaps, a resent seq still replays
+// its stored ACK, and the client simply continues at the next seq.  Also checks
+// that a journal ending in a half-written record - the normal shape after a
+// crash - reads back as everything before the tear.
+int runRestartTests();
+
+// All four.
 int runAll();
 
 int runProbe(const QString &target, const QString &token);
