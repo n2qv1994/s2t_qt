@@ -47,6 +47,24 @@ constexpr const char *GetBufferStatus = "/s2t.buffer.v1.BufferAdminService/get_b
 constexpr const char *ListBufferedSessions =
     "/s2t.buffer.v1.BufferAdminService/list_buffered_sessions";
 
+// ---- nvidia.riva.asr.RivaSpeechRecognition --------------------------------
+// The inference tier, when s2t-qt-server is configured for Riva.  Only the
+// server ever calls these; a client never learns the backend even exists.
+constexpr const char *RivaRecognize = "/nvidia.riva.asr.RivaSpeechRecognition/Recognize";
+constexpr const char *RivaStreamingRecognize =
+    "/nvidia.riva.asr.RivaSpeechRecognition/StreamingRecognize";
+constexpr const char *RivaGetConfig =
+    "/nvidia.riva.asr.RivaSpeechRecognition/GetRivaSpeechRecognitionConfig";
+
+// ---- inference.GRPCInferenceService ---------------------------------------
+// The same tier when configured for Triton: the KServe v2 predict protocol,
+// spoken straight to the model repository rather than through a Python adapter.
+constexpr const char *TritonServerLive = "/inference.GRPCInferenceService/ServerLive";
+constexpr const char *TritonServerReady = "/inference.GRPCInferenceService/ServerReady";
+constexpr const char *TritonModelReady = "/inference.GRPCInferenceService/ModelReady";
+constexpr const char *TritonRepositoryIndex = "/inference.GRPCInferenceService/RepositoryIndex";
+constexpr const char *TritonModelInfer = "/inference.GRPCInferenceService/ModelInfer";
+
 } // namespace rpcpath
 
 #endif // GRPCMETHODS_H

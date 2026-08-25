@@ -10,6 +10,7 @@
 
 #include <QByteArray>
 #include <QList>
+#include <QMap>
 #include <QString>
 #include <QtGlobal>
 
@@ -52,6 +53,15 @@ public:
     void putBytes(int field, const QByteArray &value);
     void putSubMessage(int field, const QByteArray &encoded);
 
+    // proto3 `optional` fields have explicit presence: a value that happens to
+    // equal the type default still has to go on the wire, or "set to 0" and
+    // "not set" become the same message.  Riva's EndpointingConfig is nothing
+    // but optional fields, and 0 is a meaningful threshold in it - so these
+    // write unconditionally where the put* above skip defaults.  The caller
+    // owns the presence flag and only calls these when the field is set.
+    void putOptionalInt32(int field, qint32 value);
+    void putOptionalFloat(int field, float value);
+
     // Repeated scalars are read back packed by the adapter's protobuf runtime,
     // so write them packed too.
     void putPackedFloat(int field, const QList<float> &values);
@@ -70,6 +80,18 @@ public:
         for (const QString &value : values)
             putString(field, value);
     }
+
+    void putRepeatedBytes(int field, const QList<QByteArray> &values)
+    {
+        for (const QByteArray &value : values)
+            putBytes(field, value);
+    }
+
+    // A proto3 `map<string, string>` is wire-identical to a repeated message
+    // with key = 1 and value = 2.  Riva's custom_configuration and
+    // runtime_config are the only maps this project speaks, and writing them
+    // by hand once here is the whole of map support.
+    void putStringMap(int field, const QMap<QString, QString> &values);
 
 private:
     QByteArray m_buf;
@@ -113,6 +135,11 @@ public:
     void readPackedFloat(WireType type, QList<float> *out);
     void readPackedInt32(WireType type, QList<qint32> *out);
     void readPackedInt64(WireType type, QList<qint64> *out);
+
+    // Reads one `map<string, string>` entry - a submessage of key = 1,
+    // value = 2 - and folds it into `out`.  A repeated key overwrites, which is
+    // what protobuf itself does with a duplicate map entry.
+    void readStringMapEntry(QMap<QString, QString> *out);
 
     template <typename T>
     void readMessageInto(T *out)

@@ -59,7 +59,59 @@ public:
                  Response *out,
                  QString *error);
 
+    // ---- long-lived streams ------------------------------------------------
+    //
+    // request() is unary by construction: it puts END_STREAM on the last DATA
+    // frame and then reads to end of stream.  Riva's StreamingRecognize and
+    // Triton's ModelStreamInfer are both bidirectional - the request body keeps
+    // growing for the length of a meeting while responses come back on the same
+    // stream - so they get their own small state machine here.
+    //
+    // One stream at a time per connection, for exactly the reason request()
+    // opens one at a time: the HPACK decoder is per connection, so two
+    // interleaved header blocks would desynchronise it for every later call.
+    bool openStream(const QList<hpack::Header> &headers, int timeoutMs, QString *error);
+    // Appends one message to the request body.  `endStream` is the half-close
+    // that tells the far side no more audio is coming.
+    bool sendStreamData(const QByteArray &body, bool endStream, int timeoutMs, QString *error);
+    // Absorbs whatever has arrived into streamBuffer(), waiting at most
+    // `waitMs` for the first byte.  waitMs == 0 polls - it returns at once with
+    // whatever was already buffered, which is what lets one thread push audio
+    // and collect results without either starving the other.
+    bool pumpStream(int waitMs, QString *error);
+
+    bool streamOpen() const { return m_stream.open; }
+    bool streamSendClosed() const { return m_stream.sendClosed; }
+    // True once the far side has sent END_STREAM: streamBuffer() then holds
+    // everything there will ever be, and streamTrailers() is final.
+    bool streamEnded() const { return m_stream.recvClosed; }
+    QByteArray &streamBuffer() { return m_stream.buffer; }
+    // Bytes received but not yet taken out of the buffer.  A caller uses this
+    // to tell "the stream ended" from "the stream ended and I have read
+    // everything it said".
+    int streamPending() const { return m_stream.buffer.size(); }
+    const QList<hpack::Header> &streamHeaders() const { return m_stream.headers; }
+    const QList<hpack::Header> &streamTrailers() const { return m_stream.trailers; }
+    // Sends RST_STREAM if the stream is still live, then forgets it.  The
+    // connection stays usable.
+    void closeStream();
+
 private:
+    struct StreamState
+    {
+        quint32 id = 0;
+        bool open = false;
+        bool sendClosed = false;
+        bool recvClosed = false;
+        bool seenHeaders = false;
+        QList<hpack::Header> headers;
+        QList<hpack::Header> trailers;
+        QByteArray buffer;
+        QByteArray pendingHeaderBlock;
+        bool pendingIsTrailer = false;
+        bool awaitingContinuation = false;
+    };
+
     struct Frame
     {
         quint32 length = 0;
@@ -86,6 +138,12 @@ private:
     bool awaitSendWindow(quint32 streamId, int needed, QElapsedTimer &clock, int timeoutMs,
                          QString *error);
 
+    // True when a whole frame - header and payload - is already buffered, so
+    // readFrame() cannot block.  This is what makes pumpStream(0) a poll.
+    bool frameReady() const;
+    // Folds one frame belonging to the open stream into m_stream.
+    bool absorbStreamFrame(const Frame &frame, QElapsedTimer &clock, int timeoutMs, QString *error);
+
     QTcpSocket *m_socket = nullptr;
     hpack::Decoder m_decoder;
     QString m_host;
@@ -98,6 +156,7 @@ private:
     quint32 m_peerInitialWindow = 65535;
     bool m_goaway = false;
     QString m_goawayReason;
+    StreamState m_stream;
 };
 
 } // namespace http2

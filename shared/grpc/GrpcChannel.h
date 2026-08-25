@@ -54,8 +54,12 @@ struct Status
     QString toString() const;
 };
 
+class ClientStream;
+
 class Channel
 {
+    friend class ClientStream;
+
 public:
     // `target` is "host:port"; `token` goes out as `authorization: Bearer ...`
     // on every call, and may be empty when the adapter runs without a token.
@@ -86,6 +90,10 @@ public:
 
 private:
     bool ensureOpen(int timeoutMs, Status *status);
+    // The header block every call on this channel sends.  Shared by invoke()
+    // and ClientStream so a token or a content-type can never be right on one
+    // path and wrong on the other.
+    QList<hpack::Header> callHeaders(const QString &fullMethod, int timeoutMs) const;
 
     QString m_target;
     QString m_host;
@@ -93,6 +101,58 @@ private:
     QByteArray m_authority;
     QByteArray m_bearer;
     http2::Http2Connection m_connection;
+};
+
+// One streaming RPC on a Channel.
+//
+// Bidirectional by construction, because that is the shape both backends need:
+// Riva's StreamingRecognize takes audio for the length of a meeting and answers
+// as it goes, and Triton's ModelStreamInfer does the same.  A server-streaming
+// call is this with closeSend() called right after start().
+//
+// The channel carries one stream at a time and the stream borrows it, so a
+// ClientStream must not outlive its Channel and no unary call may be made on
+// that channel while a stream is open.  Both hold for the intended use: a
+// SessionBuffer owns one lane, one channel and one meeting.
+class ClientStream
+{
+public:
+    explicit ClientStream(Channel *channel) : m_channel(channel) {}
+    ~ClientStream();
+
+    ClientStream(const ClientStream &) = delete;
+    ClientStream &operator=(const ClientStream &) = delete;
+
+    // Opens the stream. `timeoutMs` is the deadline for the *whole* call, sent
+    // as grpc-timeout; pass 0 for a meeting-length stream with no deadline.
+    Status start(const QString &fullMethod, int timeoutMs);
+    // Sends one message. Blocks only for flow control.
+    Status send(const QByteArray &message, int timeoutMs);
+    // Half-closes: no more messages will be sent. The far side answers what is
+    // still outstanding and then ends the stream.
+    Status closeSend(int timeoutMs);
+
+    // Pulls the next complete message. `*have` false with an OK status means
+    // "nothing yet" - ended() tells that apart from "nothing ever again".
+    // waitMs == 0 polls, which is what lets one thread push audio and collect
+    // results without either starving the other.
+    Status receive(QByteArray *message, bool *have, int waitMs);
+
+    bool active() const { return m_active; }
+    bool ended() const;
+
+    // The trailing grpc-status. Only meaningful once ended() is true; calling
+    // it earlier reports FAILED_PRECONDITION rather than guessing OK.
+    Status finish();
+    // Tears the stream down without waiting for the far side.
+    void cancel();
+
+private:
+    Status headerStatus() const;
+
+    Channel *m_channel = nullptr;
+    bool m_active = false;
+    bool m_checkedHeaders = false;
 };
 
 } // namespace grpc

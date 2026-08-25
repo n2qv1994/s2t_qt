@@ -82,6 +82,23 @@ void Writer::putFloat(int field, float value)
     m_buf.append(raw, 4);
 }
 
+void Writer::putOptionalInt32(int field, qint32 value)
+{
+    putTag(field, VarintType);
+    putVarint(quint64(qint64(value)));
+}
+
+void Writer::putOptionalFloat(int field, float value)
+{
+    putTag(field, Fixed32Type);
+    quint32 bits = 0;
+    std::memcpy(&bits, &value, 4);
+    char raw[4];
+    for (int i = 0; i < 4; ++i)
+        raw[i] = char((bits >> (8 * i)) & 0xff);
+    m_buf.append(raw, 4);
+}
+
 void Writer::putDouble(int field, double value)
 {
     if (value == 0.0)
@@ -316,6 +333,40 @@ void Reader::skip(WireType type)
         fail();
         break;
     }
+}
+
+void Writer::putStringMap(int field, const QMap<QString, QString> &values)
+{
+    for (auto it = values.constBegin(); it != values.constEnd(); ++it) {
+        Writer entry;
+        entry.putString(1, it.key());
+        entry.putString(2, it.value());
+        putSubMessage(field, entry.data());
+    }
+}
+
+void Reader::readStringMapEntry(QMap<QString, QString> *out)
+{
+    const QByteArray sub = readBytes();
+    if (!m_ok)
+        return;
+    Reader nested(sub);
+    QString key;
+    QString value;
+    int field = 0;
+    WireType type = VarintType;
+    while (nested.nextField(&field, &type)) {
+        switch (field) {
+        case 1: key = nested.readString(); break;
+        case 2: value = nested.readString(); break;
+        default: nested.skip(type); break;
+        }
+    }
+    if (!nested.ok()) {
+        m_ok = false;
+        return;
+    }
+    out->insert(key, value);
 }
 
 } // namespace pw

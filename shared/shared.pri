@@ -19,6 +19,8 @@ SOURCES += \
     $$PWD/proto/AsrSession.cpp \
     $$PWD/proto/SpeakerRegistry.cpp \
     $$PWD/proto/BufferAdmin.cpp \
+    $$PWD/proto/RivaAsr.cpp \
+    $$PWD/proto/TritonInfer.cpp \
     $$PWD/grpc/Hpack.cpp \
     $$PWD/grpc/Http2Client.cpp \
     $$PWD/grpc/GrpcChannel.cpp \
@@ -30,6 +32,8 @@ HEADERS += \
     $$PWD/proto/AsrSession.h \
     $$PWD/proto/SpeakerRegistry.h \
     $$PWD/proto/BufferAdmin.h \
+    $$PWD/proto/RivaAsr.h \
+    $$PWD/proto/TritonInfer.h \
     $$PWD/grpc/Hpack.h \
     $$PWD/grpc/Http2Client.h \
     $$PWD/grpc/GrpcChannel.h \
