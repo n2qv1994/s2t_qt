@@ -15,7 +15,7 @@
 #ifndef RPCLANE_H
 #define RPCLANE_H
 
-#include "grpc/AsrClient.h"
+#include "grpc/GrpcChannel.h"
 
 #include <QObject>
 #include <QString>
@@ -40,7 +40,7 @@ public:
     // Runs `work` on the lane's thread and returns what it returned.  Blocks
     // the caller for the length of the upstream call, deliberately: the caller
     // is an HTTP/2 connection thread that owes a reply on that same call.
-    grpc::Status call(const std::function<grpc::Status(AsrClient &)> &work);
+    grpc::Status call(const std::function<grpc::Status(grpc::Channel &)> &work);
 
     // Drops the TCP connection so the next call dials again.  Used after a
     // transport failure instead of waiting out HTTP/2's own reconnect.
@@ -52,7 +52,7 @@ private:
     QString m_name;
     QThread *m_thread = nullptr;
     QObject *m_anchor = nullptr;
-    AsrClient *m_client = nullptr;
+    grpc::Channel *m_channel = nullptr;
 };
 
 #endif // RPCLANE_H

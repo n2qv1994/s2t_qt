@@ -50,6 +50,9 @@ SOURCES += \
     main.cpp \
     ServerConfig.cpp \
     RpcLane.cpp \
+    backend/InferenceBackend.cpp \
+    backend/TritonBackend.cpp \
+    backend/RivaBackend.cpp \
     UpstreamPool.cpp \
     SessionJournal.cpp \
     SessionBuffer.cpp \
@@ -60,6 +63,9 @@ SOURCES += \
 HEADERS += \
     ServerConfig.h \
     RpcLane.h \
+    backend/InferenceBackend.h \
+    backend/TritonBackend.h \
+    backend/RivaBackend.h \
     UpstreamPool.h \
     SessionJournal.h \
     SessionBuffer.h \

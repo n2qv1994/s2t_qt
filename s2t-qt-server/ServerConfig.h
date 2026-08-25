@@ -35,10 +35,28 @@ struct ServerConfig
     int idleTimeoutMs = 300000;
 
     // ---- upstream side (the inference tier) --------------------------------
-    // grpc_session_adapter.py in front of Triton.  The Server buffer is the
-    // only thing that talks to it now.
-    QString upstreamTarget = QStringLiteral("192.168.1.47:8700");
+    //
+    // Until 2026-08-25 this was grpc_session_adapter.py, a Python service that
+    // owned the whole pipeline and answered asr.ui.v1 directly.  It is gone:
+    // the Server buffer now talks to the inference tier itself, and there are
+    // two of them.  `backend` picks which, and it changes what `target` means:
+    //
+    //   triton  inference.GRPCInferenceService, KServe v2.  The model
+    //           repository as deployed - asr_diar_session and the ten models
+    //           behind it.  Default port 8011.
+    //   riva    nvidia.riva.asr.RivaSpeechRecognition.  Default port 50051.
+    //
+    // Anything else is refused at startup rather than left to fail on the first
+    // packet: a typo here would otherwise look like an unreachable server.
+    QString backend = QStringLiteral("triton");
+    QString upstreamTarget = QStringLiteral("192.168.1.47:8011");
     QString upstreamToken;
+    // Which model to decode with.  Empty means the backend's own default, which
+    // for Triton is asr_diar_session and for Riva is whatever that server was
+    // deployed with.
+    QString model;
+    // Only Riva uses this; Triton's model repository already implies it.
+    QString language = QStringLiteral("vi-VN");
     // Channels kept open for relayed, request-scoped RPCs (review, audio,
     // edit, enrolment, trace).  The audio path and the live-state poll are
     // deliberately NOT in this pool - each session owns dedicated channels for

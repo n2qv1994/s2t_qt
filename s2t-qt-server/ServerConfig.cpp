@@ -91,6 +91,8 @@ static const KnownFlag kFlags[] = {
     {"--config", true},          {"--listen", true},
     {"--token", true},           {"--upstream", true},
     {"--upstream-token", true},  {"--upstream-lanes", true},
+    {"--backend", true},         {"--model", true},
+    {"--language", true},
     {"--journal-dir", true},     {"--durability", true},
     {"--journal-keep", true},    {"--orphan-timeout-sec", true},
     {"--buffer-seconds", true},  {"--state-poll-ms", true},
@@ -145,6 +147,9 @@ bool ServerConfig::load(const QStringList &args, QString *error)
 
         upstreamTarget = ini.value(QStringLiteral("upstream/target"), upstreamTarget).toString();
         upstreamToken = ini.value(QStringLiteral("upstream/token"), upstreamToken).toString();
+        backend = ini.value(QStringLiteral("upstream/backend"), backend).toString();
+        model = ini.value(QStringLiteral("upstream/model"), model).toString();
+        language = ini.value(QStringLiteral("upstream/language"), language).toString();
         upstreamLanes = ini.value(QStringLiteral("upstream/lanes"), upstreamLanes).toInt();
         upstreamTimeoutMs =
             ini.value(QStringLiteral("upstream/timeout_ms"), upstreamTimeoutMs).toInt();
@@ -240,6 +245,15 @@ bool ServerConfig::load(const QStringList &args, QString *error)
     if (!takeValue(args, QStringLiteral("--upstream-token"), &upstreamToken, &got, error))
         return false;
     got = false;
+    if (!takeValue(args, QStringLiteral("--backend"), &backend, &got, error))
+        return false;
+    got = false;
+    if (!takeValue(args, QStringLiteral("--model"), &model, &got, error))
+        return false;
+    got = false;
+    if (!takeValue(args, QStringLiteral("--language"), &language, &got, error))
+        return false;
+    got = false;
     if (!takeValue(args, QStringLiteral("--journal-dir"), &journalDir, &got, error))
         return false;
 
@@ -297,6 +311,18 @@ bool ServerConfig::load(const QStringList &args, QString *error)
         *error = QStringLiteral("chưa cấu hình địa chỉ tầng suy luận (upstream/target)");
         return false;
     }
+    // Same rule as the unknown-flag table: a typo here would otherwise start
+    // happily and look like an unreachable inference tier for the rest of the
+    // meeting, which is a much more expensive way to find out.
+    backend = backend.trimmed().toLower();
+    if (backend != QStringLiteral("triton") && backend != QStringLiteral("riva")) {
+        *error = QStringLiteral("backend '%1' không hợp lệ (upstream/backend phải là 'triton' "
+                                "hoặc 'riva')")
+                     .arg(backend);
+        return false;
+    }
+    if (model.trimmed().isEmpty() && backend == QStringLiteral("triton"))
+        model = QStringLiteral("asr_diar_session");
     maxConnections = qBound(1, maxConnections, 4096);
     upstreamLanes = qBound(1, upstreamLanes, 64);
     upstreamTimeoutMs = qBound(1000, upstreamTimeoutMs, 600000);
@@ -326,6 +352,9 @@ void ServerConfig::save(const QString &path, QString *error) const
     ini.setValue(QStringLiteral("listen/idle_timeout_ms"), idleTimeoutMs);
     ini.setValue(QStringLiteral("upstream/target"), upstreamTarget);
     ini.setValue(QStringLiteral("upstream/token"), upstreamToken);
+    ini.setValue(QStringLiteral("upstream/backend"), backend);
+    ini.setValue(QStringLiteral("upstream/model"), model);
+    ini.setValue(QStringLiteral("upstream/language"), language);
     ini.setValue(QStringLiteral("upstream/lanes"), upstreamLanes);
     ini.setValue(QStringLiteral("upstream/timeout_ms"), upstreamTimeoutMs);
     ini.setValue(QStringLiteral("upstream/probe_ms"), upstreamProbeMs);
@@ -362,7 +391,8 @@ QStringList ServerConfig::describe() const
           << QStringLiteral("lắng nghe        : %1:%2").arg(listenAddress).arg(listenPort)
           << QStringLiteral("token client     : %1").arg(listenTokenState)
           << QStringLiteral("kết nối tối đa   : %1").arg(maxConnections)
-          << QStringLiteral("tầng suy luận    : %1").arg(upstreamTarget)
+          << QStringLiteral("tầng suy luận    : %1 (%2)").arg(upstreamTarget, backend)
+          << QStringLiteral("mô hình          : %1").arg(model.isEmpty() ? QStringLiteral("(mặc định)") : model)
           << QStringLiteral("token suy luận   : %1").arg(upstreamTokenState)
           << QStringLiteral("kênh dùng lại    : %1").arg(upstreamLanes)
           << QStringLiteral("đệm mỗi phiên    : %1 giây").arg(bufferSeconds, 0, 'f', 0)

@@ -15,7 +15,7 @@ RpcLane::RpcLane(const QString &name, const QString &target, const QString &toke
     // Created *inside* the lane thread, which is the whole point of this
     // class - see the header.
     QMetaObject::invokeMethod(
-        m_anchor, [this, target, token]() { m_client = new AsrClient(target, token); },
+        m_anchor, [this, target, token]() { m_channel = new grpc::Channel(target, token); },
         Qt::BlockingQueuedConnection);
     LOG_DEBUG(applog::cat::Rpc) << "lane" << name << "ready for" << target;
 }
@@ -26,8 +26,8 @@ RpcLane::~RpcLane()
         QMetaObject::invokeMethod(
             m_anchor,
             [this]() {
-                delete m_client;
-                m_client = nullptr;
+                delete m_channel;
+                m_channel = nullptr;
             },
             Qt::BlockingQueuedConnection);
         delete m_anchor;
@@ -45,7 +45,7 @@ RpcLane::~RpcLane()
     }
 }
 
-grpc::Status RpcLane::call(const std::function<grpc::Status(AsrClient &)> &work)
+grpc::Status RpcLane::call(const std::function<grpc::Status(grpc::Channel &)> &work)
 {
     grpc::Status status;
     if (!m_anchor || !m_thread || !m_thread->isRunning()) {
@@ -56,8 +56,8 @@ grpc::Status RpcLane::call(const std::function<grpc::Status(AsrClient &)> &work)
     QMetaObject::invokeMethod(
         m_anchor,
         [this, &work, &status]() {
-            if (m_client)
-                status = work(*m_client);
+            if (m_channel)
+                status = work(*m_channel);
             else {
                 status.code = grpc::Unavailable;
                 status.message = QStringLiteral("kênh %1 chưa sẵn sàng").arg(m_name);
@@ -74,8 +74,8 @@ void RpcLane::reset()
     QMetaObject::invokeMethod(
         m_anchor,
         [this]() {
-            if (m_client)
-                m_client->reset();
+            if (m_channel)
+                m_channel->reset();
         },
         Qt::BlockingQueuedConnection);
 }

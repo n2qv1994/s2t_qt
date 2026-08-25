@@ -1,9 +1,14 @@
 #include "BufferHub.h"
 
+#include "backend/RivaBackend.h"
+#include "backend/TritonBackend.h"
+
 #include "core/Logger.h"
 
 #include <QDateTime>
 #include <QDir>
+#include <QRandomGenerator>
+#include <QUuid>
 
 namespace {
 
@@ -25,9 +30,7 @@ const int kAssumedChannels = 1;
 // UpstreamProbe
 // ---------------------------------------------------------------------------
 
-UpstreamProbe::UpstreamProbe(BufferHub *hub, const QString &target, const QString &token,
-                             int periodMs)
-    : m_hub(hub), m_target(target), m_token(token), m_periodMs(periodMs)
+UpstreamProbe::UpstreamProbe(BufferHub *hub, int periodMs) : m_hub(hub), m_periodMs(periodMs)
 {
     setObjectName(QStringLiteral("upstream-probe"));
 }
@@ -57,9 +60,6 @@ void UpstreamProbe::poke()
 
 void UpstreamProbe::run()
 {
-    // Its own client, created on this thread - the socket underneath has
-    // thread affinity.
-    AsrClient client(m_target, m_token);
     for (;;) {
         {
             QMutexLocker lock(&m_mutex);
@@ -67,13 +67,12 @@ void UpstreamProbe::run()
                 break;
         }
         double latencyMs = 0.0;
-        // A transport-level probe only.  It says the pipeline is reachable,
-        // not that a token is accepted - the same meaning /api/server_status
-        // had, and the same meaning the client's own badge carries.
-        const grpc::Status status = client.ping(3000, &latencyMs);
+        // The backend decides what a probe means - ServerLive for Triton,
+        // GetRivaSpeechRecognitionConfig for Riva.  Both go through the
+        // backend's own admin lane, which is what keeps this thread from
+        // touching a socket that belongs to another one.
+        const grpc::Status status = m_hub->backend().ping(3000, &latencyMs);
         m_hub->noteUpstream(status.ok(), latencyMs, status.ok() ? QString() : status.toString());
-        if (!status.ok())
-            client.reset();
         QMutexLocker lock(&m_mutex);
         if (m_stop)
             break;
@@ -128,9 +127,19 @@ BufferHub::BufferHub(const ServerConfig &config, QObject *parent)
         }
     }
 
-    m_pool = new UpstreamPool(config.upstreamLanes, config.upstreamTarget, config.upstreamToken);
-    m_probe = new UpstreamProbe(this, config.upstreamTarget, config.upstreamToken,
-                                config.upstreamProbeMs);
+    // Which tier this server talks to.  ServerConfig has already refused
+    // anything but these two, so there is no "unknown backend" branch to write
+    // here - a typo was rejected before any thread existed.
+    if (config.backend == QStringLiteral("riva")) {
+        m_backend = std::make_unique<RivaBackend>(config.upstreamTarget, config.upstreamToken,
+                                                  config.model, config.language,
+                                                  config.upstreamTimeoutMs);
+    } else {
+        m_backend = std::make_unique<TritonBackend>(config.upstreamTarget, config.upstreamToken,
+                                                    config.model, config.upstreamTimeoutMs);
+    }
+
+    m_probe = new UpstreamProbe(this, config.upstreamProbeMs);
     m_probe->start();
 
     // Before the reaper, and before anything can listen: a meeting read back
@@ -144,8 +153,7 @@ BufferHub::BufferHub(const ServerConfig &config, QObject *parent)
 SessionBuffer::Settings BufferHub::settingsFor(const QString &client) const
 {
     SessionBuffer::Settings settings;
-    settings.upstreamTarget = m_config.upstreamTarget;
-    settings.upstreamToken = m_config.upstreamToken;
+    settings.backend = m_backend.get();
     settings.client = client;
     settings.capacityBytes =
         m_config.bufferBytesPerSession(kAssumedSampleRate, kAssumedChannels);
@@ -219,10 +227,11 @@ void BufferHub::recoverSessions()
 BufferHub::~BufferHub()
 {
     shutdown();
+    // The probe first: it calls into the backend on every tick, so the backend
+    // must outlive it.
     delete m_probe;
     m_probe = nullptr;
-    delete m_pool;
-    m_pool = nullptr;
+    m_backend.reset();
 }
 
 grpc::Status BufferHub::startSession(const asr::StartSessionRequest &request,
@@ -239,30 +248,41 @@ grpc::Status BufferHub::startSession(const asr::StartSessionRequest &request,
         }
     }
 
-    // Relayed through the pool rather than through a fresh channel: a start is
-    // request-scoped, and the session's own channels do not exist yet.
-    const grpc::Status status = m_pool->call([&](AsrClient &upstream) {
-        return upstream.startSession(request, out, timeoutMs);
-    });
+    Q_UNUSED(timeoutMs);
+
+    QString warning;
+    const BackendSessionConfig sessionConfig =
+        BackendSessionConfig::fromJson(request.configJson, &warning);
+    if (!warning.isEmpty())
+        LOG_WARN(applog::cat::Session) << "start_session from" << client << "-" << warning;
+
+    // The id is ours now.  There used to be an adapter with a session registry
+    // to borrow one from; there is not any more, and the tier below - Riva or
+    // Triton - has no notion of a meeting that outlives a stream.  A uuid keeps
+    // it unguessable, which matters because the id is the only thing standing
+    // between one workstation and another's transcript.
+    const QString sessionId =
+        QUuid::createUuid().toString(QUuid::WithoutBraces).left(16).remove(QLatin1Char('-'));
+    // Triton keys its per-stream state on this, so it must be positive and must
+    // not collide with the warm-up ids the model repository reserves.
+    const qint64 streamId = qint64(QRandomGenerator::global()->bounded(2, 2000000000));
+
+    auto buffer = std::make_shared<SessionBuffer>(sessionId, streamId, sessionConfig,
+                                                  settingsFor(client));
+    const grpc::Status status = buffer->openBackend();
     if (!status.ok()) {
         noteUpstream(false, 0.0, status.toString());
         pokeProbe();
         return status;
     }
-    if (out->sessionId.isEmpty()) {
-        grpc::Status bad;
-        bad.code = grpc::Internal;
-        bad.message = QStringLiteral("tầng suy luận trả về phiên không có mã");
-        return bad;
-    }
     noteUpstream(true, 0.0, QString());
 
-    auto buffer = std::make_shared<SessionBuffer>(out->sessionId, *out, settingsFor(client));
+    *out = buffer->startResponse();
     {
         QMutexLocker lock(&m_mutex);
-        m_sessions.insert(out->sessionId, buffer);
+        m_sessions.insert(sessionId, buffer);
     }
-    LOG_INFO(applog::cat::Session) << "session" << out->sessionId << "started by" << client << "-"
+    LOG_INFO(applog::cat::Session) << "session" << sessionId << "started by" << client << "-"
                                    << m_sessions.size() << "buffered now";
     return status;
 }
