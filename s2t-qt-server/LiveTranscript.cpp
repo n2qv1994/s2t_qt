@@ -71,17 +71,6 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
     if (m_ampStepSec <= 0.0 && response.chunkEndSec > response.chunkStartSec)
         m_ampStepSec = response.chunkEndSec - response.chunkStartSec;
 
-    // A correction pass rewrites words the tier had already emitted.  When one
-    // arrives it is authoritative for its own range, so the range is dropped
-    // and rebuilt rather than appended to - appending is what produces the
-    // duplicated half-sentences this project has fought before.
-    if (!response.correction.mergedWords.isEmpty()) {
-        const double from = response.correction.updateStartSec;
-        const double to = response.correction.updateEndSec > from ? response.correction.updateEndSec
-                                                                  : m_sourceSeenSec;
-        applyEdit(m_revision, from, to, response.correction.mergedWords);
-    }
-
     if (!response.asrWords.isEmpty()) {
         appendWords(response.asrWords, response.speaker, response.speakerProb,
                     response.verifiedName);
@@ -99,6 +88,37 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
         whole.speaker = response.speaker;
         appendWords({whole}, response.speaker, response.speakerProb, response.verifiedName);
         ++m_revision;
+    }
+
+    // The correction pass comes AFTER the new words, never before.
+    //
+    // It rewrites words the tier had already emitted, including the ones that
+    // just arrived in this same chunk.  Applying it first and then appending
+    // asr_words puts those words back a second time, which is exactly the
+    // duplicated half-sentence this ordering exists to prevent.
+    //
+    // Its range is the range its own words cover - min start to max end - and
+    // nothing wider.  Synthesising a wider one would tell us to wipe canonical
+    // text that the correction never touched; grpc_session_adapter.py's
+    // _correction_bounds carries the same rule and the same warning.
+    if (!response.correction.mergedWords.isEmpty()) {
+        double from = 0.0;
+        double to = 0.0;
+        bool have = false;
+        for (const asr::Word &word : response.correction.mergedWords) {
+            if (word.endSec <= word.startSec)
+                continue; // no usable timing: it cannot define a range
+            if (!have) {
+                from = word.startSec;
+                to = word.endSec;
+                have = true;
+            } else {
+                from = qMin(from, word.startSec);
+                to = qMax(to, word.endSec);
+            }
+        }
+        if (have)
+            applyEdit(m_revision, from, to, response.correction.mergedWords);
     }
 
     // The interim edge.  Replaced wholesale every time, never appended.
