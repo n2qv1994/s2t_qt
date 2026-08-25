@@ -81,15 +81,16 @@ void BufferService::registerMethods()
         return call.deadlineMs > 0 ? call.deadlineMs : hub->config().upstreamTimeoutMs;
     };
 
-    // One relay: take a lane, make the call, and let the probe know at once if
-    // the transport failed, so the client's badge moves now and not at the next
-    // tick.
-    const auto relay = [hub](const std::function<grpc::Status(AsrClient &)> &work) {
-        const grpc::Status status = hub->pool().call(work);
+    // A backend call, with the probe told at once if the transport failed so
+    // the client's badge moves now and not at the next tick.  Only two RPCs
+    // still reach the tier from a connection thread - the rest are answered
+    // from this process now.
+    const auto tier = [hub](const std::function<grpc::Status()> &work) {
+        const grpc::Status status = work();
         if (status.isTransport()) {
             hub->noteUpstream(false, 0.0, status.toString());
             hub->pokeProbe();
-        } else {
+        } else if (status.ok()) {
             hub->noteUpstream(true, 0.0, QString());
         }
         return status;
@@ -144,157 +145,150 @@ void BufferService::registerMethods()
                 });
         });
 
-    // ---- ProductASRService: relayed ----------------------------------------
+    // ---- ProductASRService: answered from this process ---------------------
+    //
+    // These twelve used to be relayed verbatim to a Python adapter that owned
+    // the transcript, the audio archive and the speaker database.  That adapter
+    // is gone: the buffer now drives Riva or Triton directly, and neither keeps
+    // a meeting.  So the ones that are *about* a meeting are answered from the
+    // SessionBuffer that owns it, and the ones that need a store this server
+    // does not have yet say so plainly rather than returning an empty success -
+    // an empty transcript that looks like a real answer is the worse failure.
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetReviewState),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
+        [hub, durable](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::ReviewRequest, asr::StateResponse>(
                 call, out, [&](const asr::ReviewRequest &req, asr::StateResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.getReviewState(req, resp, ms); });
-                });
-        });
-
-    m_server->registerMethod(
-        QString::fromLatin1(rpcpath::GetAudioRange),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<asr::AudioRangeRequest, asr::AudioRangeResponse>(
-                call, out, [&](const asr::AudioRangeRequest &req, asr::AudioRangeResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.getAudioRange(req, resp, ms); });
+                    const SessionRef session = hub->find(req.sessionId);
+                    if (!session)
+                        return noSuchSession(req.sessionId, durable);
+                    // Below zero means "no bound", which is what an unset
+                    // has_view_* field has always meant on this RPC.
+                    return session->reviewState(req.hasViewStartSec ? req.viewStartSec : -1.0,
+                                                req.hasViewEndSec ? req.viewEndSec : -1.0, resp);
                 });
         });
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::ApplyTextEdit),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
+        [hub, durable](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::TextEditRequest, asr::ReviewEditResponse>(
                 call, out, [&](const asr::TextEditRequest &req, asr::ReviewEditResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.applyTextEdit(req, resp, ms); });
-                });
-        });
-
-    m_server->registerMethod(
-        QString::fromLatin1(rpcpath::ListSessions),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<asr::ListSessionsRequest, asr::ListSessionsResponse>(
-                call, out,
-                [&](const asr::ListSessionsRequest &req, asr::ListSessionsResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.listSessions(req, resp, ms); });
+                    const SessionRef session = hub->find(req.sessionId);
+                    if (!session)
+                        return noSuchSession(req.sessionId, durable);
+                    return session->applyTextEdit(req, resp);
                 });
         });
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::RenameSpeaker),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
+        [hub, durable](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::RenameSpeakerRequest, asr::ReviewEditResponse>(
                 call, out, [&](const asr::RenameSpeakerRequest &req, asr::ReviewEditResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.renameSpeaker(req, resp, ms); });
+                    const SessionRef session = hub->find(req.sessionId);
+                    if (!session)
+                        return noSuchSession(req.sessionId, durable);
+                    return session->renameSpeaker(req, resp);
                 });
         });
 
     m_server->registerMethod(
-        QString::fromLatin1(rpcpath::GetPipelineTrace),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<asr::PipelineTraceRequest, asr::PipelineTraceResponse>(
+        QString::fromLatin1(rpcpath::ListSessions),
+        [hub](const grpc::ServerCall &call, QByteArray *out) {
+            return serve<asr::ListSessionsRequest, asr::ListSessionsResponse>(
                 call, out,
-                [&](const asr::PipelineTraceRequest &req, asr::PipelineTraceResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.getPipelineTrace(req, resp, ms); });
-                });
-        });
-
-    m_server->registerMethod(
-        QString::fromLatin1(rpcpath::GetAuditHistory),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<asr::AuditHistoryRequest, asr::AuditHistoryResponse>(
-                call, out,
-                [&](const asr::AuditHistoryRequest &req, asr::AuditHistoryResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.getAuditHistory(req, resp, ms); });
+                [&](const asr::ListSessionsRequest &req, asr::ListSessionsResponse *resp) {
+                    // Only what this process is holding.  Once a meeting ages
+                    // past finished_retention_sec it is gone from here, and
+                    // there is no archive behind it yet - see SessionStore in
+                    // the handover notes.
+                    resp->sessions = hub->summaries(int(req.limit));
+                    return grpc::Status();
                 });
         });
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetModelStatus),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
+        [hub, tier, deadline](const grpc::ServerCall &call, QByteArray *out) {
             const int ms = deadline(call);
             return serve<asr::ModelStatusRequest, asr::ModelStatusResponse>(
                 call, out, [&](const asr::ModelStatusRequest &, asr::ModelStatusResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.getModelStatus(resp, ms); });
+                    return tier([&] { return hub->backend().models(resp, ms); });
                 });
         });
 
-    // ---- SpeakerRegistryService: relayed in full ---------------------------
+    // ---- ProductASRService: not answerable yet -----------------------------
     //
-    // Enrolment writes to the global CAM++ database, which is shared state
-    // that belongs to the pipeline, not to any one buffer.  Caching or
-    // reordering it here would let two servers publish conflicting speakers.
+    // Three RPCs need stores this server does not have. They are registered
+    // rather than left unregistered on purpose: UNIMPLEMENTED with a sentence
+    // an operator can act on beats the client's generic "method not found".
 
     m_server->registerMethod(
-        QString::fromLatin1(rpcpath::GetEnrollmentScript),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<reg::GetEnrollmentScriptRequest, reg::GetEnrollmentScriptResponse>(
+        QString::fromLatin1(rpcpath::GetAudioRange),
+        [](const grpc::ServerCall &call, QByteArray *out) {
+            Q_UNUSED(out);
+            Q_UNUSED(call);
+            grpc::Status status;
+            status.code = grpc::Unimplemented;
+            status.message = QStringLiteral(
+                "máy chủ này chưa lưu kho audio để phát lại. Nhật ký phiên là hàng đợi, "
+                "không phải bản lưu - nghe lại một đoạn cần kho audio riêng, chưa làm.");
+            return status;
+        });
+
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::GetPipelineTrace),
+        [](const grpc::ServerCall &call, QByteArray *out) {
+            return serve<asr::PipelineTraceRequest, asr::PipelineTraceResponse>(
                 call, out,
-                [&](const reg::GetEnrollmentScriptRequest &, reg::GetEnrollmentScriptResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.getEnrollmentScript(resp, ms); });
+                [&](const asr::PipelineTraceRequest &req, asr::PipelineTraceResponse *resp) {
+                    // enabled=false is the contract's own way of saying "this
+                    // deployment does not collect traces", and the client
+                    // already draws that case. Better than UNIMPLEMENTED here.
+                    resp->sessionId = req.sessionId;
+                    resp->enabled = false;
+                    return grpc::Status();
                 });
         });
 
     m_server->registerMethod(
-        QString::fromLatin1(rpcpath::EnrollSpeaker),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            // Enrolment runs CAM++ over a whole recording and legitimately
-            // takes minutes; the client already sends a long deadline, and
-            // this passes it on instead of cutting it short.
-            const int ms = deadline(call);
-            return serve<reg::EnrollSpeakerRequest, reg::EnrollSpeakerResponse>(
-                call, out, [&](const reg::EnrollSpeakerRequest &req, reg::EnrollSpeakerResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.enrollSpeaker(req, resp, ms); });
-                });
-        });
-
-    m_server->registerMethod(
-        QString::fromLatin1(rpcpath::ListSessionSpeakers),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<reg::ListSessionSpeakersRequest, reg::ListSessionSpeakersResponse>(
+        QString::fromLatin1(rpcpath::GetAuditHistory),
+        [](const grpc::ServerCall &call, QByteArray *out) {
+            return serve<asr::AuditHistoryRequest, asr::AuditHistoryResponse>(
                 call, out,
-                [&](const reg::ListSessionSpeakersRequest &req,
-                    reg::ListSessionSpeakersResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.listSessionSpeakers(req, resp, ms); });
+                [&](const asr::AuditHistoryRequest &req, asr::AuditHistoryResponse *resp) {
+                    // An empty history is honest: nothing is recorded yet. The
+                    // edits themselves are logged, so nothing is silently lost.
+                    resp->sessionId = req.sessionId;
+                    return grpc::Status();
                 });
         });
 
-    m_server->registerMethod(
-        QString::fromLatin1(rpcpath::SaveSessionSpeakers),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<reg::SaveSessionSpeakersRequest, reg::SaveSessionSpeakersResponse>(
-                call, out,
-                [&](const reg::SaveSessionSpeakersRequest &req,
-                    reg::SaveSessionSpeakersResponse *resp) {
-                    return relay([&](AsrClient &c) { return c.saveSessionSpeakers(req, resp, ms); });
-                });
-        });
+    // ---- SpeakerRegistryService: no equivalent in either tier --------------
+    //
+    // Enrolment ran against the adapter's CAM++ database. Riva's ASR API has no
+    // enrolment RPC at all - its speaker_tag is an anonymous cluster number -
+    // and this server does not own the CAM++ store either. Answering these with
+    // empty successes would let the client show an enrolment that never
+    // happened, so they refuse and say why.
 
-    m_server->registerMethod(
-        QString::fromLatin1(rpcpath::GetSpeakerRegistryStatus),
-        [relay, deadline](const grpc::ServerCall &call, QByteArray *out) {
-            const int ms = deadline(call);
-            return serve<reg::GetSpeakerRegistryStatusRequest, reg::GetSpeakerRegistryStatusResponse>(
-                call, out,
-                [&](const reg::GetSpeakerRegistryStatusRequest &req,
-                    reg::GetSpeakerRegistryStatusResponse *resp) {
-                    return relay(
-                        [&](AsrClient &c) { return c.getSpeakerRegistryStatus(req, resp, ms); });
-                });
-        });
+    const auto noRegistry = [](const grpc::ServerCall &, QByteArray *) {
+        grpc::Status status;
+        status.code = grpc::Unimplemented;
+        status.message = QStringLiteral(
+            "đăng ký giọng nói chưa có ở máy chủ này. Riva không có RPC đăng ký giọng, "
+            "và kho CAM++ không do máy chủ này quản lý - tên người nói hiện chỉ đặt được "
+            "bằng rename_speaker.");
+        return status;
+    };
+
+    for (const char *method : {rpcpath::GetEnrollmentScript, rpcpath::EnrollSpeaker,
+                               rpcpath::ListSessionSpeakers, rpcpath::SaveSessionSpeakers,
+                               rpcpath::GetSpeakerRegistryStatus}) {
+        m_server->registerMethod(QString::fromLatin1(method), noRegistry);
+    }
 
     // ---- BufferAdminService: this process, not the pipeline ----------------
 

@@ -15,12 +15,6 @@ double nowSeconds()
     return double(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
 }
 
-// How long a failed live-state refresh may be papered over with the cached
-// answer.  The client polls five times a second; one lost poll flickering the
-// whole transcript view would be worse than showing it 200 ms late.  Two
-// seconds is well past "a blip" and well short of "nobody would notice".
-const int kStaleGraceMs = 2000;
-
 // Latency samples kept for the p50/p95 the admin RPC reports.  At six packets
 // a second this is the last forty seconds or so - long enough to show a
 // pipeline slowing down, short enough to recover when it speeds up again.
@@ -43,37 +37,34 @@ double percentile(QList<double> values, double fraction)
 
 } // namespace
 
-// Seeds the live-state cache from whatever the pipeline last told us.  Doing it
-// here means the first get_live_state after a start - or after a restart - is
-// answered without a round trip, which is exactly when the client polls hardest.
-void SessionBuffer::seedState()
-{
-    m_state.sessionId = m_sessionId;
-    m_state.streamId = m_started.streamId;
-    m_state.stateVersion = m_started.stateVersion;
-    m_state.state = m_started.state;
-    m_haveState = true;
-    m_stateAge.start();
-}
-
-SessionBuffer::SessionBuffer(const QString &sessionId, const asr::StartSessionResponse &started,
-                             const Settings &settings)
-    : m_sessionId(sessionId), m_handle(jrn::store::handleFor(sessionId)), m_started(started),
-      m_settings(settings)
+SessionBuffer::SessionBuffer(const QString &sessionId, qint64 streamId,
+                             const BackendSessionConfig &config, const Settings &settings)
+    : m_sessionId(sessionId), m_handle(jrn::store::handleFor(sessionId)), m_settings(settings),
+      m_config(config), m_backendStreamId(streamId)
 {
     m_startedAt = nowSeconds();
     m_updatedAt = m_startedAt;
-    m_stateVersion = started.stateVersion;
-    m_title = started.state.title;
     m_clientReturned = true;
-    seedState();
+    m_title = config.title;
+    m_sampleRate = config.sampleRate;
+    m_channels = config.channels;
+    m_live.configure(config.title, config.sampleRate, config.channels);
+
+    // The reply to start_session is ours to compose now: there is no adapter
+    // answer to pass on.  It carries the empty state the client will start
+    // polling against, so its shape has to be the same one liveState() returns.
+    m_started.sessionId = sessionId;
+    m_started.streamId = streamId;
+    m_started.stateVersion = 0;
+    m_started.state = m_live.snapshot(sessionId, streamId).state;
 
     if (!m_settings.journalDir.trimmed().isEmpty()) {
         jrn::Meta meta;
         meta.sessionId = sessionId;
         meta.client = settings.client;
         meta.startedAt = m_startedAt;
-        meta.startResponse = started.serialize();
+        meta.configJson = config.rawJson;
+        meta.startResponse = m_started.serialize();
         QString error;
         if (!m_journal.create(m_settings.journalDir, m_handle, meta, m_settings.durability,
                               m_settings.journalKeep, m_settings.segmentBytes, &error)) {
@@ -89,9 +80,6 @@ SessionBuffer::SessionBuffer(const QString &sessionId, const asr::StartSessionRe
                 << "- push_audio will be refused";
         }
     }
-
-    m_stateLane = new RpcLane(QStringLiteral("state-%1").arg(sessionId.left(8)),
-                              settings.upstreamTarget, settings.upstreamToken);
 
     setObjectName(QStringLiteral("forward-%1").arg(sessionId.left(8)));
     start();
@@ -113,7 +101,23 @@ SessionBuffer::SessionBuffer(const jrn::Recovered &recovered, const Settings &se
 
     m_stateVersion = qMax(recovered.started.stateVersion, recovered.progress.stateVersion);
     m_title = recovered.started.state.title;
-    seedState();
+    m_backendStreamId = recovered.started.streamId;
+
+    // The meeting's configuration is in the journal precisely so a recovered
+    // session decodes the same way it did before the restart - a different
+    // sample rate or model on the second half would corrupt the transcript far
+    // more quietly than a failure would.
+    QString warning;
+    m_config = BackendSessionConfig::fromJson(recovered.meta.configJson, &warning);
+    if (!warning.isEmpty()) {
+        LOG_WARN(applog::cat::Session)
+            << "recovered session" << m_sessionId << "-" << warning;
+    }
+    m_live.configure(m_title.isEmpty() ? m_config.title : m_title, m_config.sampleRate,
+                     m_config.channels);
+    // The transcript itself is NOT recovered: the words were never on disk, only
+    // the audio was.  The backlog replays through the tier and rebuilds them,
+    // which is why order across the restart had to be preserved.
 
     // Everything the pipeline had already acknowledged before the restart.
     m_upstreamSourceSeenSec = recovered.progress.sourceSeenSec;
@@ -152,9 +156,6 @@ SessionBuffer::SessionBuffer(const jrn::Recovered &recovered, const Settings &se
             << "- the backlog will still be delivered, but no new audio is accepted";
     }
 
-    m_stateLane = new RpcLane(QStringLiteral("state-%1").arg(m_sessionId.left(8)),
-                              m_settings.upstreamTarget, m_settings.upstreamToken);
-
     setObjectName(QStringLiteral("forward-%1").arg(m_sessionId.left(8)));
     start();
     LOG_INFO(applog::cat::Session)
@@ -172,8 +173,28 @@ SessionBuffer::~SessionBuffer()
         terminate();
         wait(2000);
     }
-    delete m_stateLane;
+    // m_backend is released on the forwarder thread, inside run(), for the same
+    // thread-affinity reason it was created there.  By here that thread is
+    // gone and the pointer is already null.
     m_journal.close();
+}
+
+grpc::Status SessionBuffer::openBackend()
+{
+    QMutexLocker lock(&m_mutex);
+    // The forwarder opens it as its first act; this just waits for the answer.
+    // A bound rather than an indefinite wait: a tier that never answers would
+    // otherwise hold the connection thread that is answering start_session.
+    while (!m_openDone) {
+        if (!m_opened.wait(&m_mutex, QDeadlineTimer(qMax(5000, m_settings.upstreamTimeoutMs)))) {
+            grpc::Status status;
+            status.code = grpc::DeadlineExceeded;
+            status.message = QStringLiteral("tầng suy luận không mở được phiên trong %1 ms")
+                                 .arg(qMax(5000, m_settings.upstreamTimeoutMs));
+            return status;
+        }
+    }
+    return m_openStatus;
 }
 
 bool SessionBuffer::awaitingClient() const
@@ -324,52 +345,96 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
 grpc::Status SessionBuffer::liveState(asr::StateResponse *out)
 {
     // Lock order: state mutex first, then the queue mutex.  See the header.
+    //
+    // No upstream call and no cache any more.  The pipeline that used to own
+    // this state is gone; LiveTranscript here is the authority, so the whole
+    // fan-out problem the cache existed for - ten clients on one meeting - is
+    // now just ten copies of a local structure.  statePollMs survives as the
+    // client's poll interval, not as a cache lifetime.
     QMutexLocker stateLock(&m_stateMutex);
     {
         QMutexLocker lock(&m_mutex);
         ++m_stateReaders;
-    }
-
-    if (m_haveState && m_stateAge.isValid() && m_stateAge.elapsed() < m_settings.statePollMs) {
-        // The fan-out that makes this worth having: ten clients watching one
-        // meeting cost the pipeline one poll, not ten.
-        *out = m_state;
-        return grpc::Status();
-    }
-
-    asr::SessionRequest request;
-    request.sessionId = m_sessionId;
-    asr::StateResponse fresh;
-    const int timeoutMs = m_settings.upstreamTimeoutMs;
-    const grpc::Status status = m_stateLane->call([&](AsrClient &client) {
-        return client.getLiveState(request, &fresh, timeoutMs);
-    });
-
-    if (status.ok()) {
-        m_state = fresh;
-        m_haveState = true;
-        m_stateAge.restart();
-        QMutexLocker lock(&m_mutex);
         ++m_statePolls;
-        if (fresh.stateVersion != 0)
-            m_stateVersion = fresh.stateVersion;
-        if (!fresh.state.title.isEmpty())
-            m_title = fresh.state.title;
-        m_updatedAt = nowSeconds();
-        *out = fresh;
+    }
+    *out = m_live.snapshot(m_sessionId, m_backendStreamId);
+    return grpc::Status();
+}
+
+grpc::Status SessionBuffer::reviewState(double viewStartSec, double viewEndSec,
+                                        asr::StateResponse *out)
+{
+    QMutexLocker stateLock(&m_stateMutex);
+    *out = m_live.snapshot(m_sessionId, m_backendStreamId, viewStartSec, viewEndSec);
+    return grpc::Status();
+}
+
+grpc::Status SessionBuffer::applyTextEdit(const asr::TextEditRequest &request,
+                                          asr::ReviewEditResponse *out)
+{
+    QMutexLocker stateLock(&m_stateMutex);
+    if (!m_live.applyEdit(request.baseRevision, request.startSec, request.endSec,
+                          request.replacementWords)) {
+        // ABORTED and not INVALID_ARGUMENT: the client's cure is to re-read and
+        // retry, which is exactly what ABORTED tells it to do.  Someone else
+        // edited the same transcript in between.
+        grpc::Status status;
+        status.code = grpc::Aborted;
+        status.message = QStringLiteral("bản chép đã đổi (phiên bản %1, bạn gửi %2) - hãy đọc lại "
+                                        "rồi sửa tiếp")
+                             .arg(m_live.revision())
+                             .arg(request.baseRevision);
         return status;
     }
-
-    if (m_haveState && m_stateAge.isValid() && m_stateAge.elapsed() < kStaleGraceMs) {
-        LOG_DEBUG(applog::cat::Poll) << "live state for" << m_sessionId << "failed ("
-                                     << status.toString() << ") - serving a cache"
-                                     << m_stateAge.elapsed() << "ms old";
-        *out = m_state;
-        return grpc::Status();
+    out->sessionId = m_sessionId;
+    out->transcript = m_live.transcript();
+    out->state = m_live.snapshot(m_sessionId, m_backendStreamId).state;
+    {
+        QMutexLocker lock(&m_mutex);
+        m_updatedAt = nowSeconds();
     }
-    LOG_WARN(applog::cat::Poll) << "live state for" << m_sessionId << "failed:"
-                                << status.toString();
-    return status;
+    LOG_INFO(applog::cat::Session)
+        << "text edit on" << m_sessionId << "by"
+        << (request.editorId.isEmpty() ? QStringLiteral("?") : request.editorId) << "-"
+        << request.startSec << ".." << request.endSec << "->" << request.replacementWords.size()
+        << "words, revision now" << m_live.revision();
+    return grpc::Status();
+}
+
+grpc::Status SessionBuffer::renameSpeaker(const asr::RenameSpeakerRequest &request,
+                                          asr::ReviewEditResponse *out)
+{
+    QMutexLocker stateLock(&m_stateMutex);
+    m_live.renameSpeaker(request.fromSpeaker, request.toSpeaker, request.verifiedName);
+    out->sessionId = m_sessionId;
+    out->transcript = m_live.transcript();
+    out->state = m_live.snapshot(m_sessionId, m_backendStreamId).state;
+    {
+        QMutexLocker lock(&m_mutex);
+        m_updatedAt = nowSeconds();
+    }
+    LOG_INFO(applog::cat::Session) << "speaker rename on" << m_sessionId << "-"
+                                   << request.fromSpeaker << "->" << request.toSpeaker
+                                   << "verified as"
+                                   << (request.verifiedName.isEmpty() ? QStringLiteral("(xoá tên)")
+                                                                      : request.verifiedName);
+    return grpc::Status();
+}
+
+asr::SessionSummary SessionBuffer::summary() const
+{
+    QMutexLocker stateLock(&m_stateMutex);
+    QMutexLocker lock(&m_mutex);
+    asr::SessionSummary out;
+    out.sessionId = m_sessionId;
+    out.title = m_title.isEmpty() ? m_config.title : m_title;
+    out.createdAt = m_startedAt;
+    out.updatedAt = m_updatedAt;
+    out.durationSec = m_live.sourceSeenSec();
+    out.final = m_live.done();
+    out.running = !m_finished;
+    out.participants = m_live.speakerIds();
+    return out;
 }
 
 void SessionBuffer::requestStop()
@@ -447,7 +512,7 @@ double SessionBuffer::finishedSecondsAgo() const
     return m_finished ? nowSeconds() - m_finishedAt : 0.0;
 }
 
-bool SessionBuffer::forward(AsrClient &client, const Packet &packet, grpc::Status *fatal)
+bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc::Status *fatal)
 {
     asr::PushAudioRequest request;
     request.sessionId = m_sessionId;
@@ -464,24 +529,36 @@ bool SessionBuffer::forward(AsrClient &client, const Packet &packet, grpc::Statu
     bool announced = false;
     for (;;) {
         asr::PushAudioResponse response;
-        const grpc::Status status =
-            client.pushAudio(request, &response, m_settings.upstreamTimeoutMs);
+        const grpc::Status status = session.push(request, &response);
         if (status.ok()) {
             const double ms = double(clock.nsecsElapsed()) / 1e6;
+            // Fold the tier's answer into the transcript before the counters,
+            // and under the transcript's own lock.  Lock order is state then
+            // queue, so this block has to come first - see the header.
+            {
+                QMutexLocker stateLock(&m_stateMutex);
+                m_stateVersion = m_live.apply(response);
+            }
             QMutexLocker lock(&m_mutex);
             ++m_forwardedPackets;
             m_forwardedBytes += quint64(packet.pcm.size());
             m_upstreamSourceSeenSec = response.sourceSeenSec;
             m_upstreamSpeechSeenSec = response.speechSeenSec;
             m_upstreamTiming = response.timing;
-            if (response.stateVersion != 0)
-                m_stateVersion = response.stateVersion;
+            // m_stateVersion is the transcript's now, set above.  The tier does
+            // not have one to report and never did after the adapter went.
             recordForwardMs(ms);
             m_updatedAt = nowSeconds();
             // After the forward, never before.  A crash between the two
-            // re-sends this seq on the next start and the pipeline's own seq
-            // idempotency turns the duplicate into a no-op; writing this first
-            // would instead lose the packet outright.
+            // re-sends this seq on the next start; writing it first would lose
+            // the packet outright, which is the worse of the two.
+            //
+            // NOTE: the duplicate is no longer absorbed.  The adapter used to
+            // replay its stored answer for a seq it had already processed, and
+            // neither Riva nor Triton has any such memory - so a crash here
+            // costs one packet's worth of duplicated words (160 ms) on the
+            // next start.  Making that exact again needs the transcript itself
+            // to be persisted; see SessionStore in the handover notes.
             if (m_journal.isOpen()) {
                 jrn::Progress progress;
                 progress.seq = packet.seq;
@@ -508,10 +585,10 @@ bool SessionBuffer::forward(AsrClient &client, const Packet &packet, grpc::Statu
         }
 
         if (!status.isTransport()) {
-            // INTERNAL and friends are NOT retried: the adapter returns them
-            // precisely when the pipeline may already have consumed this
-            // audio, and a blind retry there duplicates words.  The rule is
-            // unchanged by the split - it has only moved one hop.
+            // INTERNAL and friends are NOT retried: they come back precisely
+            // when the tier may already have consumed this audio, and a blind
+            // retry there duplicates words.  The rule has survived two moves -
+            // client to buffer, adapter to tier - unchanged.
             LOG_ERROR(applog::cat::Session)
                 << "push_audio seq=" << packet.seq << "for" << m_sessionId
                 << "permanently rejected:" << status.toString()
@@ -534,7 +611,7 @@ bool SessionBuffer::forward(AsrClient &client, const Packet &packet, grpc::Statu
             ++m_retries;
         }
         // Do not wait out HTTP/2's own reconnect behaviour on a stale socket.
-        client.reset();
+        session.reset();
         if (m_shutdownRequested.loadRelaxed()) {
             fatal->code = grpc::Cancelled;
             fatal->message = QStringLiteral("máy chủ đệm đang tắt");
@@ -551,10 +628,37 @@ bool SessionBuffer::forward(AsrClient &client, const Packet &packet, grpc::Statu
 
 void SessionBuffer::run()
 {
-    // Created here, on this thread, and never handed to another: the socket
+    // Opened here, on this thread, and never handed to another: the socket
     // underneath has thread affinity.  See RpcLane.h for the same rule stated
-    // once for the lanes that do have to cross threads.
-    AsrClient client(m_settings.upstreamTarget, m_settings.upstreamToken);
+    // once for the lanes that genuinely do have to cross threads.
+    //
+    // openBackend() is blocked on the answer, so this must publish one whether
+    // it worked or not - a failure here that never woke the waiter would hang
+    // the connection thread answering start_session for its whole deadline.
+    {
+        grpc::Status opened;
+        std::unique_ptr<BackendSession> session;
+        if (!m_settings.backend) {
+            opened.code = grpc::Internal;
+            opened.message = QStringLiteral("phiên không được gắn tầng suy luận nào");
+        } else {
+            session = m_settings.backend->open(m_sessionId, m_backendStreamId, m_config, &opened);
+        }
+        QMutexLocker lock(&m_mutex);
+        m_backend = std::move(session);
+        m_openStatus = opened;
+        m_openDone = true;
+        m_opened.wakeAll();
+        if (!opened.ok() || !m_backend) {
+            // Nothing to drain and nothing to close: the meeting never began.
+            m_finished = true;
+            m_finishedAt = nowSeconds();
+            m_stopStatus = opened;
+            m_stopDone = true;
+            m_stopped.wakeAll();
+            return;
+        }
+    }
 
     for (;;) {
         Packet packet;
@@ -581,7 +685,7 @@ void SessionBuffer::run()
 
         if (haveWork) {
             grpc::Status fatal;
-            if (!forward(client, packet, &fatal)) {
+            if (!forward(*m_backend, packet, &fatal)) {
                 QMutexLocker lock(&m_mutex);
                 m_fatal = fatal;
                 m_haveFatal = true;
@@ -596,14 +700,34 @@ void SessionBuffer::run()
         }
 
         if (drainDone) {
-            asr::SessionRequest request;
-            request.sessionId = m_sessionId;
-            asr::StopSessionResponse response;
             LOG_INFO(applog::cat::Session) << "queue drained for" << m_sessionId
-                                           << "- calling stop_session upstream";
-            const grpc::Status status = client.stopSession(
-                request, &response, qMax(m_settings.upstreamTimeoutMs, 60000));
+                                           << "- flushing the inference tier";
+            // The far end of the drain barrier.  For Triton this is one final
+            // infer with is_final=1, which flushes the endpointer and the last
+            // correction pass; for Riva it half-closes the stream and reads
+            // what is still outstanding.  Either way, when it returns the tier
+            // has seen every byte the client sent.
+            asr::PushAudioResponse tail;
+            const grpc::Status status = m_backend->finish(&tail);
+
+            asr::StopSessionResponse response;
+            {
+                QMutexLocker stateLock(&m_stateMutex);
+                if (status.ok())
+                    m_live.apply(tail);
+                m_live.markDone();
+                const asr::StateResponse snapshot =
+                    m_live.snapshot(m_sessionId, m_backendStreamId);
+                response.sessionId = m_sessionId;
+                response.streamId = m_backendStreamId;
+                response.stateVersion = snapshot.stateVersion;
+                response.events.final = true;
+                response.result = tail;
+                response.state = snapshot.state;
+            }
+
             QMutexLocker lock(&m_mutex);
+            m_stateVersion = response.stateVersion;
             m_stopResponse = response;
             m_stopStatus = status;
             m_stopDone = true;
@@ -642,7 +766,16 @@ void SessionBuffer::run()
             m_stopDone = true;
         }
         m_stopped.wakeAll();
+        // Dropped, not flushed: on the shutdown path the meeting is not over,
+        // it is interrupted, and telling the tier it ended cleanly would be a
+        // lie the journal then contradicts on the next start.
+        if (m_backend)
+            m_backend->abandon();
     }
+    // Released here because it was created here.  Letting the destructor do it
+    // would free a socket from whichever thread happened to drop the last
+    // reference to this session.
+    m_backend.reset();
     // Deliberately not closed on the shutdown path before this point: the
     // journal is what the next start reads to pick this meeting back up.
     m_journal.close();
@@ -656,9 +789,10 @@ buf::BufferedSession SessionBuffer::snapshot() const
 {
     // Same lock order as everywhere else: state mutex, then queue mutex.
     QMutexLocker stateLock(&m_stateMutex);
-    const double stateAge = m_haveState && m_stateAge.isValid()
-        ? double(m_stateAge.elapsed()) / 1000.0
-        : 0.0;
+    // The transcript is built here now, so it is never stale.  The field stays
+    // in the admin proto because an operator reading it wants a number, and 0
+    // is the honest one: this server is not waiting on anybody for it.
+    const double stateAge = 0.0;
 
     QMutexLocker lock(&m_mutex);
     buf::BufferedSession out;

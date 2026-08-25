@@ -144,8 +144,25 @@ public:
 
     void reset() override
     {
+        // A dead stream cannot be resumed - Riva keeps its decoder state on the
+        // stream, and there is no way to tell it "carry on from where we were".
+        // So this opens a *new* one and sends the config again.  Riva loses the
+        // context it had built, which costs accuracy across the seam; the
+        // alternative is ending the meeting on a network blip, and the client
+        // is still recording.
         m_stream.cancel();
         m_channel.reset();
+        const grpc::Status status = begin();
+        if (!status.ok()) {
+            LOG_WARN(applog::cat::Session)
+                << "re-opening the Riva stream for" << m_sessionId
+                << "failed:" << status.toString() << "- the next push will report it";
+            return;
+        }
+        LOG_INFO(applog::cat::Session)
+            << "Riva stream for" << m_sessionId
+            << "re-opened after a transport failure - decoder context was lost at"
+            << m_audioProcessedSec << "s";
     }
 
 private:

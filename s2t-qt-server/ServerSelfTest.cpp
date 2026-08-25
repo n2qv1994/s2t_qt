@@ -7,6 +7,7 @@
 #include "grpc/AsrClient.h"
 #include "grpc/GrpcServer.h"
 #include "grpc/Methods.h"
+#include "proto/TritonInfer.h"
 #include "proto/BufferAdmin.h"
 
 #include <QDir>
@@ -481,98 +482,142 @@ struct UpstreamRecord
     bool refuse = false;
 };
 
+// Finds one named input's raw buffer.  Triton pairs raw_input_contents
+// positionally with inputs, which is exactly the pairing that would go wrong
+// silently, so the stand-in checks it the same way the real server does.
+bool rawInput(const trt::ModelInferRequest &request, const char *name, QByteArray *out)
+{
+    for (int i = 0; i < request.inputs.size(); ++i) {
+        if (request.inputs.at(i).name != QLatin1String(name))
+            continue;
+        if (i >= request.rawInputContents.size())
+            return false;
+        *out = request.rawInputContents.at(i);
+        return true;
+    }
+    return false;
+}
+
+qint32 firstInt32(const QByteArray &raw)
+{
+    if (raw.size() < 4)
+        return 0;
+    qint32 value = 0;
+    std::memcpy(&value, raw.constData(), 4);
+    return value;
+}
+
+// The test fills every packet with one repeated byte whose value *is* the seq
+// (`QByteArray(kPacketBytes, char(seq))`).  TritonBackend turns that into
+// float32, so the seq comes back out by undoing the conversion: two identical
+// bytes b make the int16 (b<<8)|b, and the low byte of that is b again.
+//
+// This is what keeps "every packet arrived exactly once, in order" a real
+// assertion.  A stand-in that just counted its own calls would make the same
+// check pass no matter what the buffer did with the ordering.
+quint64 seqFromAudio(const QByteArray &rawFloats)
+{
+    if (rawFloats.size() < 4)
+        return 0;
+    float sample = 0.0f;
+    std::memcpy(&sample, rawFloats.constData(), 4);
+    const int scaled = int(qRound(double(sample) * 32768.0));
+    return quint64(scaled & 0xff);
+}
+
 void registerFakeUpstream(grpc::Server *server, UpstreamRecord *record)
 {
+    // The buffer speaks KServe v2 to the tier now, so the stand-in has to as
+    // well.  There is no start/stop RPC any more: a meeting begins with the
+    // first infer and ends with one carrying is_final=1.
     server->registerMethod(
-        QString::fromLatin1(rpcpath::StartSession),
-        [record](const grpc::ServerCall &call, QByteArray *out) {
-            asr::StartSessionRequest request;
-            pw::Reader reader(call.message);
-            request.parse(reader);
-            QMutexLocker lock(&record->mutex);
-            record->events << QStringLiteral("start");
-            asr::StartSessionResponse response;
-            response.sessionId = QStringLiteral("sess-e2e");
-            response.streamId = 7;
-            response.stateVersion = 1;
-            response.state.title = QStringLiteral("Cuộc họp e2e");
+        QString::fromLatin1(rpcpath::TritonServerLive),
+        [](const grpc::ServerCall &, QByteArray *out) {
+            trt::ServerLiveResponse response;
+            response.live = true;
             *out = response.serialize();
             return grpc::Status();
         });
 
     server->registerMethod(
-        QString::fromLatin1(rpcpath::PushAudio),
+        QString::fromLatin1(rpcpath::TritonRepositoryIndex),
+        [](const grpc::ServerCall &, QByteArray *out) {
+            trt::RepositoryIndexResponse response;
+            trt::ModelIndex model;
+            model.name = QStringLiteral("asr_diar_session");
+            model.version = QStringLiteral("1");
+            model.state = QStringLiteral("READY");
+            response.models.append(model);
+            *out = response.serialize();
+            return grpc::Status();
+        });
+
+    server->registerMethod(
+        QString::fromLatin1(rpcpath::TritonModelInfer),
         [record](const grpc::ServerCall &call, QByteArray *out) {
-            asr::PushAudioRequest request;
+            trt::ModelInferRequest request;
             pw::Reader reader(call.message);
             request.parse(reader);
+            if (!reader.ok()) {
+                grpc::Status status;
+                status.code = grpc::InvalidArgument;
+                status.message = QStringLiteral("ModelInferRequest hỏng");
+                return status;
+            }
+
+            QByteArray audio;
+            QByteArray isFinal;
+            rawInput(request, "audio_chunk", &audio);
+            rawInput(request, "is_final", &isFinal);
+            const bool final = firstInt32(isFinal) != 0;
+
             QMutexLocker lock(&record->mutex);
-            if (record->refuse) {
+            if (record->refuse && !final) {
                 grpc::Status status;
                 status.code = grpc::Unavailable;
                 status.message = QStringLiteral("tầng suy luận đang từ chối (thử nghiệm)");
                 return status;
             }
-            record->events << QStringLiteral("push");
-            record->seqs << request.seq;
-            record->sizes << request.pcm.size();
-            // Pretend the pipeline consumed exactly what it was handed, so the
-            // buffer's "how far behind is the pipeline" figure has something
-            // real to carry back to the client.
-            record->sourceSeenSec += double(request.pcm.size()) / (48000.0 * 2.0);
-            asr::PushAudioResponse response;
-            response.sessionId = request.sessionId;
-            response.streamId = 7;
-            response.stateVersion = 1 + quint64(record->seqs.size());
-            response.sourceSeenSec = record->sourceSeenSec;
-            response.timing.clientWaitMs = 3.0;
-            *out = response.serialize();
-            return grpc::Status();
-        });
 
-    server->registerMethod(
-        QString::fromLatin1(rpcpath::GetLiveState),
-        [record](const grpc::ServerCall &call, QByteArray *out) {
-            asr::SessionRequest request;
-            pw::Reader reader(call.message);
-            request.parse(reader);
-            QMutexLocker lock(&record->mutex);
-            ++record->livePolls;
-            asr::StateResponse response;
-            response.sessionId = request.sessionId;
-            response.stateVersion = 100 + quint64(record->livePolls);
-            response.state.title = QStringLiteral("Cuộc họp e2e");
-            response.state.sourceSeenSec = record->sourceSeenSec;
-            *out = response.serialize();
-            return grpc::Status();
-        });
+            if (final) {
+                // The far end of the drain barrier.  Recorded as "stop" so the
+                // ordering assertion reads the same as it did when there was a
+                // stop_session RPC to record.
+                record->events << QStringLiteral("stop");
+            } else {
+                record->events << QStringLiteral("push");
+                record->seqs << seqFromAudio(audio);
+                // Back to bytes: two bytes of PCM per float32 sample.
+                record->sizes << (audio.size() / 2);
+                record->sourceSeenSec += double(audio.size() / 4) / 48000.0;
+            }
 
-    server->registerMethod(
-        QString::fromLatin1(rpcpath::StopSession),
-        [record](const grpc::ServerCall &call, QByteArray *out) {
-            asr::SessionRequest request;
-            pw::Reader reader(call.message);
-            request.parse(reader);
-            QMutexLocker lock(&record->mutex);
-            record->events << QStringLiteral("stop");
-            asr::StopSessionResponse response;
-            response.sessionId = request.sessionId;
-            response.streamId = 7;
-            response.state.title = QStringLiteral("Cuộc họp e2e");
-            response.state.done = true;
-            *out = response.serialize();
-            return grpc::Status();
-        });
-
-    // Not buffered - proves a relayed method reaches the pipeline unchanged.
-    server->registerMethod(
-        QString::fromLatin1(rpcpath::GetModelStatus),
-        [](const grpc::ServerCall &, QByteArray *out) {
-            asr::ModelStatusResponse response;
-            asr::ModelStatusEntry entry;
-            entry.name = QStringLiteral("asr");
-            entry.state = QStringLiteral("READY");
-            response.models.append(entry);
+            trt::ModelInferResponse response;
+            response.modelName = request.modelName;
+            response.id = request.id;
+            const auto addOutput = [&response](const char *name, const char *datatype,
+                                               const QByteArray &raw) {
+                trt::InferOutputTensor tensor;
+                tensor.name = QString::fromLatin1(name);
+                tensor.datatype = QString::fromLatin1(datatype);
+                tensor.shape = {1};
+                response.outputs.append(tensor);
+                response.rawOutputContents.append(raw);
+            };
+            // One BYTES element: 4-byte little-endian length then the utf-8.
+            const auto bytesTensor = [](const QString &text) {
+                const QByteArray utf8 = text.toUtf8();
+                QByteArray raw;
+                const quint32 length = quint32(utf8.size());
+                raw.resize(4);
+                std::memcpy(raw.data(), &length, 4);
+                raw.append(utf8);
+                return raw;
+            };
+            addOutput("text", trt::dtype::Bytes,
+                      bytesTensor(final ? QStringLiteral("kết thúc")
+                                        : QStringLiteral("gói %1").arg(record->seqs.size())));
+            addOutput("speaker", trt::dtype::Int32, QByteArray(4, '\0'));
             *out = response.serialize();
             return grpc::Status();
         });
@@ -668,10 +713,13 @@ int chain()
         grpc::Status status = client.startSession(startRequest, &started, 10000);
         check(status.ok(), QStringLiteral("start_session through the buffer (%1)")
                                .arg(status.toString()));
-        check(started.sessionId == QStringLiteral("sess-e2e"),
-              "the buffer returns the pipeline's own session id, not one of its own");
+        // The id is the buffer's own since the adapter went: there is no
+        // session registry below it to borrow one from.  What matters is that
+        // it is non-empty and that every later RPC accepts it.
+        check(!started.sessionId.isEmpty() && started.sessionId.size() >= 8,
+              QStringLiteral("the buffer mints its own session id (%1)").arg(started.sessionId));
         check(started.state.title == QStringLiteral("Cuộc họp e2e"),
-              "the pipeline's first state reaches the client");
+              "the title from config_json reaches the client");
 
         // ---- push ----------------------------------------------------------
         double lastSourceSeen = -1.0;
@@ -728,13 +776,22 @@ int chain()
             QMutexLocker lock(&record.mutex);
             pollsAfter = record.livePolls;
         }
-        // The whole point of caching it here: many watchers, one poll.
-        check(pollsAfter - pollsBefore <= 1,
-              QStringLiteral("three client reads cost at most one upstream poll (%1)")
+        // The transcript is built here now, so a read costs the tier nothing at
+        // all - not "one poll for many watchers", but zero.
+        check(pollsAfter == pollsBefore,
+              QStringLiteral("client reads cost the inference tier nothing (%1 calls)")
                   .arg(pollsAfter - pollsBefore));
-        check(first.stateVersion == second.stateVersion
-                  && second.stateVersion == third.stateVersion,
-              "all three readers see the same cached state");
+        // Not equality: the forwarder may still be draining the queue while
+        // these three reads happen, and every packet it delivers legitimately
+        // advances the version.  What a client actually depends on is that the
+        // number never goes backwards - that is what makes it usable as "has
+        // anything changed since I last looked".
+        check(first.stateVersion <= second.stateVersion
+                  && second.stateVersion <= third.stateVersion,
+              QStringLiteral("the state version never goes backwards (%1 <= %2 <= %3)")
+                  .arg(first.stateVersion)
+                  .arg(second.stateVersion)
+                  .arg(third.stateVersion));
 
         // ---- the buffer's own admin surface ---------------------------------
         buf::BufferStatusRequest statusRequest;

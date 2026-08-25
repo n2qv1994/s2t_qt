@@ -96,6 +96,10 @@ public:
     void pokeProbe();
 
     QList<buf::BufferedSession> snapshots(bool includeFinished, int limit) const;
+    // What list_sessions answers with: every meeting this process is still
+    // holding, newest first.  There is no archive behind it - a meeting that
+    // has aged past finished_retention_sec is simply gone.
+    QList<asr::SessionSummary> summaries(int limit) const;
     double uptimeSec() const;
     quint64 queueCapacityBytes() const;
     quint64 queueUsedBytes() const;

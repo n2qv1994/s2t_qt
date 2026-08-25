@@ -75,17 +75,31 @@ public:
             putSubMessage(field, item.serialize());
     }
 
+    // Repeated fields write EVERY element, including empty ones.
+    //
+    // The proto3 "skip the default value" rule is about *singular* fields,
+    // where absent and default mean the same thing.  In a repeated field they
+    // do not: an empty element still occupies a position, and dropping it
+    // shifts every element after it.
+    //
+    // That is not theoretical.  Triton pairs raw_input_contents[i] with
+    // inputs[i] positionally, and the final flush of a meeting sends an empty
+    // audio_chunk - so skipping it silently handed the model stream_id's bytes
+    // as its audio.  Hence putBytesElement rather than putBytes here.
     void putRepeatedString(int field, const QList<QString> &values)
     {
         for (const QString &value : values)
-            putString(field, value);
+            putBytesElement(field, value.toUtf8());
     }
 
     void putRepeatedBytes(int field, const QList<QByteArray> &values)
     {
         for (const QByteArray &value : values)
-            putBytes(field, value);
+            putBytesElement(field, value);
     }
+
+    // One length-delimited element, written whether or not it is empty.
+    void putBytesElement(int field, const QByteArray &value);
 
     // A proto3 `map<string, string>` is wire-identical to a repeated message
     // with key = 1 and value = 2.  Riva's custom_configuration and

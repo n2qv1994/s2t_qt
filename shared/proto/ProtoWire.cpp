@@ -128,6 +128,13 @@ void Writer::putBytes(int field, const QByteArray &value)
     m_buf.append(value);
 }
 
+void Writer::putBytesElement(int field, const QByteArray &value)
+{
+    putTag(field, LengthDelimitedType);
+    putVarint(quint64(value.size()));
+    m_buf.append(value);
+}
+
 void Writer::putSubMessage(int field, const QByteArray &encoded)
 {
     // An empty submessage still has to go on the wire: `Timing{}` present and

@@ -10,6 +10,8 @@
 #include <QRandomGenerator>
 #include <QUuid>
 
+#include <algorithm>
+
 namespace {
 
 double nowSeconds()
@@ -481,4 +483,26 @@ void BufferHub::shutdown()
     }
     LOG_INFO(applog::cat::Session) << "stopping" << refs.size() << "buffered sessions";
     refs.clear();
+}
+
+QList<asr::SessionSummary> BufferHub::summaries(int limit) const
+{
+    QList<SessionRef> sessions;
+    {
+        QMutexLocker lock(&m_mutex);
+        sessions = m_sessions.values();
+    }
+    QList<asr::SessionSummary> out;
+    out.reserve(sessions.size());
+    for (const SessionRef &session : sessions)
+        out.append(session->summary());
+    // Newest first: an operator opening the list is looking for what just
+    // happened, not for the oldest thing still in memory.
+    std::sort(out.begin(), out.end(),
+              [](const asr::SessionSummary &a, const asr::SessionSummary &b) {
+                  return a.createdAt > b.createdAt;
+              });
+    if (limit > 0 && out.size() > limit)
+        out = out.mid(0, limit);
+    return out;
 }

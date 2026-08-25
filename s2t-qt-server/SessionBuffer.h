@@ -10,21 +10,27 @@
 //
 // Threading, and why:
 //
-//   - the forwarder runs on this QThread and owns one channel.  push_audio and
-//     the final stop_session share it, because stop_session is a drain barrier
-//     that must come *after* the last packet, and one thread is the only way
-//     to guarantee that ordering.
-//   - the live-state read owns a second channel, guarded by its own mutex.
+//   - the forwarder runs on this QThread and owns the BackendSession.  Audio
+//     and the final flush share it, because the flush is a drain barrier that
+//     must come *after* the last packet, and one thread is the only way to
+//     guarantee that ordering.
+//   - the transcript is guarded by its own mutex, separate from the queue's.
 //     SessionState grows with the meeting; serialising it must never queue in
-//     front of a 160 ms audio packet.  That is the same separation the client
-//     kept, moved here.
+//     front of a 160 ms audio packet.  That separation predates this file
+//     owning the transcript, and is why it survived the change.
 //   - push(), liveState() and stop() are all called from HTTP/2 connection
 //     threads, concurrently, so everything they touch is under a lock.
+//
+// Since 2026-08-25 the meeting's state lives *here*, in LiveTranscript, rather
+// than being fetched from a pipeline that kept one.  Riva and Triton both
+// answer per chunk and remember nothing, so this class is now the authority on
+// what the meeting says.
 #ifndef SESSIONBUFFER_H
 #define SESSIONBUFFER_H
 
-#include "RpcLane.h"
+#include "LiveTranscript.h"
 #include "SessionJournal.h"
+#include "backend/InferenceBackend.h"
 #include "proto/BufferAdmin.h"
 
 #include <QAtomicInt>
@@ -35,13 +41,17 @@
 #include <QThread>
 #include <QWaitCondition>
 
+#include <memory>
+
 class SessionBuffer : public QThread
 {
 public:
     struct Settings
     {
-        QString upstreamTarget;
-        QString upstreamToken;
+        // The inference tier.  Borrowed, not owned - BufferHub outlives every
+        // session, and a session that outlived the backend would be holding a
+        // dangling pointer at exactly the moment it tried to flush.
+        InferenceBackend *backend = nullptr;
         // Peer that called start_session.  Recorded so an operator reading the
         // admin screen can tell two workstations apart.
         QString client;
@@ -63,13 +73,23 @@ public:
         qint64 segmentBytes = 16 * 1024 * 1024;
     };
 
-    SessionBuffer(const QString &sessionId, const asr::StartSessionResponse &started,
+    SessionBuffer(const QString &sessionId, qint64 streamId, const BackendSessionConfig &config,
                   const Settings &settings);
     // Rebuilds a session from its journal after a restart.  The backlog is put
     // straight into the queue, so the forwarder sends it before anything the
     // client pushes next - order across the restart is preserved.
     SessionBuffer(const jrn::Recovered &recovered, const Settings &settings);
     ~SessionBuffer() override;
+
+    // Opens the backend session and waits for the answer.
+    //
+    // Separate from the constructor because of thread affinity: a
+    // BackendSession owns a socket and must be created on the thread that will
+    // drive it, which is the forwarder this class *is*.  So the constructor
+    // starts the thread, the thread opens the session, and this blocks the
+    // caller - a connection thread answering start_session - until it knows
+    // whether the tier accepted the meeting.
+    grpc::Status openBackend();
 
     QString sessionId() const { return m_sessionId; }
     QString journalHandle() const { return m_handle; }
@@ -88,9 +108,19 @@ public:
     // meaning what it meant.
     grpc::Status push(const asr::PushAudioRequest &request, asr::PushAudioResponse *out);
 
-    // Cached; a refresh older than statePollMs triggers exactly one upstream
-    // read no matter how many clients are watching.
+    // The meeting as this server understands it.  No longer a cached upstream
+    // read: since the tier stopped keeping session state, LiveTranscript here
+    // *is* the authority, so this is a lock and a copy.
     grpc::Status liveState(asr::StateResponse *out);
+
+    // The same, restricted to a time window, plus the canonical transcript that
+    // an editor works against.  These are what get_review_state,
+    // apply_text_edit and rename_speaker are answered from.
+    grpc::Status reviewState(double viewStartSec, double viewEndSec, asr::StateResponse *out);
+    grpc::Status applyTextEdit(const asr::TextEditRequest &request, asr::ReviewEditResponse *out);
+    grpc::Status renameSpeaker(const asr::RenameSpeakerRequest &request,
+                               asr::ReviewEditResponse *out);
+    asr::SessionSummary summary() const;
 
     // Drains the queue, then calls stop_session upstream on the same thread
     // that sent the audio, and returns the pipeline's own answer.
@@ -124,10 +154,9 @@ private:
     // Sends one packet, retrying the same seq through transport failures only.
     // Returns false when the session must end; *fatal then holds the status
     // that push() will hand the client.
-    bool forward(AsrClient &client, const Packet &packet, grpc::Status *fatal);
+    bool forward(BackendSession &session, const Packet &packet, grpc::Status *fatal);
     void recordForwardMs(double ms);
     void noteError(const grpc::Status &status);
-    void seedState();
 
     QString m_sessionId;
     QString m_handle;
@@ -142,6 +171,14 @@ private:
     qint64 m_pendingBytes = 0;
     QAtomicInt m_stopRequested{0};
     QAtomicInt m_shutdownRequested{0};
+
+    // ---- the backend handshake ---------------------------------------------
+    // Created and destroyed on the forwarder thread, never touched from
+    // anywhere else.  openBackend() waits on m_opened for the result.
+    std::unique_ptr<BackendSession> m_backend;
+    QWaitCondition m_opened;
+    grpc::Status m_openStatus;
+    bool m_openDone = false;
 
     // ---- what the client has been told -------------------------------------
     quint64 m_lastAcceptedSeq = 0;
@@ -183,14 +220,19 @@ private:
     grpc::Status m_stopStatus;
     bool m_stopDone = false;
 
-    // ---- live-state cache, on its own channel and its own lock -------------
+    // ---- the transcript, and its own lock ----------------------------------
+    //
     // Lock order, everywhere in this class: m_stateMutex before m_mutex.
     // Never the other way round.
+    //
+    // It used to guard a cache of what the pipeline had said.  It now guards
+    // the transcript itself, because nothing upstream keeps one any more.  The
+    // separate lock is still worth having for the original reason: serialising
+    // a long meeting's state must never queue in front of a 160 ms packet.
     mutable QMutex m_stateMutex;
-    RpcLane *m_stateLane = nullptr;
-    asr::StateResponse m_state;
-    bool m_haveState = false;
-    QElapsedTimer m_stateAge;
+    LiveTranscript m_live;
+    BackendSessionConfig m_config;
+    qint64 m_backendStreamId = 0;
 
     // Written under m_mutex, like everything else it protects.
     jrn::Journal m_journal;

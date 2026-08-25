@@ -53,7 +53,7 @@ SOURCES += \
     backend/InferenceBackend.cpp \
     backend/TritonBackend.cpp \
     backend/RivaBackend.cpp \
-    UpstreamPool.cpp \
+    LiveTranscript.cpp \
     SessionJournal.cpp \
     SessionBuffer.cpp \
     BufferHub.cpp \
@@ -66,7 +66,7 @@ HEADERS += \
     backend/InferenceBackend.h \
     backend/TritonBackend.h \
     backend/RivaBackend.h \
-    UpstreamPool.h \
+    LiveTranscript.h \
     SessionJournal.h \
     SessionBuffer.h \
     BufferHub.h \
