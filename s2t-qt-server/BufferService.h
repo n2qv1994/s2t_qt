@@ -16,12 +16,13 @@
 #define BUFFERSERVICE_H
 
 #include "BufferHub.h"
+#include "CampPlusClient.h"
 #include "grpc/GrpcServer.h"
 
 class BufferService
 {
 public:
-    BufferService(BufferHub *hub, grpc::Server *server);
+    BufferService(BufferHub *hub, grpc::Server *server, CampPlusClient *campp);
 
     // Registers every method.  Called once, before the server starts
     // listening, because the method table is deliberately not locked.
@@ -30,6 +31,8 @@ public:
 private:
     BufferHub *m_hub = nullptr;
     grpc::Server *m_server = nullptr;
+    // Borrowed.  Owned by main(), which outlives every connection thread.
+    CampPlusClient *m_campp = nullptr;
 };
 
 #endif // BUFFERSERVICE_H

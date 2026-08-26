@@ -41,6 +41,7 @@ public:
 
 private slots:
     void toggleRecording();
+    void loadFromFile();
     void submitRecording();
     void loadScript();
     void loadRoster();
@@ -60,6 +61,7 @@ private:
     QLineEdit *m_speakerName = nullptr;
     QPushButton *m_recordButton = nullptr;
     QPushButton *m_retryButton = nullptr;
+    QPushButton *m_fileButton = nullptr;
     QLabel *m_timerLabel = nullptr;
     QLabel *m_status = nullptr;
     QCheckBox *m_allowBelow = nullptr;

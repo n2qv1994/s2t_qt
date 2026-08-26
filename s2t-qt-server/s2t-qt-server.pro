@@ -53,6 +53,7 @@ SOURCES += \
     backend/InferenceBackend.cpp \
     backend/TritonBackend.cpp \
     backend/RivaBackend.cpp \
+    CampPlusClient.cpp \
     LiveTranscript.cpp \
     SessionJournal.cpp \
     SessionBuffer.cpp \
@@ -66,6 +67,7 @@ HEADERS += \
     backend/InferenceBackend.h \
     backend/TritonBackend.h \
     backend/RivaBackend.h \
+    CampPlusClient.h \
     LiveTranscript.h \
     SessionJournal.h \
     SessionBuffer.h \

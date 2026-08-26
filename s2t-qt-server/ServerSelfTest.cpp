@@ -2,6 +2,7 @@
 
 #include "BufferHub.h"
 #include "BufferService.h"
+#include "CampPlusClient.h"
 #include "ServerConfig.h"
 #include "core/Logger.h"
 #include "grpc/AsrClient.h"
@@ -682,6 +683,7 @@ int chain()
 
     BufferHub *hub = nullptr;
     grpc::Server *buffer = nullptr;
+    CampPlusClient *campp = nullptr;
     BufferService *service = nullptr;
     quint16 bufferPort = 0;
     bool bufferUp = false;
@@ -693,7 +695,13 @@ int chain()
             hub = new BufferHub(config);
             buffer = new grpc::Server();
             buffer->setToken(config.listenToken);
-            service = new BufferService(hub, buffer);
+            // No enrolment service in the selftest: the three CAM++ RPCs are a
+            // pass-through to a separate host process, and standing one up
+            // would test that process rather than this one.  An unconfigured
+            // client refuses them with a clear message, which is the behaviour
+            // a deployment without enrolment should have anyway.
+            campp = new CampPlusClient(QString(), 5000);
+            service = new BufferService(hub, buffer, campp);
             service->registerMethods();
             bufferUp = buffer->start(QHostAddress::LocalHost, config.listenPort, &error);
             bufferPort = buffer->port();
@@ -946,7 +954,8 @@ public:
                 m_hub = new BufferHub(config);
                 m_server = new grpc::Server();
                 m_server->setToken(config.listenToken);
-                m_service = new BufferService(m_hub, m_server);
+                m_campp = new CampPlusClient(QString(), 5000);
+                m_service = new BufferService(m_hub, m_server, m_campp);
                 m_service->registerMethods();
                 m_up = m_server->start(QHostAddress::LocalHost, config.listenPort, &m_error);
                 m_port = m_server->port();
@@ -991,6 +1000,7 @@ private:
     BufferHub *m_hub = nullptr;
     grpc::Server *m_server = nullptr;
     BufferService *m_service = nullptr;
+    CampPlusClient *m_campp = nullptr;
     bool m_up = false;
     int m_recovered = 0;
     quint16 m_port = 0;

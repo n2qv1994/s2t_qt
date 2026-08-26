@@ -1,5 +1,6 @@
 #include "BufferHub.h"
 #include "BufferService.h"
+#include "CampPlusClient.h"
 #include "ServerConfig.h"
 #include "ServerSelfTest.h"
 #include "core/Logger.h"
@@ -179,7 +180,8 @@ int main(int argc, char *argv[])
         server.setMaxConnections(config.maxConnections);
         server.setIdleTimeoutMs(config.idleTimeoutMs);
 
-        BufferService service(&hub, &server);
+        CampPlusClient campp(config.enrollUrl, config.enrollTimeoutMs);
+        BufferService service(&hub, &server, &campp);
         service.registerMethods();
 
         if (!hub.ok()) {

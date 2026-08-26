@@ -34,6 +34,18 @@ struct ServerConfig
     // this is deliberately long.
     int idleTimeoutMs = 300000;
 
+    // ---- speaker enrolment (CAM++) ---------------------------------------
+    //
+    // campp_native/enroll_service.py in s2t-dgpu, a plain HTTP service.  It is
+    // NOT the inference tier and not reachable through it: rebuild_db needs
+    // docker exec access the Triton container deliberately does not have, so
+    // it runs on the host beside it.  Empty disables enrolment, and the RPCs
+    // then say so rather than failing obscurely.
+    QString enrollUrl = QStringLiteral("http://127.0.0.1:8790");
+    // Enrolment reruns rebuild_db over every speaker on file, so it is the
+    // slowest call in the system by a wide margin.
+    int enrollTimeoutMs = 120000;
+
     // ---- upstream side (the inference tier) --------------------------------
     //
     // Until 2026-08-25 this was grpc_session_adapter.py, a Python service that

@@ -1,7 +1,12 @@
 #include "BufferService.h"
 
 #include "core/Logger.h"
+
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "grpc/Methods.h"
+#include "proto/SpeakerRegistry.h"
 
 #include <QDateTime>
 
@@ -65,7 +70,10 @@ grpc::Status serve(const grpc::ServerCall &call, QByteArray *out, Fn fn)
 
 } // namespace
 
-BufferService::BufferService(BufferHub *hub, grpc::Server *server) : m_hub(hub), m_server(server) {}
+BufferService::BufferService(BufferHub *hub, grpc::Server *server, CampPlusClient *campp)
+    : m_hub(hub), m_server(server), m_campp(campp)
+{
+}
 
 void BufferService::registerMethods()
 {
@@ -266,29 +274,188 @@ void BufferService::registerMethods()
                 });
         });
 
-    // ---- SpeakerRegistryService: no equivalent in either tier --------------
+    // ---- SpeakerRegistryService: straight to CAM++ -------------------------
     //
-    // Enrolment ran against the adapter's CAM++ database. Riva's ASR API has no
-    // enrolment RPC at all - its speaker_tag is an anonymous cluster number -
-    // and this server does not own the CAM++ store either. Answering these with
-    // empty successes would let the client show an enrolment that never
-    // happened, so they refuse and say why.
+    // The adapter presented a gRPC face over campp_native/enroll_service.py, a
+    // plain HTTP service on :8790.  That translation lives here now.
+    //
+    // Note what it is NOT: the inference tier.  rebuild_db needs docker exec
+    // access the Triton container deliberately does not have, so the enrolment
+    // service runs on the host beside it and is reached separately.  Riva has
+    // no enrolment RPC at all, so this path is the same either way.
 
-    const auto noRegistry = [](const grpc::ServerCall &, QByteArray *) {
+    CampPlusClient *campp = m_campp;
+
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::GetEnrollmentScript),
+        [campp, deadline](const grpc::ServerCall &call, QByteArray *out) {
+            const int ms = deadline(call);
+            return serve<reg::GetEnrollmentScriptRequest, reg::GetEnrollmentScriptResponse>(
+                call, out,
+                [&](const reg::GetEnrollmentScriptRequest &,
+                    reg::GetEnrollmentScriptResponse *resp) {
+                    QByteArray body;
+                    const grpc::Status status =
+                        campp->get(QStringLiteral("/enroll_script"), &body, ms);
+                    if (!status.ok())
+                        return status;
+                    const QJsonObject object = QJsonDocument::fromJson(body).object();
+                    // The service spells it `text`; the proto spells it
+                    // script_text.  Same field, and this is the only place that
+                    // has to know both spellings.
+                    resp->scriptText = object.value(QStringLiteral("text")).toString();
+                    resp->sampleRate =
+                        quint32(object.value(QStringLiteral("sample_rate")).toInt(16000));
+                    resp->recommendedDurationSec =
+                        object.value(QStringLiteral("recommended_duration_sec")).toDouble(25.0);
+                    resp->targetSegments =
+                        quint32(object.value(QStringLiteral("target_segments")).toInt(10));
+                    return status;
+                });
+        });
+
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::EnrollSpeaker),
+        [campp, deadline](const grpc::ServerCall &call, QByteArray *out) {
+            // Enrolment reruns rebuild_db over every speaker on file and
+            // legitimately takes minutes; the client sends a long deadline and
+            // this passes it on rather than cutting it short.
+            const int ms = deadline(call);
+            return serve<reg::EnrollSpeakerRequest, reg::EnrollSpeakerResponse>(
+                call, out,
+                [&](const reg::EnrollSpeakerRequest &req, reg::EnrollSpeakerResponse *resp) {
+                    if (req.displayName.trimmed().isEmpty()) {
+                        grpc::Status bad;
+                        bad.code = grpc::InvalidArgument;
+                        bad.message = QStringLiteral("thiếu tên người nói");
+                        return bad;
+                    }
+                    if (req.editorId.trimmed().isEmpty()) {
+                        // enroll_service.py audits this header all the way to
+                        // the database write, so an anonymous enrolment is
+                        // refused here rather than there.
+                        grpc::Status bad;
+                        bad.code = grpc::InvalidArgument;
+                        bad.message =
+                            QStringLiteral("thiếu editor_id - mỗi lần đăng ký đều được ghi nhật ký "
+                                           "kèm người thao tác");
+                        return bad;
+                    }
+                    if (req.wav.isEmpty()) {
+                        grpc::Status bad;
+                        bad.code = grpc::InvalidArgument;
+                        bad.message = QStringLiteral("thiếu dữ liệu WAV");
+                        return bad;
+                    }
+
+                    // Percent-encoded because an HTTP header value is Latin-1
+                    // and these two are free text that routinely carries
+                    // Vietnamese diacritics.  enroll_service.py calls unquote()
+                    // on both.
+                    QList<QPair<QByteArray, QByteArray>> headers;
+                    headers.append({QByteArrayLiteral("X-Speaker-Name"),
+                                    CampPlusClient::urlEncode(req.displayName.trimmed())});
+                    headers.append({QByteArrayLiteral("X-Editor-Id"),
+                                    CampPlusClient::urlEncode(req.editorId.trimmed())});
+                    headers.append({QByteArrayLiteral("Content-Type"),
+                                    QByteArrayLiteral("application/octet-stream")});
+                    if (req.allowBelowPolicy)
+                        headers.append({QByteArrayLiteral("X-Allow-Below-Policy"),
+                                        QByteArrayLiteral("1")});
+
+                    QByteArray body;
+                    const grpc::Status status =
+                        campp->post(QStringLiteral("/enroll"), req.wav, headers, &body, ms);
+                    if (!status.ok()) {
+                        // A rejected sample is not a broken server: report it
+                        // in the message field the client already renders, so
+                        // "quá ngắn" reaches the operator as advice.
+                        resp->ok = false;
+                        resp->error = status.message;
+                        return grpc::Status();
+                    }
+                    const QJsonObject object = QJsonDocument::fromJson(body).object();
+                    resp->ok = true;
+                    resp->speakerId = object.value(QStringLiteral("spk_id")).toString();
+                    resp->rawSeconds = object.value(QStringLiteral("raw_seconds")).toDouble();
+                    resp->speechSecondsAfterVad =
+                        object.value(QStringLiteral("speech_seconds_after_vad")).toDouble();
+                    resp->segmentsEnrolled =
+                        quint32(object.value(QStringLiteral("segments_enrolled")).toInt());
+                    resp->targetSegments =
+                        quint32(object.value(QStringLiteral("target_segments")).toInt());
+                    // Never swallowed: a sample stored below policy has to stay
+                    // visibly in need of a proper re-enrolment.
+                    resp->warning = object.value(QStringLiteral("warning")).toString();
+                    resp->dbMtime = object.value(QStringLiteral("mtime")).toDouble();
+                    return status;
+                });
+        });
+
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::GetSpeakerRegistryStatus),
+        [campp, deadline](const grpc::ServerCall &call, QByteArray *out) {
+            const int ms = deadline(call);
+            return serve<reg::GetSpeakerRegistryStatusRequest, reg::GetSpeakerRegistryStatusResponse>(
+                call, out,
+                [&](const reg::GetSpeakerRegistryStatusRequest &req,
+                    reg::GetSpeakerRegistryStatusResponse *resp) {
+                    QByteArray body;
+                    const grpc::Status status = campp->get(QStringLiteral("/status"), &body, ms);
+                    if (!status.ok())
+                        return status;
+                    const QJsonObject object = QJsonDocument::fromJson(body).object();
+                    resp->sessionId = req.sessionId;
+                    resp->globalDbMtime = object.value(QStringLiteral("mtime")).toDouble();
+                    resp->globalDbRevision =
+                        object.value(QStringLiteral("revision")).toString();
+                    resp->globalSpeakerCount =
+                        quint32(object.value(QStringLiteral("speaker_count")).toInt());
+                    resp->sidecarReachable =
+                        object.value(QStringLiteral("sidecar_reachable")).toBool(true);
+                    for (const QJsonValue &name :
+                         object.value(QStringLiteral("speaker_names")).toArray()) {
+                        resp->globalSpeakerNames.append(name.toString());
+                    }
+                    for (const QJsonValue &item :
+                         object.value(QStringLiteral("below_policy")).toArray()) {
+                        const QJsonObject entry = item.toObject();
+                        reg::SpeakerBelowPolicy weak;
+                        weak.spkId = entry.value(QStringLiteral("spk_id")).toString();
+                        weak.spkName = entry.value(QStringLiteral("spk_name")).toString();
+                        weak.sampleCount =
+                            quint32(entry.value(QStringLiteral("sample_count")).toInt());
+                        weak.longestSampleSec =
+                            entry.value(QStringLiteral("longest_sample_sec")).toDouble();
+                        resp->speakersBelowPolicy.append(weak);
+                    }
+                    // The per-session counters stay zero: they come from the
+                    // session speaker registry, which needs the store this
+                    // server does not have yet.  Zero is the honest answer -
+                    // nothing has been staged here.
+                    return status;
+                });
+        });
+
+    // ---- SpeakerRegistryService: still needs a session store ---------------
+    //
+    // These two are not pass-throughs.  ListSessionSpeakers reads the staged
+    // per-session registry, and SaveSessionSpeakers publishes a speaker from a
+    // meeting by collecting the audio behind its evidence spans and posting it
+    // to /enroll_from_pcm.  Both need the session store and the audio archive
+    // this server has yet to grow, so they say so rather than half-working.
+
+    const auto needsStore = [](const grpc::ServerCall &, QByteArray *) {
         grpc::Status status;
         status.code = grpc::Unimplemented;
         status.message = QStringLiteral(
-            "đăng ký giọng nói chưa có ở máy chủ này. Riva không có RPC đăng ký giọng, "
-            "và kho CAM++ không do máy chủ này quản lý - tên người nói hiện chỉ đặt được "
-            "bằng rename_speaker.");
+            "danh sách người nói theo phiên chưa có ở máy chủ này - nó cần kho phiên và kho "
+            "audio chưa được làm. Đăng ký trực tiếp (EnrollSpeaker) thì đã dùng được.");
         return status;
     };
 
-    for (const char *method : {rpcpath::GetEnrollmentScript, rpcpath::EnrollSpeaker,
-                               rpcpath::ListSessionSpeakers, rpcpath::SaveSessionSpeakers,
-                               rpcpath::GetSpeakerRegistryStatus}) {
-        m_server->registerMethod(QString::fromLatin1(method), noRegistry);
-    }
+    for (const char *method : {rpcpath::ListSessionSpeakers, rpcpath::SaveSessionSpeakers})
+        m_server->registerMethod(QString::fromLatin1(method), needsStore);
 
     // ---- BufferAdminService: this process, not the pipeline ----------------
 

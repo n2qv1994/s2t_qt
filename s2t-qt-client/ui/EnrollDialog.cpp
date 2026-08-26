@@ -1,12 +1,15 @@
 #include "EnrollDialog.h"
 
 #include "audio/AudioCapture.h"
+#include "audio/MediaDecode.h"
 #include "audio/WavIo.h"
 #include "core/Logger.h"
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -139,9 +142,11 @@ QWidget *EnrollDialog::buildEnrollTab()
     auto *row = new QHBoxLayout();
     m_recordButton = new QPushButton(QStringLiteral("Bắt đầu ghi âm"), page);
     m_timerLabel = new QLabel(QStringLiteral("0.0s"), page);
+    m_fileButton = new QPushButton(QStringLiteral("Nạp từ tệp…"), page);
     m_retryButton = new QPushButton(QStringLiteral("Gửi lại bản ghi"), page);
     m_retryButton->setVisible(false);
     row->addWidget(m_recordButton);
+    row->addWidget(m_fileButton);
     row->addWidget(m_timerLabel);
     row->addWidget(m_retryButton);
     row->addStretch();
@@ -160,6 +165,7 @@ QWidget *EnrollDialog::buildEnrollTab()
     layout->addWidget(rosterGroup);
 
     connect(m_recordButton, &QPushButton::clicked, this, &EnrollDialog::toggleRecording);
+    connect(m_fileButton, &QPushButton::clicked, this, &EnrollDialog::loadFromFile);
     connect(m_retryButton, &QPushButton::clicked, this, [this]() {
         m_recorded = m_pendingWav;
         m_speakerName->setText(m_pendingName);
@@ -310,6 +316,45 @@ void EnrollDialog::toggleRecording()
     m_recordButton->setText(QStringLiteral("Dừng ghi âm"));
     setStatus(QStringLiteral("busy"), QStringLiteral("Đang ghi âm..."));
     m_capture->start(choice);
+}
+
+void EnrollDialog::loadFromFile()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Chọn tệp giọng mẫu"), QString(),
+        QStringLiteral("Âm thanh / video (*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.mp4 *.mkv "
+                       "*.mov);;Tất cả (*)"));
+    if (path.isEmpty())
+        return;
+
+    // Decoded straight to what CAM++ wants.  The service takes a complete WAV
+    // at 16 kHz mono and infers nothing from the file name, so converting here
+    // means the operator can hand it whatever their recorder produced.
+    QString error;
+    const wav::Pcm pcm = audio::decodeMedia(path, &error, 16000, 1);
+    if (!pcm.isValid()) {
+        setStatus(QStringLiteral("err"), error);
+        return;
+    }
+
+    m_recorded = pcm.frames;
+    m_sampleRate = pcm.sampleRate;
+    m_channels = pcm.channels;
+
+    // Said out loud, because a sample that is too short or mostly silence is
+    // the single commonest reason an enrolment comes back rejected, and the
+    // operator can fix it before spending two minutes on rebuild_db.
+    const QString name = QFileInfo(path).fileName();
+    setStatus(QStringLiteral("ok"),
+              QStringLiteral("Đã nạp %1 — %2 giây. Nhấn \"Gửi lại bản ghi\" hoặc đặt tên rồi gửi.\n"
+                             "Lưu ý: mẫu tốt là MỘT người nói, liên tục, không nhạc nền.")
+                  .arg(name)
+                  .arg(pcm.durationSec(), 0, 'f', 1));
+    LOG_INFO(applog::cat::Ui) << "enrolment sample loaded from" << name << pcm.durationSec()
+                              << "s at 16 kHz mono";
+    m_pendingWav = m_recorded;
+    m_pendingName = m_speakerName->text().trimmed();
+    m_retryButton->setVisible(true);
 }
 
 void EnrollDialog::submitRecording()
