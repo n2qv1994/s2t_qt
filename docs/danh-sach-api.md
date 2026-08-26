@@ -12,27 +12,42 @@ mọi số hiệu trường và mọi quy tắc trong tài liệu này được 
 
 ```
    client bên ngoài của bạn ─┐
-                             ├──► s2t-qt-server ──► adapter ──► Triton ──► GPU
-   s2t-qt-client           ──┘        :8800          :8700       :8011
+                             ├──► s2t-qt-server ──► Triton :8011 ──► GPU
+   s2t-qt-client           ──┘        :8800         hoặc Riva :50051
                                     (Server buffer)
 ```
 
-**Nối vào đâu.** Nối vào Server buffer (`:8800`), không phải vào adapter
-(`:8700`). Cả hai nói cùng một hợp đồng cho 17 RPC đầu, nhưng chỉ Server buffer
-mới có hàng đợi audio — và hàng đợi ấy là thứ giữ cho một sự cố mạng ở phía bạn
-không thành mất tiếng. Nó cũng thêm ba RPC quản trị của riêng nó.
+**Nối vào đâu.** Nối vào Server buffer (`:8800`). Từ 2026-08-25 nó là nơi *duy
+nhất* nói hợp đồng này: adapter Python `:8700` đã ra khỏi sơ đồ triển khai, và
+tầng suy luận bên dưới nói giao thức của riêng nó (KServe v2 hoặc
+`nvidia.riva.asr`) chứ không nói `asr.ui.v1`.
+
+**Năm RPC dưới đây hiện KHÔNG dùng được**, và tài liệu nói thẳng để bạn không
+xây tính năng lên trên chúng:
+
+| RPC | Trả về | Vì sao |
+|---|---|---|
+| `get_audio_range` | `UNIMPLEMENTED` | Máy chủ chưa có kho audio để phát lại. Nhật ký phiên là *hàng đợi*, không phải bản lưu. |
+| `get_pipeline_trace` | OK, `enabled = false` | Bản triển khai này không thu thập trace. `enabled` là cách hợp đồng vốn đã dành để nói điều đó. |
+| `get_audit_history` | OK, danh sách rỗng | Chưa có kho nhật ký thao tác. Các lần sửa vẫn được ghi vào log của máy chủ. |
+| cả `SpeakerRegistryService` (5 RPC) | `UNIMPLEMENTED` | Riva không có RPC đăng ký giọng nào, và kho CAM++ không do máy chủ này quản lý. Đặt tên người nói hiện chỉ làm được bằng `rename_speaker`. |
+
+Chúng trả lỗi thay vì trả thành công rỗng có chủ ý: một bản chép trống trông
+như câu trả lời thật là kiểu hỏng tệ hơn nhiều so với một mã lỗi rõ ràng.
 
 Ba service, cùng một cổng, cùng một token:
 
 | Service | RPC | Ai trả lời |
 |---|---|---|
-| `asr.ui.v1.ProductASRService` | 12 | 4 do bộ đệm trả lời, 8 chuyển tiếp |
-| `asr.ui.v1.SpeakerRegistryService` | 5 | chuyển tiếp toàn bộ |
-| `s2t.buffer.v1.BufferAdminService` | 3 | bộ đệm, hoàn toàn |
+| `asr.ui.v1.ProductASRService` | 12 | 8 do máy chủ trả lời, 1 hỏi tầng suy luận, 3 là stub |
+| `asr.ui.v1.SpeakerRegistryService` | 5 | `UNIMPLEMENTED` toàn bộ |
+| `s2t.buffer.v1.BufferAdminService` | 3 | máy chủ, hoàn toàn |
 
-"Chuyển tiếp" nghĩa là đúng nghĩa đen: request được giải mã để kiểm tra, rồi
-gọi lên tầng suy luận và trả lại nguyên vẹn phản hồi — kể cả mã lỗi và thông
-điệp lỗi. Server buffer không có ý kiến gì về nội dung một bản chép.
+**Không còn RPC nào được chuyển tiếp.** Máy chủ giờ *sở hữu* cuộc họp: nó tự
+sinh `session_id`, tự dựng bản chép từ những gì tầng suy luận trả về theo từng
+gói, và trả lời mọi câu hỏi về cuộc họp đó từ trạng thái của chính nó.
+`get_model_status` là RPC duy nhất còn chạm tới tầng suy luận từ một luồng kết
+nối, và nó chỉ hỏi danh sách mô hình.
 
 Ba tài liệu đi cùng nhau:
 
@@ -115,7 +130,7 @@ Cả hai chương trình đều có sẵn phép thử không cần cài thêm g�
 
 ```
 s2t-qt-client --probe 192.168.1.47:8800 --token <token>   # tới Server buffer
-s2t-qt-server --probe 192.168.1.47:8700 --token <token>   # tới tầng suy luận
+s2t-qt-server --probe 192.168.1.47:8011 --token <token>   # tới tầng suy luận
 ```
 
 Cái đầu gọi thật ba RPC — `get_model_status`, `list_sessions` và
@@ -394,7 +409,7 @@ StartSessionRequest → StartSessionResponse
 | # | Trường | Kiểu | Ý nghĩa |
 |---|---|---|---|
 | 1 | `session_id` | `string` | Định danh phiên, dùng cho mọi RPC sau |
-| 2 | `stream_id` | `int64` | Định danh luồng nội bộ của adapter |
+| 2 | `stream_id` | `int64` | Định danh luồng do Server buffer sinh ra. `TritonBackend` gửi nó xuống làm tensor `stream_id`, tức thứ giữ trạng thái mỗi luồng bên `asr_diar_session`; Riva không dùng tới. |
 | 3 | `state_version` | `uint64` | Số hiệu phiên bản trạng thái |
 | 4 | `state` | `SessionState` | Trạng thái rỗng ban đầu |
 

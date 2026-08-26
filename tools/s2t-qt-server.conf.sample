@@ -23,17 +23,38 @@ max_connections=128
 idle_timeout_ms=300000
 
 [upstream]
-# Tầng suy luận: grpc_session_adapter.py đứng trước Triton.  Chỉ Server buffer
-# nói chuyện với địa chỉ này; client không bao giờ biết tới nó.
-target=192.168.1.47:8700
+# Tầng suy luận.  Chỉ Server buffer nói chuyện với địa chỉ này; client không
+# bao giờ biết tới nó.
+#
+# Từ 2026-08-25 máy chủ nói THẲNG với tầng suy luận, không còn qua
+# grpc_session_adapter.py nữa.  Có hai tầng, và `backend` quyết định `target`
+# nghĩa là gì:
+#
+#   triton  inference.GRPCInferenceService (KServe v2), tức kho mô hình đang
+#           chạy: asr_diar_session và mười mô hình phía sau nó.  Cổng gRPC của
+#           Triton, KHÔNG phải cổng HTTP 8010.
+#   riva    nvidia.riva.asr.RivaSpeechRecognition.  Cổng mặc định 50051.
+#
+# Gõ sai tên backend thì máy chủ TỪ CHỐI khởi động, chứ không chạy rồi trông
+# như tầng suy luận không tới được - cùng lý do với bảng cờ dòng lệnh.
+backend=triton
+target=192.168.1.47:8011
 token=
-# Số kênh giữ sẵn cho các RPC chuyển tiếp (soát/sửa, phát lại, đăng ký giọng).
-# Đường audio và đường đọc trạng thái KHÔNG dùng nhóm này - mỗi phiên có kênh
-# riêng, để một lệnh EnrollSpeaker 120 giây không bao giờ chắn trước một gói
-# audio 160 ms.
-lanes=4
+
+# Mô hình dùng để giải mã.  Để trống nghĩa là mặc định của backend; với Triton
+# thì mặc định là asr_diar_session.
+model=asr_diar_session
+
+# Chỉ Riva dùng khoá này - với Triton thì kho mô hình đã hàm ý ngôn ngữ rồi.
+language=vi-VN
+
 timeout_ms=30000
 probe_ms=5000
+
+# KHÔNG CÒN DÙNG: `lanes`.  Nó cấp kênh cho các RPC chuyển tiếp, mà từ khi
+# adapter biến mất thì không còn gì để chuyển tiếp - mọi RPC về một cuộc họp
+# đều do chính máy chủ này trả lời.  Mỗi backend giữ đúng một kênh quản trị
+# cho ping và danh sách mô hình.
 
 [buffer]
 # Mỗi phiên được giữ tối đa bấy nhiêu giây audio khi tầng suy luận chưa theo

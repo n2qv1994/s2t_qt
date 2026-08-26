@@ -8,14 +8,25 @@ Hai chương trình Qt 6, một cây nguồn:
 | **`s2t-qt-client`** | Giao diện điều hành viên: thu microphone, xem transcript trực tiếp, soát/sửa, đăng ký giọng. Chỉ nói chuyện với Server buffer. | Qt Widgets + Multimedia + Network |
 
 ```
-Windows/RHEL client        Server buffer            tầng suy luận
-┌────────────────┐        ┌──────────────┐        ┌──────────────────┐
-│ s2t-qt-client  │ gRPC   │ s2t-qt-server│ gRPC   │ grpc_session_    │  Triton
-│ mic, UI, sửa   │──────► │ hàng đợi     │──────► │ adapter.py :8700 │─────────►
-│                │ :8800  │ + chuyển tiếp│        │                  │ Denoise→VAD
-└────────────────┘        └──────────────┘        └──────────────────┘ →ASR→Diar
-                                                                        →Verify
+Windows/RHEL client        Server buffer                  tầng suy luận
+┌────────────────┐        ┌──────────────┐        ┌────────────────────────┐
+│ s2t-qt-client  │ gRPC   │ s2t-qt-server│ gRPC   │ Triton  :8011  KServe v2│
+│ mic, UI, sửa   │──────► │ hàng đợi     │──────► │   asr_diar_session      │
+│                │ :8800  │ + bản chép   │        │        ── hoặc ──       │
+└────────────────┘        └──────────────┘        │ Riva   :50051  nvidia   │
+                                                  │   .riva.asr             │
+                                                  └────────────────────────┘
 ```
+
+**Từ 2026-08-25, máy chủ nói thẳng với tầng suy luận.**
+`grpc_session_adapter.py` không còn trong sơ đồ triển khai: nó vốn là mã mẫu
+để hiểu nghiệp vụ. `s2t-qt-server/backend/InferenceBackend.h` là ranh giới, và
+`upstream/backend` trong tệp cấu hình chọn `triton` hay `riva`. Không có gì
+phía trên ranh giới đó biết mình đang nói với bên nào.
+
+Hệ quả lớn nhất: **bản chép giờ được dựng ở máy chủ này**, trong
+`LiveTranscript`. Riva và Triton đều trả lời theo từng gói và không nhớ gì cả,
+nên không còn ai ở trên để hỏi `get_live_state` nữa.
 
 Trước đây `s2t_qt` là một chương trình duy nhất nối thẳng lên adapter. Việc
 tách đôi đặt hàng đợi audio ra khỏi máy trạm, và đó là toàn bộ lý do:
@@ -30,14 +41,14 @@ tách đôi đặt hàng đợi audio ra khỏi máy trạm, và đó là toàn 
 - **Tầng suy luận sập không làm dừng cuộc họp.** Audio vẫn được nhận và xếp
   hàng (mặc định 300 giây mỗi phiên). Đèn báo trên client chuyển vàng —
   *đang đệm* — chứ không đỏ.
-- **Nhiều người xem một cuộc họp chỉ tốn một lần hỏi.** `get_live_state` được
-  đệm trong 200 ms, nên mười client cùng theo dõi vẫn chỉ là một lần đọc
-  trạng thái trên tầng suy luận.
+- **Nhiều người xem một cuộc họp không tốn gì của tầng suy luận.** Bản chép
+  nằm sẵn ở máy chủ này, nên `get_live_state` là một khoá và một bản sao -
+  mười client cùng theo dõi vẫn là *không* lần gọi nào lên tầng suy luận.
 - **Máy trạm chỉ cần mở đúng một cổng ra ngoài**, tới Server buffer. Địa chỉ
   và token của tầng suy luận không còn nằm trên máy của điều hành viên.
 
-Phía tầng suy luận không đổi một dòng nào: Triton, adapter, sidecar CAM++ và
-hai tệp `.proto` vẫn nguyên như cũ.
+Kho mô hình Triton không đổi một dòng nào — `asr_diar_session` và mười mô hình
+phía sau nó vẫn nguyên. Thứ biến mất là lớp Python đứng trước chúng.
 
 ## Tài liệu
 
@@ -116,10 +127,13 @@ xếp trước một gói audio 160 ms.
 |---|---|---|
 | main | `QTcpServer`, `BufferHub` | nhận kết nối, dọn phiên đã hết hạn |
 | `http2-conn-N` | một socket client | đọc khung, gọi handler, ghi trả lời |
-| `forward-<phiên>` | một kênh lên tầng suy luận | rút hàng đợi, `push_audio`, rồi `stop_session` |
-| `state-<phiên>` | một kênh riêng | làm mới bộ đệm `get_live_state` |
-| `relay-lane-0..N` | mỗi luồng một kênh | mọi RPC chuyển tiếp |
-| `upstream-probe` | một kênh | kiểm tra tầng suy luận còn sống không |
+| `forward-<phiên>` | một `BackendSession` | rút hàng đợi, đẩy lên tầng suy luận, rồi xả nốt khi dừng |
+| `triton-admin` / `riva-admin` | một kênh | `ping` và danh sách mô hình |
+| `upstream-probe` | không kênh riêng | gọi qua kênh quản trị của backend mỗi 5 giây |
+
+`state-<phiên>` và `relay-lane-N` **đã biến mất**. Bản chép nằm ngay trong
+`SessionBuffer` nên không còn gì để làm mới, và không còn RPC nào được chuyển
+tiếp nên không còn nhóm kênh nào để chuyển tiếp qua.
 
 Số luồng của server tăng theo *số điều hành viên và số cuộc họp*, không theo
 số request — mọi RPC ở đây đều là unary.
@@ -205,8 +219,15 @@ mặc cho kit, và cây nguồn build sạch dưới nó trên cả hai kit.
 ## Chạy Server buffer
 
 ```bash
+# Triton — cổng gRPC 8011, KHÔNG phải cổng HTTP 8010
 s2t-qt-server --listen 0.0.0.0:8800 --token <token-client> \
-              --upstream 192.168.1.47:8700 --upstream-token <token-adapter>
+              --backend triton --upstream 192.168.1.47:8011 \
+              --model asr_diar_session
+
+# Riva
+s2t-qt-server --listen 0.0.0.0:8800 --token <token-client> \
+              --backend riva --upstream 192.168.1.47:50051 --language vi-VN
+
 s2t-qt-server --help          # mọi tuỳ chọn
 s2t-qt-server --show-config   # cấu hình đã nạp, không khởi động
 ```
@@ -284,7 +305,11 @@ mất đúng cái lần khởi động lại mà nhật ký sinh ra để phục
 ```bash
 s2t-qt-server --selftest         # bộ mã hai chiều + đóng khung + loopback + cả chuỗi
 s2t-qt-server --selftest-codec   # chỉ bộ mã, không mở socket
-s2t-qt-server --probe 192.168.1.47:8700 --token <token>
+s2t-qt-server --probe 192.168.1.47:8011 --token <token>
+
+# Cả luồng, với grpcio thật ở đầu client (stub: xem đầu tệp)
+python3 tools/demo_flow.py --target 127.0.0.1:18800 --token <token> \
+                          --wav mau.wav --realtime
 
 s2t-qt-client --selftest                       # proto3 + HPACK
 s2t-qt-client --selftest-net 127.0.0.1:18700   # với tools/mock_adapter.js

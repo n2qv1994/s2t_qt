@@ -39,8 +39,17 @@
 struct BackendSessionConfig
 {
     QString title;
+    // A hint only.  The client does not put the audio format in config_json -
+    // it puts it on every push_audio - so the real rate arrives with the first
+    // packet and overrides this.  Getting that wrong silently multiplies
+    // source_seen_sec by the ratio, which reads as a pipeline three times
+    // faster or slower than it is.
     quint32 sampleRate = 16000;
     quint32 channels = 1;
+    // Total length of the source when a file is being played back, for the
+    // client's progress bar.  Zero while recording live: the meeting has no
+    // known end.
+    double sourceTotalSec = 0.0;
     QString audioFormat = QStringLiteral("pcm_s16le");
     QString language = QStringLiteral("vi-VN");
     // Empty means "the backend's own default model", which for Triton is

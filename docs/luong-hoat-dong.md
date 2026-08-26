@@ -21,21 +21,43 @@ trong luồng tổng thể:
 ```
    máy trạm điều hành viên              máy đệm                   tầng suy luận
 ┌───────────────────────────┐   ┌────────────────────────┐   ┌──────────────────┐
-│      s2t-qt-client        │   │     s2t-qt-server      │   │ grpc_session_    │
-│  microphone, giao diện,   │──►│  hàng đợi audio,       │──►│ adapter.py :8700 │──► Triton
-│  soát/sửa, đăng ký giọng  │   │  chuyển tiếp, bộ đệm   │   │                  │
-│                           │◄──│  trạng thái            │◄──│                  │◄──
-└───────────────────────────┘   └────────────────────────┘   └──────────────────┘
-        gRPC :8800                      gRPC :8700
-   3 service, 20 RPC, 1 token      2 service, 17 RPC, 1 token
+│      s2t-qt-client        │   │     s2t-qt-server      │   │ Triton :8011     │
+│  microphone, giao diện,   │──►│  hàng đợi audio,       │──►│  KServe v2       │
+│  soát/sửa, đăng ký giọng  │   │  bản chép, bộ đệm      │   │  asr_diar_session│
+│                           │◄──│                        │◄──│  ── hoặc ──      │
+└───────────────────────────┘   └────────────────────────┘   │ Riva :50051      │
+        gRPC :8800              InferenceBackend là ranh giới └──────────────────┘
+   3 service, 20 RPC, 1 token
 ```
 
-**Ranh giới đặt ở đâu, và vì sao ở đó.** Bốn RPC do bộ đệm *trả lời*:
-`start_session`, `push_audio`, `get_live_state`, `stop_session` — đúng những
-RPC chạm vào đường audio hoặc trạng thái của nó. Mười sáu RPC còn lại được
-**chuyển tiếp nguyên vẹn**: bộ đệm không có ý kiến gì về một truy vấn soát lại,
-và nếu nó tự nghĩ ra một ý kiến thì sẽ có hai nơi có thể bất đồng về nội dung
-một bản chép.
+**Ranh giới cũ đã biến mất.** Cho tới 2026-08-25, bốn RPC do bộ đệm trả lời và
+mười sáu RPC được chuyển tiếp nguyên vẹn tới một adapter Python sở hữu bản
+chép, kho audio và cơ sở dữ liệu giọng nói. Adapter đó không còn trong sơ đồ
+triển khai — người dùng cho biết nó vốn chỉ là mã mẫu để hiểu nghiệp vụ — nên
+**không còn gì để chuyển tiếp**:
+
+- Những RPC *về một cuộc họp* được trả lời từ chính `SessionBuffer` giữ cuộc
+  họp đó: `get_review_state`, `apply_text_edit`, `rename_speaker`,
+  `list_sessions`, cộng với bốn RPC vốn đã có đệm.
+- `get_model_status` là RPC duy nhất còn chạm tới tầng suy luận từ một luồng
+  kết nối, và nó chỉ hỏi danh sách mô hình.
+- Ba RPC cần kho dữ liệu máy chủ này chưa có (`get_audio_range`,
+  `get_pipeline_trace`, `get_audit_history`) **nói thẳng là chưa có**, chứ
+  không trả về thành công rỗng: một bản chép trống trông như câu trả lời thật
+  là kiểu hỏng tệ hơn nhiều.
+- Cả `SpeakerRegistryService` trả `UNIMPLEMENTED`. Riva không có RPC đăng ký
+  giọng nào — `speaker_tag` của nó chỉ là số cụm ẩn danh — và kho CAM++ không
+  do máy chủ này quản lý.
+
+**Ranh giới mới là `s2t-qt-server/backend/InferenceBackend.h`.** Dưới nó có
+`TritonBackend` (KServe v2, kho mô hình đang chạy) và `RivaBackend`
+(`nvidia.riva.asr`, luồng bidi). Không có gì phía trên biết mình đang nói với
+bên nào; `upstream/backend` trong tệp cấu hình chọn.
+
+**Hệ quả lớn nhất: bản chép được dựng ở đây.** Riva và Triton đều trả lời theo
+từng gói và không nhớ gì cả, nên `asr::SessionState` — rows, phrases, làn
+người nói, dải biên độ — được bồi đắp trong `LiveTranscript`. `get_live_state`
+không còn là bộ nhớ đệm của câu trả lời từ trên mà là một khoá và một bản sao.
 
 **Cái gì đổi chỗ.** Vòng đẩy audio, tính bất biến theo `seq` và quy tắc chỉ thử
 lại lỗi vận chuyển trước đây nằm trong `SessionWorker` của client. Chúng vẫn
@@ -119,24 +141,26 @@ tách, chính là hình dạng mà `s2t-qt-server` dựng lại ở phía nó.
               │                        │                         │
      ┌────────▼─────────┐   ┌──────────▼──────────┐   ┌──────────▼──────────┐
      │  BufferService   │   │   BufferService     │   │   BufferService     │
-     │  4 RPC có đệm    │   │   16 RPC chuyển tiếp│   │   3 RPC quản trị    │
-     └────────┬─────────┘   └──────────┬──────────┘   └─────────────────────┘
-              │                        │
-   ┌──────────▼───────────┐   ┌────────▼─────────────────────────┐
-   │ SessionBuffer (mỗi   │   │ UpstreamPool: relay-lane-0..N     │
-   │ phiên một cái)       │   │ mỗi lane một RpcLane = 1 luồng    │
-   │  ├ forward-<phiên>   │   │ + 1 kênh                          │
-   │  │   hàng đợi + đẩy  │   └────────┬─────────────────────────┘
-   │  └ state-<phiên>     │            │
-   │      bộ đệm 200 ms   │            │        ┌──────────────────┐
-   └──────────┬───────────┘            │        │ upstream-probe   │
-              └────────────────────────┴────────┤ ping mỗi 5 giây  │
-                                       │        └──────────────────┘
-                          ┌────────────▼────────────┐
-                          │ AsrClient → grpc::Channel│
-                          └────────────┬────────────┘
-                                       │  h2c, bearer token của adapter
-                                 tầng suy luận :8700
+     │  8 RPC theo phiên│   │   3 stub + 5 chưa có│   │   3 RPC quản trị    │
+     └────────┬─────────┘   └─────────────────────┘   └─────────────────────┘
+              │
+   ┌──────────▼───────────────────────┐
+   │ SessionBuffer (mỗi phiên một cái)│
+   │  ├ forward-<phiên>               │
+   │  │   hàng đợi → BackendSession   │
+   │  └ LiveTranscript                │
+   │      bản chép, dưới m_stateMutex │      ┌──────────────────┐
+   └──────────┬───────────────────────┘      │ upstream-probe   │
+              │                              │ ping mỗi 5 giây  │
+              │                              └────────┬─────────┘
+   ┌──────────▼───────────────────────┐               │
+   │ InferenceBackend                 │◄──────────────┘
+   │  TritonBackend  │  RivaBackend   │   qua kênh quản trị
+   │  ModelInfer     │  Streaming-    │   (triton-admin / riva-admin)
+   │  (unary/gói)    │  Recognize     │
+   └──────────┬───────────────────────┘
+              │  h2c, bearer token của tầng suy luận
+        Triton :8011  hoặc  Riva :50051
 ```
 
 ### Vì sao mỗi kênh upstream lại có một luồng riêng
@@ -178,8 +202,8 @@ nó, nên nửa ấy không cần `RpcLane`.
 | `http2-conn-N` | `Http2Server` | Một kết nối TCP: đọc khung, giải mã HPACK, gọi handler, ghi trả lời. Chặn có chủ ý. Có giới hạn số lượng (mặc định 128); quá thì kết nối mới bị từ chối bằng GOAWAY chứ không bị nhận rồi bỏ đói. |
 | `forward-<phiên>` | `SessionBuffer` | Rút hàng đợi của một phiên, `push_audio` lên tầng suy luận, rồi cuối cùng `stop_session`. Một kênh riêng. |
 | `state-<phiên>` | `SessionBuffer` (qua `RpcLane`) | Làm mới bộ đệm `get_live_state` của phiên đó. Một kênh riêng. |
-| `relay-lane-0..N` | `UpstreamPool` | Mọi RPC chuyển tiếp. Mặc định 4 lane. |
-| `upstream-probe` | `BufferHub` | `ping` tầng suy luận mỗi 5 giây, và ngay lập tức sau khi một relay thất bại. Kênh riêng, vì một phép thử xếp sau bốn lane đang bận sẽ báo về một sự đình trệ của *chúng ta* chứ không phải của tầng suy luận. |
+| `upstream-probe` | `BufferHub` | `ping` tầng suy luận mỗi 5 giây, và ngay sau khi một lời gọi thất bại. Luồng riêng, vì một phép thử chạy trên luồng nhận kết nối sẽ chặn vòng accept đúng bằng cả timeout của tầng suy luận. |
+| `triton-admin` / `riva-admin` | backend | Kênh quản trị duy nhất còn lại: `ping` và danh sách mô hình. `RpcLane` giữ nó trên một luồng riêng vì `QTcpSocket` thuộc về luồng đã tạo nó. |
 
 Số luồng của server tăng theo **số điều hành viên và số cuộc họp**, không theo
 số request: mọi RPC ở đây đều là unary, và một luồng chỉ giữ socket trong thời
@@ -403,11 +427,11 @@ Controller nhận `stateReceived` và:
 ```
 client                     BufferService              SessionBuffer         tầng suy luận
   │  start_session             │                           │                      │
-  ├───────────────────────────►│  qua UpstreamPool         │                      │
-  │                            ├──────────────────────────────────────────────────►│
-  │                            │◄──────────────── session_id + state đầu tiên ─────┤
-  │                            │  tạo SessionBuffer ──────►│  (2 luồng, 2 kênh)
-  │◄─────── session_id ────────┤                           ├──── (chưa gửi gì) ───►│
+  ├───────────────────────────►│  tự sinh session_id       │                      │
+  │                            │  tạo SessionBuffer ──────►│ (1 luồng forwarder)  │
+  │                            │                           ├─ mở BackendSession ─►│
+  │                            │◄── openBackend() chờ ─────┤                      │
+  │◄─────── session_id ────────┤                           │                      │
   │                            │                           │
   │  push_audio seq=1          │                           │
   ├───────────────────────────►├──── enqueue ─────────────►│
@@ -880,7 +904,8 @@ còn kẹt trên socket:
 | `shared/proto/` | `ProtoWire` (proto3 tay, hai chiều), `AsrSession`, `SpeakerRegistry`, `BufferAdmin` — struct chép tay theo `.proto` |
 | `shared/grpc/` | `Hpack`, `Http2Client`, `GrpcChannel`, `AsrClient` (gọi đi); `Http2Server`, `GrpcServer` (nhận); `Methods.h` (đường method dùng chung cho cả hai bên) |
 | `shared/core/` | `Logger` — hệ thống nhật ký, chung cho cả hai chương trình |
-| `s2t-qt-server/` | `main`, `ServerConfig`, `RpcLane`, `UpstreamPool`, `SessionJournal` (bản ghi trên đĩa cho việc khôi phục), `SessionBuffer`, `BufferHub`, `BufferService`, `ServerSelfTest` |
+| `s2t-qt-server/` | `main`, `ServerConfig`, `RpcLane`, `SessionJournal` (bản ghi trên đĩa cho việc khôi phục), `LiveTranscript` (bản chép dựng tại chỗ), `SessionBuffer`, `BufferHub`, `BufferService`, `ServerSelfTest` |
+| `s2t-qt-server/backend/` | `InferenceBackend` (ranh giới), `TritonBackend` (KServe v2), `RivaBackend` (`nvidia.riva.asr`) |
 | `s2t-qt-client/core/` | `SessionController` (mặt tiền), `SessionWorker`, `StatePoller`, `RpcExecutor`, `AudioQueue`, `TranscriptModel`, `AppConfig`, `SelfTest` |
 | `s2t-qt-client/audio/` | `AudioCapture`, `MicDenoise` (điều khiển xvf3800), `WavIo`, `Transcode` (ffmpeg) |
 | `s2t-qt-client/ui/` | `TimelineView`, `Dialogs`, `ReviewPanel`, `EnrollDialog`, `TraceWindow`, `EvidenceWindow`, `DiagnosticsWindow`, `LogControls` (combo chế độ/mức log dùng chung) |
@@ -926,7 +951,7 @@ GCC 13.1 (MinGW) lẫn gcc 11.5 (RHEL 9).
 # server: bộ mã hai chiều + loopback thật + cả chuỗi client→đệm→tầng suy luận
 s2t-qt-server --selftest
 s2t-qt-server --selftest-codec                       # chỉ bộ mã, không socket
-s2t-qt-server --probe 192.168.1.47:8700 --token T    # tầng suy luận có sống không
+s2t-qt-server --probe 192.168.1.47:8011 --token T    # tầng suy luận có sống không
 
 # client
 s2t-qt-client --selftest                             # proto3 + HPACK, không mạng

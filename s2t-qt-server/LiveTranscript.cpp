@@ -33,9 +33,11 @@ bool isLowConfidence(float confidence)
 
 } // namespace
 
-void LiveTranscript::configure(const QString &title, quint32 sampleRate, quint32 channels)
+void LiveTranscript::configure(const QString &title, quint32 sampleRate, quint32 channels,
+                               double sourceTotalSec)
 {
     m_title = title;
+    m_sourceTotalSec = sourceTotalSec;
     m_sampleRate = qMax(1u, sampleRate);
     m_channels = qMax(1u, channels);
     m_startedAt = nowSeconds();
@@ -303,11 +305,15 @@ asr::StateResponse LiveTranscript::snapshot(const QString &sessionId, qint64 str
     state.nLow = m_nLow;
     state.ampTrace = m_ampTrace;
     state.ampTraceStepSec = m_ampStepSec;
-    state.sourceTotalSec = m_sourceSeenSec;
+    // A file has a known length; a live meeting does not, so the best answer
+    // there is how much has been seen.
+    state.sourceTotalSec = m_sourceTotalSec > 0.0 ? m_sourceTotalSec : m_sourceSeenSec;
     state.sourceSeenSec = m_sourceSeenSec;
     state.speechSeenSec = m_speechSeenSec;
     state.wallElapsedSec = m_startedAt > 0.0 ? nowSeconds() - m_startedAt : 0.0;
-    state.playheadRatio = m_sourceSeenSec > 0.0 ? 1.0 : 0.0;
+    state.playheadRatio = state.sourceTotalSec > 0.0
+        ? qBound(0.0, m_sourceSeenSec / state.sourceTotalSec, 1.0)
+        : 0.0;
     state.done = m_done;
     state.ts = nowSeconds();
     state.lastAsrChunkMs = quint32(m_lastChunkMs);

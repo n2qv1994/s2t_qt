@@ -48,7 +48,7 @@ SessionBuffer::SessionBuffer(const QString &sessionId, qint64 streamId,
     m_title = config.title;
     m_sampleRate = config.sampleRate;
     m_channels = config.channels;
-    m_live.configure(config.title, config.sampleRate, config.channels);
+    m_live.configure(config.title, config.sampleRate, config.channels, config.sourceTotalSec);
 
     // The reply to start_session is ours to compose now: there is no adapter
     // answer to pass on.  It carries the empty state the client will start
@@ -114,7 +114,7 @@ SessionBuffer::SessionBuffer(const jrn::Recovered &recovered, const Settings &se
             << "recovered session" << m_sessionId << "-" << warning;
     }
     m_live.configure(m_title.isEmpty() ? m_config.title : m_title, m_config.sampleRate,
-                     m_config.channels);
+                     m_config.channels, m_config.sourceTotalSec);
     // The transcript itself is NOT recovered: the words were never on disk, only
     // the audio was.  The backlog replays through the tier and rebuilds them,
     // which is why order across the restart had to be preserved.

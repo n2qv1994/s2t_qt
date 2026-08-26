@@ -192,6 +192,13 @@ public:
 
     grpc::Status push(const asr::PushAudioRequest &request, asr::PushAudioResponse *out) override
     {
+        // The packet carries the real audio format; config_json does not.  Take
+        // it from the wire rather than trusting the hint, or source_seen_sec is
+        // out by the ratio between the two.
+        if (request.sampleRate != 0)
+            m_config.sampleRate = request.sampleRate;
+        if (request.channels != 0)
+            m_config.channels = request.channels;
         return infer(request.pcm, request.reset || m_first, false,
                      request.vadChunkMs ? request.vadChunkMs : m_config.vadChunkMs, out);
     }

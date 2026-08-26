@@ -89,7 +89,12 @@ BackendSessionConfig BackendSessionConfig::fromJson(const QString &json, QString
     }
 
     const QJsonObject object = document.object();
-    config.title = stringOr(pick(object, "title", "title"), config.title);
+    // `session_title` is the contract's spelling - see docs/danh-sach-api.md
+    // section 7, and buildConfigJson() in s2t-qt-client/core/SessionWorker.cpp,
+    // which is what the deployed client actually sends.  `title` is accepted
+    // too because the selftest and hand-written configs use it.
+    config.title = stringOr(pick(object, "session_title", "title"), config.title);
+    config.sourceTotalSec = pick(object, "source_total_sec", "sourceTotalSec").toDouble(0.0);
     config.sampleRate =
         quint32(intOr(pick(object, "sample_rate", "sampleRate"), int(config.sampleRate)));
     config.channels = quint32(intOr(pick(object, "channels", "channels"), int(config.channels)));

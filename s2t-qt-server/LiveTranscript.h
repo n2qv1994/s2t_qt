@@ -27,7 +27,8 @@
 class LiveTranscript
 {
 public:
-    void configure(const QString &title, quint32 sampleRate, quint32 channels);
+    void configure(const QString &title, quint32 sampleRate, quint32 channels,
+                   double sourceTotalSec);
 
     // Folds one backend answer into the meeting.  Returns the new state
     // version, which is what the client uses to tell a changed transcript from
@@ -93,6 +94,7 @@ private:
     double m_commitBoundarySec = 0.0;
     double m_sourceSeenSec = 0.0;
     double m_speechSeenSec = 0.0;
+    double m_sourceTotalSec = 0.0;
     double m_startedAt = 0.0;
     double m_lastChunkMs = 0.0;
     bool m_done = false;
