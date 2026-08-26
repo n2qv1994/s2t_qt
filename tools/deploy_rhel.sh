@@ -55,7 +55,7 @@ copy() {
 build() {
     echo "==> build on $HOST"
     ssh -p "$PORT" "$USER_@$HOST" \
-        "chmod +x ~/$DEST/tools/*.sh && OUT=~/$DEST/build-rhel ~/$DEST/tools/build_rhel9.sh"
+        "chmod +x ~/$DEST/tools/*.sh ~/$DEST/run_s2t.sh && OUT=~/$DEST/build-rhel ~/$DEST/tools/build_rhel9.sh"
     echo
     echo "==> selftest (không cần màn hình, không cần mạng)"
     ssh -p "$PORT" "$USER_@$HOST" "~/$DEST/build-rhel/s2t-qt-server/s2t-qt-server --selftest"

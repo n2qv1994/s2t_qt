@@ -230,6 +230,30 @@ Qt 6.11.2 MinGW 64-bit, GCC 13.1. Qt 6.2 là sàn trên cả hai nền tảng �
 trang lỗi thiếu header. `-Wall -Wextra` được đặt trong `.pro` chứ không phó
 mặc cho kit, và cây nguồn build sạch dưới nó trên cả hai kit.
 
+## Chạy cả hai nửa trên RHEL
+
+`run_s2t.sh` ở gốc cây nguồn lo phần môi trường và tham số, vì cả hai đều có
+một cái bẫy: Qt 6 trên máy đó nằm ở `~/Qt/6.11.2/gcc_64` và **không có gì đặt
+nó lên `PATH`**, còn client thì đọc địa chỉ và token từ `QSettings` chứ không
+có tham số dòng lệnh cho hai thứ ấy.
+
+```bash
+./run_s2t.sh              # server chạy nền + client; đóng client là dừng cả hai
+./run_s2t.sh server       # chỉ Server buffer, ở tiền cảnh
+./run_s2t.sh selftest     # hai bài self-test
+./run_s2t.sh env          # in môi trường và tham số đã chốt, không chạy gì
+./run_s2t.sh --help       # danh sách biến ghi đè được
+```
+
+Mọi giá trị là biến môi trường, nên đổi một cổng không phải sửa tệp:
+`TOKEN=abc BACKEND=riva UPSTREAM=192.168.1.47:50051 ./run_s2t.sh server`.
+Script từ chối chạy khi token rỗng mà lại nghe ngoài loopback, và nó chỉ ghi
+`~/.config/s2t/s2t_qt.conf` khi tệp chưa có — muốn ghi đè cho khớp thì gọi
+`./run_s2t.sh config`, có sao lưu.
+
+Đây là lối tắt cho lúc phát triển. Triển khai thật thì vẫn là systemd, dưới
+đây.
+
 ## Chạy Server buffer
 
 ```bash
