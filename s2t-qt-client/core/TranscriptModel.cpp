@@ -19,19 +19,7 @@ const int kDisplayLockMax = 8000;
 
 bool hasVerifiedName(const QString &name)
 {
-    const QString value = name.trimmed().toLower();
-    if (value.isEmpty())
-        return false;
-    static const QSet<QString> placeholders = {
-        QStringLiteral("unknown"), QStringLiteral("unk"), QStringLiteral("?"),
-        QStringLiteral("spk?"), QStringLiteral("speaker?"),
-    };
-    if (placeholders.contains(value))
-        return false;
-    if (value.startsWith(QStringLiteral("unknown_")) || value.startsWith(QStringLiteral("unknown-")))
-        return false;
-    static const QRegularExpression bare(QStringLiteral("^speaker_\\d+$"));
-    return !bare.match(value).hasMatch();
+    return TranscriptModel::isRealName(name);
 }
 
 int speakerIndexOf(const asr::DisplayRow &row)
@@ -206,6 +194,25 @@ QString stableRowKey(const asr::DisplayRow &row)
 }
 
 } // namespace
+
+bool TranscriptModel::isRealName(const QString &name)
+{
+    const QString value = name.trimmed().toLower();
+    if (value.isEmpty())
+        return false;
+    // The pipeline has several ways of saying "nobody was verified", and every
+    // one of them would otherwise be printed as if it were a person's name.
+    static const QSet<QString> placeholders = {
+        QStringLiteral("unknown"), QStringLiteral("unk"), QStringLiteral("?"),
+        QStringLiteral("spk?"), QStringLiteral("speaker?"),
+    };
+    if (placeholders.contains(value))
+        return false;
+    if (value.startsWith(QStringLiteral("unknown_")) || value.startsWith(QStringLiteral("unknown-")))
+        return false;
+    static const QRegularExpression bare(QStringLiteral("^speaker_\\d+$"));
+    return !bare.match(value).hasMatch();
+}
 
 QString TranscriptModel::normalizeForSlot(const QString &text)
 {

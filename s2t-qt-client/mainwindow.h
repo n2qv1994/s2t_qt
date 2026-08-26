@@ -21,6 +21,7 @@ class TimelineView;
 class ReviewPanel;
 class EnrollDialog;
 class TraceWindow;
+class SubtitleWindow;
 class EvidenceWindow;
 class DiagnosticsWindow;
 
@@ -44,6 +45,7 @@ private slots:
     void openAuditHistory();
     void openEnrollment();
     void openTrace();
+    void openSubtitles();
     void openEvidence();
     void openDiagnostics();
     void openSettings();
@@ -89,6 +91,7 @@ private:
     QDockWidget *m_reviewDock = nullptr;
     ReviewPanel *m_reviewPanel = nullptr;
     TraceWindow *m_traceWindow = nullptr;
+    SubtitleWindow *m_subtitleWindow = nullptr;
     EvidenceWindow *m_evidenceWindow = nullptr;
     DiagnosticsWindow *m_diagnosticsWindow = nullptr;
     QTimer *m_statusTimer = nullptr;

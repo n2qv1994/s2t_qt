@@ -77,6 +77,15 @@ public slots:
     void startMicrophone(bool restrict, const QStringList &expected, const SessionMeta &meta);
     void startFile(const QString &path, bool restrict, const QStringList &expected,
                    const SessionMeta &meta);
+    // The same replay from audio already in memory, for a caller that decoded
+    // it itself.  The subtitle demo does: it pulls the audio track out of a
+    // video with QAudioDecoder while QMediaPlayer draws the picture, so there
+    // is no WAV on disk to hand over.
+    //
+    // `paced` overrides the configured pacing.  A demo playing a video must
+    // send at the source clock or the subtitles would run ahead of the frames.
+    void startPcm(const wav::Pcm &pcm, const QString &sourceName, bool restrict,
+                  const QStringList &expected, const SessionMeta &meta, bool paced);
     void stop();
     void setPaused(bool paused);
     void setDenoise(bool enabled);

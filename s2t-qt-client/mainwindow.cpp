@@ -7,6 +7,7 @@
 #include "ui/EvidenceWindow.h"
 #include "ui/ReviewPanel.h"
 #include "ui/TimelineView.h"
+#include "ui/SubtitleWindow.h"
 #include "ui/TraceWindow.h"
 
 #include <QAction>
@@ -183,6 +184,7 @@ void MainWindow::buildUi()
 
     bar->addAction(QStringLiteral("REVIEW"), this, &MainWindow::openReview);
     bar->addAction(QStringLiteral("LỊCH SỬ"), this, &MainWindow::openAuditHistory);
+    bar->addAction(QStringLiteral("PHỤ ĐỀ"), this, &MainWindow::openSubtitles);
     bar->addAction(QStringLiteral("TRACE"), this, &MainWindow::openTrace);
     bar->addAction(QStringLiteral("NGHIỆM THU"), this, &MainWindow::openEvidence);
     bar->addAction(QStringLiteral("SETUP"), this, &MainWindow::openEnrollment);
@@ -378,6 +380,15 @@ void MainWindow::openEnrollment()
                               << m_operatorId->text().trimmed();
     EnrollDialog dialog(m_controller, m_operatorId->text().trimmed(), this);
     dialog.exec();
+}
+
+void MainWindow::openSubtitles()
+{
+    LOG_INFO(applog::cat::Ui) << "action: open the live subtitle window";
+    if (!m_subtitleWindow)
+        m_subtitleWindow = new SubtitleWindow(m_controller, &m_config, this);
+    m_subtitleWindow->show();
+    m_subtitleWindow->raise();
 }
 
 void MainWindow::openTrace()

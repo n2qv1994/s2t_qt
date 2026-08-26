@@ -286,11 +286,31 @@ void SessionController::startFile(const QString &path, bool restrict, const QStr
         << "file loaded:" << pcm.sampleRate << "Hz /" << pcm.channels << "ch /"
         << pcm.durationSec() << "s /" << pcm.frames.size() << "bytes";
 
+    // Off means "feed it as fast as the pipeline accepts", which is what a
+    // reprocessing run wants; on reproduces the meeting's real timing, which
+    // is what a rehearsal or a latency measurement wants.
+    startPcm(pcm, QFileInfo(path).fileName(), restrict, expected, meta,
+             m_config->paceFileReplay);
+}
+
+void SessionController::startPcm(const wav::Pcm &pcm, const QString &sourceName, bool restrict,
+                                 const QStringList &expected, const SessionMeta &meta, bool paced)
+{
+    if (m_worker) {
+        LOG_WARN(applog::cat::Session) << "refusing startPcm: a session is already running";
+        emit errorMessage(QStringLiteral("Đang có phiên chạy - dừng phiên hiện tại trước."));
+        return;
+    }
+    if (!pcm.isValid() || pcm.frames.isEmpty()) {
+        emit errorMessage(QStringLiteral("Không có dữ liệu âm thanh để gửi."));
+        return;
+    }
+
     m_expectedSpeakers = expected;
     m_speakerFilter = !restrict ? QStringLiteral("unrestricted")
                                 : (expected.isEmpty() ? QStringLiteral("none")
                                                       : QStringLiteral("restricted"));
-    m_sourceName = QFileInfo(path).fileName();
+    m_sourceName = sourceName;
 
     SessionWorker::Settings settings;
     settings.target = m_config->serverTarget;
@@ -302,10 +322,7 @@ void SessionController::startFile(const QString &path, bool restrict, const QStr
     settings.meta = meta;
     settings.file = pcm;
     settings.fileName = m_sourceName;
-    // Off means "feed it as fast as the pipeline accepts", which is what a
-    // reprocessing run wants; on reproduces the meeting's real timing, which
-    // is what a rehearsal or a latency measurement wants.
-    settings.pacedToSourceClock = m_config->paceFileReplay;
+    settings.pacedToSourceClock = paced;
 
     m_captureWanted = false;
     setMicStatus(MicStatus::Starting);

@@ -94,6 +94,13 @@ public:
     // Every distinct raw speaker id present, for the merge dropdown.
     QStringList speakerIds() const;
 
+    // True when `name` is a real identity rather than one of the placeholders
+    // the pipeline uses for "nobody was verified" - the literal "unknown", a
+    // question mark, or a bare "speaker_N".  Exposed because every pane that
+    // shows a speaker has to agree on it: printing "unknown" as though it were
+    // a person is the whole failure mode this guards.
+    static bool isRealName(const QString &name);
+
     // Exposed for the timeline's own token extraction and for tests.
     static QList<WordItem> rowWordItems(const asr::DisplayRow &row);
     static QString normalizeForSlot(const QString &text);

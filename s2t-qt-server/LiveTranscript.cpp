@@ -73,10 +73,17 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
     if (m_ampStepSec <= 0.0 && response.chunkEndSec > response.chunkStartSec)
         m_ampStepSec = response.chunkEndSec - response.chunkStartSec;
 
+    // asr_words is a ROLLING WINDOW, not a delta.
+    //
+    // asr_diar_session re-emits every word its ASR window still covers on each
+    // chunk - about eight seconds of them - so appending what arrives produces
+    // "học học học học học". The words carry stable timestamps, which is what
+    // makes the fix exact: replace the span they cover rather than add to it.
+    // A re-sent word lands on its own previous position and the transcript
+    // stops growing sideways.
     if (!response.asrWords.isEmpty()) {
-        appendWords(response.asrWords, response.speaker, response.speakerProb,
+        replaceSpan(response.asrWords, response.speaker, response.speakerProb,
                     response.verifiedName);
-        ++m_revision;
     } else if (!response.text.isEmpty()) {
         // A tier that gives no word timings still gives text.  It becomes one
         // word spanning the chunk, so the row machinery and the editor both
@@ -104,23 +111,8 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
     // text that the correction never touched; grpc_session_adapter.py's
     // _correction_bounds carries the same rule and the same warning.
     if (!response.correction.mergedWords.isEmpty()) {
-        double from = 0.0;
-        double to = 0.0;
-        bool have = false;
-        for (const asr::Word &word : response.correction.mergedWords) {
-            if (word.endSec <= word.startSec)
-                continue; // no usable timing: it cannot define a range
-            if (!have) {
-                from = word.startSec;
-                to = word.endSec;
-                have = true;
-            } else {
-                from = qMin(from, word.startSec);
-                to = qMax(to, word.endSec);
-            }
-        }
-        if (have)
-            applyEdit(m_revision, from, to, response.correction.mergedWords);
+        replaceSpan(response.correction.mergedWords, response.speaker, response.speakerProb,
+                    response.verifiedName);
     }
 
     // The interim edge.  Replaced wholesale every time, never appended.
@@ -145,6 +137,38 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
 
     recount();
     return m_version;
+}
+
+void LiveTranscript::replaceSpan(const QList<asr::Word> &words, const QString &speaker,
+                                 float speakerProb, const QString &verifiedName)
+{
+    // The span the incoming words cover, and nothing wider.  Widening it would
+    // wipe canonical text these words never touched - the same rule
+    // grpc_session_adapter.py's _correction_bounds carries, and the same
+    // warning it carries about why.
+    double from = 0.0;
+    double to = 0.0;
+    bool have = false;
+    for (const asr::Word &word : words) {
+        if (word.endSec <= word.startSec)
+            continue; // no usable timing: it cannot define a span
+        if (!have) {
+            from = word.startSec;
+            to = word.endSec;
+            have = true;
+        } else {
+            from = qMin(from, word.startSec);
+            to = qMax(to, word.endSec);
+        }
+    }
+    if (!have) {
+        // No timing anywhere in the batch: there is no span to replace, so the
+        // only honest thing left is to append and let the turn rule sort it.
+        appendWords(words, speaker, speakerProb, verifiedName);
+        ++m_revision;
+        return;
+    }
+    applyEdit(m_revision, from, to, words);
 }
 
 void LiveTranscript::appendWords(const QList<asr::Word> &words, const QString &speaker,

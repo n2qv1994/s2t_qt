@@ -73,6 +73,11 @@ private:
     // enough in time; otherwise it starts a new one.  That is the whole
     // turn-detection rule, and it is deliberately simple - the tier already did
     // the diarization, so guessing again here would only disagree with it.
+    // Replaces the time span the incoming words cover with those words.  This
+    // is the normal path, because both asr_words and the correction's
+    // merged_words are rolling windows the tier re-sends rather than deltas.
+    void replaceSpan(const QList<asr::Word> &words, const QString &speaker, float speakerProb,
+                     const QString &verifiedName);
     void appendWords(const QList<asr::Word> &words, const QString &speaker, float speakerProb,
                      const QString &verifiedName);
     void rebuildPhrases(asr::DisplayRow *row) const;

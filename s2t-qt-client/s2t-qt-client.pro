@@ -1,4 +1,4 @@
-QT += widgets network multimedia
+QT += widgets network multimedia multimediawidgets
 
 CONFIG += c++17
 CONFIG -= app_bundle
@@ -71,6 +71,7 @@ SOURCES += \
     audio/Transcode.cpp \
     audio/AudioCapture.cpp \
     audio/MicDenoise.cpp \
+    audio/MediaDecode.cpp \
     core/AppConfig.cpp \
     core/AudioQueue.cpp \
     core/RpcExecutor.cpp \
@@ -87,7 +88,8 @@ SOURCES += \
     ui/TraceWindow.cpp \
     ui/EvidenceWindow.cpp \
     ui/DiagnosticsWindow.cpp \
-    ui/LogControls.cpp
+    ui/LogControls.cpp \
+    ui/SubtitleWindow.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -95,6 +97,7 @@ HEADERS += \
     audio/Transcode.h \
     audio/AudioCapture.h \
     audio/MicDenoise.h \
+    audio/MediaDecode.h \
     core/AppConfig.h \
     core/AudioQueue.h \
     core/RpcExecutor.h \
@@ -111,4 +114,5 @@ HEADERS += \
     ui/TraceWindow.h \
     ui/EvidenceWindow.h \
     ui/DiagnosticsWindow.h \
-    ui/LogControls.h
+    ui/LogControls.h \
+    ui/SubtitleWindow.h
