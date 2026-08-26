@@ -231,8 +231,11 @@ void LiveTranscript::rebuildPhrases(asr::DisplayRow *row) const
         phrase.text += word.w;
 
         const QChar last = word.w.isEmpty() ? QChar() : word.w.at(word.w.size() - 1);
+        // QChar chứ không phải QLatin1Char cho dấu ba chấm: QLatin1Char nhận một
+        // char, nên U+2026 bị cắt xuống byte thấp và phép so sánh hoá ra là hỏi
+        // "có phải dấu &".  Ba dấu kia là ASCII nên QLatin1Char vẫn đúng.
         const bool endsSentence = last == QLatin1Char('.') || last == QLatin1Char('?')
-            || last == QLatin1Char('!') || last == QLatin1Char(u'…');
+            || last == QLatin1Char('!') || last == QChar(u'…');
         if (endsSentence) {
             phrase.avgConf = count > 0 ? sum / float(count) : 0.0f;
             phrase.isLowConf = isLowConfidence(phrase.avgConf);
