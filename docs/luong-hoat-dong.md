@@ -36,18 +36,29 @@ chép, kho audio và cơ sở dữ liệu giọng nói. Adapter đó không còn
 triển khai — người dùng cho biết nó vốn chỉ là mã mẫu để hiểu nghiệp vụ — nên
 **không còn gì để chuyển tiếp**:
 
-- Những RPC *về một cuộc họp* được trả lời từ chính `SessionBuffer` giữ cuộc
-  họp đó: `get_review_state`, `apply_text_edit`, `rename_speaker`,
-  `list_sessions`, cộng với bốn RPC vốn đã có đệm.
-- `get_model_status` là RPC duy nhất còn chạm tới tầng suy luận từ một luồng
-  kết nối, và nó chỉ hỏi danh sách mô hình.
-- Ba RPC cần kho dữ liệu máy chủ này chưa có (`get_audio_range`,
-  `get_pipeline_trace`, `get_audit_history`) **nói thẳng là chưa có**, chứ
-  không trả về thành công rỗng: một bản chép trống trông như câu trả lời thật
-  là kiểu hỏng tệ hơn nhiều.
-- Cả `SpeakerRegistryService` trả `UNIMPLEMENTED`. Riva không có RPC đăng ký
-  giọng nào — `speaker_tag` của nó chỉ là số cụm ẩn danh — và kho CAM++ không
-  do máy chủ này quản lý.
+- Những RPC *về một cuộc họp đang chạy* được trả lời từ chính `SessionBuffer`
+  giữ cuộc họp đó: `get_review_state`, `apply_text_edit`, `rename_speaker`,
+  cộng với bốn RPC vốn đã có đệm.
+- Những RPC *về một cuộc họp đã kết thúc* được trả lời từ `SessionStore`:
+  `get_audio_range`, `get_audit_history`, `list_sessions`,
+  `ListSessionSpeakers`, `SaveSessionSpeakers`. `get_review_state` cũng rơi
+  về đây khi phiên không còn trong bộ nhớ — soát lại một cuộc họp tuần trước
+  là trường hợp bình thường của RPC đó, không phải ngoại lệ.
+- `get_model_status` là RPC duy nhất còn hỏi tầng suy luận từ một luồng kết
+  nối, và nó chỉ hỏi danh sách mô hình.
+- Ba RPC đăng ký giọng (`GetEnrollmentScript`, `EnrollSpeaker`,
+  `GetSpeakerRegistryStatus`) đi qua **một dịch vụ HTTP khác hẳn**:
+  `campp_native/enroll_service.py` trên `:8790`. Nó không phải tầng suy luận,
+  và không thể là: `rebuild_db` cần quyền `docker exec` mà container Triton cố
+  tình không có. Xem `s2t-qt-server/CampPlusClient.h`.
+- `get_pipeline_trace` là RPC duy nhất còn là stub, và nó trả `enabled = false`
+  — đúng cách hợp đồng vốn đã dành để nói "bản triển khai này không thu thập
+  trace", nên client không phải xử lý lỗi.
+
+Khi `database/dir` hoặc `enroll/url` để trống, những RPC phụ thuộc chúng trả
+`FAILED_PRECONDITION` kèm một câu điều hành viên hiểu được, chứ **không** trả
+về thành công rỗng: một bản chép trống trông như câu trả lời thật là kiểu hỏng
+tệ hơn nhiều so với một mã lỗi rõ ràng.
 
 **Ranh giới mới là `s2t-qt-server/backend/InferenceBackend.h`.** Dưới nó có
 `TritonBackend` (KServe v2, kho mô hình đang chạy) và `RivaBackend`
@@ -141,17 +152,20 @@ tách, chính là hình dạng mà `s2t-qt-server` dựng lại ở phía nó.
               │                        │                         │
      ┌────────▼─────────┐   ┌──────────▼──────────┐   ┌──────────▼──────────┐
      │  BufferService   │   │   BufferService     │   │   BufferService     │
-     │  8 RPC theo phiên│   │   3 stub + 5 chưa có│   │   3 RPC quản trị    │
-     └────────┬─────────┘   └─────────────────────┘   └─────────────────────┘
-              │
-   ┌──────────▼───────────────────────┐
-   │ SessionBuffer (mỗi phiên một cái)│
-   │  ├ forward-<phiên>               │
-   │  │   hàng đợi → BackendSession   │
-   │  └ LiveTranscript                │
-   │      bản chép, dưới m_stateMutex │      ┌──────────────────┐
-   └──────────┬───────────────────────┘      │ upstream-probe   │
-              │                              │ ping mỗi 5 giây  │
+     │ 7 RPC phiên sống │   │ 5 RPC phiên đã lưu  │   │   3 RPC quản trị    │
+     │ + 1 stub (trace) │   │ + 3 RPC đăng ký giọng│  │                     │
+     └────────┬─────────┘   └──────────┬──────────┘   └─────────────────────┘
+              │                        │
+              │            ┌───────────┴───────────┬─────────────────┐
+              │            │                       │                 │
+   ┌──────────▼───────────────────────┐  ┌─────────▼────────┐  ┌─────▼──────────┐
+   │ SessionBuffer (mỗi phiên một cái)│  │  SessionStore    │  │ CampPlusClient │
+   │  ├ forward-<phiên>               │  │  SQLite + tệp    │  │  HTTP/1.1      │
+   │  │   hàng đợi → BackendSession   │  │  .s16le mỗi họp  │  │                │
+   │  └ LiveTranscript                │  └──────────────────┘  └─────┬──────────┘
+   │      bản chép, dưới m_stateMutex │      ┌──────────────────┐    │
+   └──────────┬───────────────────────┘      │ upstream-probe   │    │ enroll_service.py
+              │                              │ ping mỗi 5 giây  │    └──► :8790
               │                              └────────┬─────────┘
    ┌──────────▼───────────────────────┐               │
    │ InferenceBackend                 │◄──────────────┘
@@ -162,6 +176,11 @@ tách, chính là hình dạng mà `s2t-qt-server` dựng lại ở phía nó.
               │  h2c, bearer token của tầng suy luận
         Triton :8011  hoặc  Riva :50051
 ```
+
+Ba nhánh, ba nơi lưu, và ranh giới giữa chúng là điều đáng nhớ nhất ở sơ đồ
+này: **hàng đợi** (`SessionJournal`, xoá khi tầng suy luận đã nhận), **bản lưu**
+(`SessionStore`, giữ lại cuộc họp), và **cơ sở dữ liệu giọng** (CAM++, không do
+máy chủ này quản lý).
 
 ### Vì sao mỗi kênh upstream lại có một luồng riêng
 
@@ -904,7 +923,7 @@ còn kẹt trên socket:
 | `shared/proto/` | `ProtoWire` (proto3 tay, hai chiều), `AsrSession`, `SpeakerRegistry`, `BufferAdmin` — struct chép tay theo `.proto` |
 | `shared/grpc/` | `Hpack`, `Http2Client`, `GrpcChannel`, `AsrClient` (gọi đi); `Http2Server`, `GrpcServer` (nhận); `Methods.h` (đường method dùng chung cho cả hai bên) |
 | `shared/core/` | `Logger` — hệ thống nhật ký, chung cho cả hai chương trình |
-| `s2t-qt-server/` | `main`, `ServerConfig`, `RpcLane`, `SessionJournal` (bản ghi trên đĩa cho việc khôi phục), `LiveTranscript` (bản chép dựng tại chỗ), `SessionBuffer`, `BufferHub`, `BufferService`, `ServerSelfTest` |
+| `s2t-qt-server/` | `main`, `ServerConfig`, `RpcLane`, `SessionJournal` (hàng đợi trên đĩa cho việc khôi phục), `SessionStore` (bản lưu cuộc họp: SQLite + một tệp `.s16le` mỗi họp), `CampPlusClient` (HTTP/1.1 tới dịch vụ đăng ký giọng), `LiveTranscript` (bản chép dựng tại chỗ), `SessionBuffer`, `BufferHub`, `BufferService`, `ServerSelfTest` |
 | `s2t-qt-server/backend/` | `InferenceBackend` (ranh giới), `TritonBackend` (KServe v2), `RivaBackend` (`nvidia.riva.asr`) |
 | `s2t-qt-client/core/` | `SessionController` (mặt tiền), `SessionWorker`, `StatePoller`, `RpcExecutor`, `AudioQueue`, `TranscriptModel`, `AppConfig`, `SelfTest` |
 | `s2t-qt-client/audio/` | `AudioCapture`, `MicDenoise` (điều khiển xvf3800), `WavIo`, `Transcode` (ffmpeg) |

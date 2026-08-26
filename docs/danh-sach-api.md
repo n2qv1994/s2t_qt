@@ -22,32 +22,38 @@ nhất* nói hợp đồng này: adapter Python `:8700` đã ra khỏi sơ đồ
 tầng suy luận bên dưới nói giao thức của riêng nó (KServe v2 hoặc
 `nvidia.riva.asr`) chứ không nói `asr.ui.v1`.
 
-**Năm RPC dưới đây hiện KHÔNG dùng được**, và tài liệu nói thẳng để bạn không
-xây tính năng lên trên chúng:
+**Cả 20 RPC đều dùng được, trừ một** — và nó không báo lỗi mà nói thẳng bằng
+đúng trường hợp đồng đã dành sẵn:
 
 | RPC | Trả về | Vì sao |
 |---|---|---|
-| `get_audio_range` | `UNIMPLEMENTED` | Máy chủ chưa có kho audio để phát lại. Nhật ký phiên là *hàng đợi*, không phải bản lưu. |
-| `get_pipeline_trace` | OK, `enabled = false` | Bản triển khai này không thu thập trace. `enabled` là cách hợp đồng vốn đã dành để nói điều đó. |
-| `get_audit_history` | OK, danh sách rỗng | Chưa có kho nhật ký thao tác. Các lần sửa vẫn được ghi vào log của máy chủ. |
-| cả `SpeakerRegistryService` (5 RPC) | `UNIMPLEMENTED` | Riva không có RPC đăng ký giọng nào, và kho CAM++ không do máy chủ này quản lý. Đặt tên người nói hiện chỉ làm được bằng `rename_speaker`. |
+| `get_pipeline_trace` | OK, `enabled = false` | Bản triển khai này không thu thập trace từng chặng. `enabled` là cách hợp đồng vốn đã dành để nói điều đó, nên client không phải xử lý lỗi. |
 
-Chúng trả lỗi thay vì trả thành công rỗng có chủ ý: một bản chép trống trông
-như câu trả lời thật là kiểu hỏng tệ hơn nhiều so với một mã lỗi rõ ràng.
+**Hai nhóm RPC cần cấu hình mới chạy**, và khi thiếu cấu hình thì chúng nói rõ
+thay vì trả về rỗng như thể đó là câu trả lời thật:
+
+| Nhóm | Cần | Thiếu thì |
+|---|---|---|
+| `get_audio_range`, `get_audit_history`, `list_sessions` (cuộc họp cũ), `ListSessionSpeakers`, `SaveSessionSpeakers` | `[database] dir` | `FAILED_PRECONDITION` kèm câu giải thích |
+| `GetEnrollmentScript`, `EnrollSpeaker`, `GetSpeakerRegistryStatus`, `SaveSessionSpeakers` | `[enroll] url` | `FAILED_PRECONDITION` kèm câu giải thích |
 
 Ba service, cùng một cổng, cùng một token:
 
 | Service | RPC | Ai trả lời |
 |---|---|---|
-| `asr.ui.v1.ProductASRService` | 12 | 8 do máy chủ trả lời, 1 hỏi tầng suy luận, 3 là stub |
-| `asr.ui.v1.SpeakerRegistryService` | 5 | `UNIMPLEMENTED` toàn bộ |
+| `asr.ui.v1.ProductASRService` | 12 | 10 do máy chủ trả lời, 1 hỏi tầng suy luận, 1 là stub |
+| `asr.ui.v1.SpeakerRegistryService` | 5 | 3 chuyển tới CAM++, 2 do máy chủ trả lời |
 | `s2t.buffer.v1.BufferAdminService` | 3 | máy chủ, hoàn toàn |
 
-**Không còn RPC nào được chuyển tiếp.** Máy chủ giờ *sở hữu* cuộc họp: nó tự
-sinh `session_id`, tự dựng bản chép từ những gì tầng suy luận trả về theo từng
-gói, và trả lời mọi câu hỏi về cuộc họp đó từ trạng thái của chính nó.
-`get_model_status` là RPC duy nhất còn chạm tới tầng suy luận từ một luồng kết
-nối, và nó chỉ hỏi danh sách mô hình.
+**Máy chủ giờ *sở hữu* cuộc họp.** Nó tự sinh `session_id`, tự dựng bản chép từ
+những gì tầng suy luận trả về theo từng gói, lưu bản chép và audio lại khi cuộc
+họp kết thúc, và trả lời mọi câu hỏi về cuộc họp đó từ trạng thái của chính nó.
+`get_model_status` là RPC duy nhất còn hỏi tầng suy luận.
+
+Ba RPC của `SpeakerRegistryService` không đi qua tầng suy luận mà qua **một
+dịch vụ HTTP riêng**: `campp_native/enroll_service.py` trên `:8790`. Nó phải
+tách ra vì `rebuild_db` cần quyền `docker exec` mà container Triton cố tình
+không có. Client không cần biết — với client thì vẫn là gRPC trên `:8800`.
 
 Ba tài liệu đi cùng nhau:
 

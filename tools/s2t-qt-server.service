@@ -53,6 +53,11 @@ ProtectHome=true
 #
 # Nhớ chừa đĩa: mỗi phiên đang chờ giữ tối đa buffer/seconds giây audio
 # (300 giây ≈ 28 MB), và journal_keep=session thì giữ cả cuộc họp.
+#
+# database/dir cũng ghi vào đây, và nó mới là thứ ăn đĩa về lâu dài: bản lưu
+# giữ cuộc họp lại thay vì xoá đi, khoảng 115 MB audio mỗi giờ họp ở 16 kHz
+# mono. Đặt cả hai dưới cùng một StateDirectory là được, chỉ cần khác thư mục
+# con - đừng trỏ chúng vào cùng một chỗ, vì một bên xoá còn một bên giữ.
 # StateDirectory=s2t-qt-server
 # ReadWritePaths=/var/lib/s2t-qt-server
 

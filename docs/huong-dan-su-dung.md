@@ -168,14 +168,32 @@ Bấm **LỊCH SỬ** để xem toàn bộ nhật ký kiểm toán của phiên:
 
 Bấm **SETUP**. Cần có tên người thao tác.
 
-**Đăng ký giọng mới:**
+**Đăng ký giọng mới — thu trực tiếp:**
 1. Nhập tên hiển thị.
 2. Đọc to đoạn văn mẫu hiện trên màn hình, bấm ghi rồi dừng.
 3. Bản ghi được chuyển về 16 kHz mono và gửi lên; server chạy VAD, trích
    embedding và cập nhật DB. Bước này có thể mất tới 2 phút.
 
+**Hoặc nạp từ tệp có sẵn:** bấm **Nạp từ tệp…**. Nhận cả `.wav`, `.mp3`,
+`.m4a` lẫn video `.mp4` — phần mềm tự tách tiếng và chuyển về 16 kHz mono, nên
+không cần chuẩn bị gì trước.
+
+> **Mẫu tốt quan trọng hơn mẫu dài.** Đoạn phải là **một người nói, liên tục,
+> không nhạc nền**. Một tệp có hai người nói sẽ tạo ra một "giọng" pha trộn, và
+> sau đó hệ thống gán nhầm tên cho người khác trong các cuộc họp thật — hỏng âm
+> thầm, rất khó lần ra. Nếu dùng video quay họp, hãy cắt đúng đoạn một người
+> nói trước khi nạp.
+>
+> Sau khi gửi, hãy đọc dòng kết quả: `speech_seconds_after_vad` cho biết thực
+> sự có bao nhiêu giây là tiếng nói. Nếu nó nhỏ hơn nhiều so với độ dài tệp thì
+> mẫu có nhiều khoảng lặng — nên thu lại.
+
 > Nếu mạng rớt giữa lúc gửi, **bản ghi vẫn nằm trong cửa sổ** — đừng đóng. Có
 > mạng lại thì bấm **Gửi lại bản ghi**.
+
+> Nếu bấm mà báo *"chưa cấu hình dịch vụ đăng ký giọng"*, đó là chuyện của máy
+> chủ chứ không phải của bạn: khoá `enroll/url` trong `/etc/s2t-qt-server.conf`
+> đang để trống. Báo người quản trị.
 
 **Gán giọng cho một phiên:** ở phần *Speaker của phiên*, mỗi speaker phát hiện
 được trong phiên có thể để nguyên, gán vào một người đã có trong DB, hoặc tạo

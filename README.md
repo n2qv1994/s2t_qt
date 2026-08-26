@@ -12,10 +12,12 @@ Windows/RHEL client        Server buffer                  tầng suy luận
 ┌────────────────┐        ┌──────────────┐        ┌────────────────────────┐
 │ s2t-qt-client  │ gRPC   │ s2t-qt-server│ gRPC   │ Triton  :8011  KServe v2│
 │ mic, UI, sửa   │──────► │ hàng đợi     │──────► │   asr_diar_session      │
-│                │ :8800  │ + bản chép   │        │        ── hoặc ──       │
-└────────────────┘        └──────────────┘        │ Riva   :50051  nvidia   │
-                                                  │   .riva.asr             │
-                                                  └────────────────────────┘
+│ phụ đề, đăng ký│ :8800  │ + bản chép   │        │        ── hoặc ──       │
+└────────────────┘        │ + bản lưu    │        │ Riva   :50051  nvidia   │
+                          └──────┬───────┘        │   .riva.asr             │
+                                 │ HTTP           └────────────────────────┘
+                                 ▼
+                          enroll_service.py :8790   (CAM++, đăng ký giọng)
 ```
 
 **Từ 2026-08-25, máy chủ nói thẳng với tầng suy luận.**
@@ -27,6 +29,18 @@ phía trên ranh giới đó biết mình đang nói với bên nào.
 Hệ quả lớn nhất: **bản chép giờ được dựng ở máy chủ này**, trong
 `LiveTranscript`. Riva và Triton đều trả lời theo từng gói và không nhớ gì cả,
 nên không còn ai ở trên để hỏi `get_live_state` nữa.
+
+Kéo theo đó, máy chủ cũng phải *giữ* cuộc họp lại. Có **ba nơi lưu**, và phân
+biệt chúng là điều quan trọng nhất khi đọc mã nguồn này:
+
+| Nơi | Là gì | Vòng đời |
+|---|---|---|
+| `buffer/journal_dir` | **hàng đợi**: audio chưa tới tầng suy luận | xoá khi đã tới |
+| `database/dir` | **bản lưu**: siêu dữ liệu + bản chép + nhật ký thao tác + sổ người nói trong SQLite, audio thành một tệp `.s16le` mỗi cuộc họp | giữ lại |
+| CAM++ `:8790` | **cơ sở dữ liệu giọng**, dùng chung giữa mọi cuộc họp | không do máy chủ này quản lý |
+
+Audio **không** nằm trong SQLite: một cuộc họp ba tiếng là ~350 MB, làm BLOB thì
+mỗi lần nối là ghi lại cả khối và phục vụ một khoảng hai giây phải đọc toàn bộ.
 
 Trước đây `s2t_qt` là một chương trình duy nhất nối thẳng lên adapter. Việc
 tách đôi đặt hàng đợi audio ra khỏi máy trạm, và đó là toàn bộ lý do:
@@ -222,7 +236,9 @@ mặc cho kit, và cây nguồn build sạch dưới nó trên cả hai kit.
 # Triton — cổng gRPC 8011, KHÔNG phải cổng HTTP 8010
 s2t-qt-server --listen 0.0.0.0:8800 --token <token-client> \
               --backend triton --upstream 192.168.1.47:8011 \
-              --model asr_diar_session
+              --model asr_diar_session \
+              --database-dir /var/lib/s2t-qt \
+              --enroll-url http://127.0.0.1:8790
 
 # Riva
 s2t-qt-server --listen 0.0.0.0:8800 --token <token-client> \
@@ -303,7 +319,7 @@ mất đúng cái lần khởi động lại mà nhật ký sinh ra để phục
 ## Self-test
 
 ```bash
-s2t-qt-server --selftest         # bộ mã hai chiều + đóng khung + loopback + cả chuỗi
+s2t-qt-server --selftest         # bộ mã, kho phiên (SQLite), loopback, cả chuỗi, khởi động lại
 s2t-qt-server --selftest-codec   # chỉ bộ mã, không mở socket
 s2t-qt-server --probe 192.168.1.47:8011 --token <token>
 
