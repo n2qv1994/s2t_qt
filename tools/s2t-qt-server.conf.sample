@@ -56,6 +56,28 @@ probe_ms=5000
 # đều do chính máy chủ này trả lời.  Mỗi backend giữ đúng một kênh quản trị
 # cho ping và danh sách mô hình.
 
+[database]
+# Kho lưu cuộc họp sau khi nó kết thúc: siêu dữ liệu, bản chép, nhật ký thao
+# tác và sổ người nói theo phiên nằm trong SQLite; audio nằm cạnh đó thành một
+# tệp .s16le cho mỗi cuộc họp.
+#
+# KHÁC với buffer/journal_dir: nhật ký là HÀNG ĐỢI, bị xoá khi tầng suy luận
+# đã nhận; đây là BẢN LƯU.  Để trống là tắt, và khi tắt thì get_audio_range,
+# get_audit_history, list_sessions cũ và sổ người nói theo phiên đều nói thẳng
+# là không có, chứ không trả về rỗng như thể đó là câu trả lời thật.
+#
+# Ước lượng dung lượng: audio 16 kHz mono là ~115 MB mỗi giờ họp.
+dir=
+
+[enroll]
+# Dịch vụ đăng ký giọng CAM++ (campp_native/enroll_service.py).  Đây KHÔNG
+# phải tầng suy luận: rebuild_db cần quyền docker exec mà container Triton cố
+# tình không có, nên nó chạy trên host bên cạnh.  Để trống là tắt đăng ký.
+url=http://127.0.0.1:8790
+# Mỗi lần đăng ký kéo theo một lượt rebuild_db trên TOÀN BỘ giọng đã có, nên
+# giá trị này dài có chủ ý.
+timeout_ms=120000
+
 [buffer]
 # Mỗi phiên được giữ tối đa bấy nhiêu giây audio khi tầng suy luận chưa theo
 # kịp.  Đây chính là thứ biến một sự cố mạng 5 phút thành độ sâu hàng đợi thay

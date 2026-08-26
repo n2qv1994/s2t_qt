@@ -52,6 +52,10 @@ public:
         // session, and a session that outlived the backend would be holding a
         // dangling pointer at exactly the moment it tried to flush.
         InferenceBackend *backend = nullptr;
+        // The meeting archive, borrowed from BufferHub.  Null disables
+        // archiving for this session, which is what a server with no
+        // database/dir does.
+        class SessionStore *store = nullptr;
         // Peer that called start_session.  Recorded so an operator reading the
         // admin screen can tell two workstations apart.
         QString client;

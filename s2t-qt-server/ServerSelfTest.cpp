@@ -3,6 +3,8 @@
 #include "BufferHub.h"
 #include "BufferService.h"
 #include "CampPlusClient.h"
+#include "SessionStore.h"
+#include "SessionStore.h"
 #include "ServerConfig.h"
 #include "core/Logger.h"
 #include "grpc/AsrClient.h"
@@ -1349,6 +1351,175 @@ int runRestartTests()
     out().flush();
     return g_failures == 0 ? 0 : 1;
 }
+// ---------------------------------------------------------------------------
+// The meeting archive
+// ---------------------------------------------------------------------------
+
+int store()
+{
+    QTemporaryDir dir;
+    if (!dir.isValid()) {
+        check(false, "a store directory can be created");
+        return 1;
+    }
+
+    SessionStore store;
+    QString error;
+    check(store.open(dir.path(), &error), QStringLiteral("store opens (%1)").arg(error));
+    check(store.enabled(), "store reports itself enabled");
+
+    const QString id = QStringLiteral("phiên-lưu-01"); // Vietnamese, as a file name too
+    store.createSession(id, QStringLiteral("Cuộc họp lưu"), QStringLiteral("127.0.0.1:1"),
+                        QStringLiteral("{\"session_title\":\"Cuộc họp lưu\"}"), 16000, 1);
+    check(store.hasSession(id), "the session is in the store");
+
+    // ---- audio -------------------------------------------------------------
+    // One second of 16 kHz mono, in ten chunks, each filled with its own index
+    // so a range read can be checked byte for byte rather than only by length.
+    for (int i = 0; i < 10; ++i)
+        store.appendAudio(id, QByteArray(3200, char(i + 1)));
+
+    asr::AudioRangeResponse range;
+    check(store.audioRange(id, 0.2, 0.4, &range, &error),
+          QStringLiteral("a range reads back (%1)").arg(error));
+    check(range.sampleRate == 16000 && range.channels == 1, "the range keeps the audio format");
+    check(range.pcm.size() == 6400,
+          QStringLiteral("200 ms at 16 kHz is 6400 bytes (%1)").arg(range.pcm.size()));
+    // 0.2 s in is the start of chunk 3, which was filled with '\x03'.
+    check(!range.pcm.isEmpty() && range.pcm.at(0) == char(3),
+          "the range starts at the right sample, not at the file head");
+    check(qAbs(range.totalSec - 1.0) < 1e-6,
+          QStringLiteral("total is the whole meeting (%1 s)").arg(range.totalSec));
+
+    // Past the end is clamped, not refused: a reviewer dragging over the live
+    // edge should get what exists.
+    asr::AudioRangeResponse tail;
+    check(store.audioRange(id, 0.9, 5.0, &tail, &error), "a range past the end is clamped");
+    check(tail.pcm.size() == 3200,
+          QStringLiteral("and returns only what exists (%1 bytes)").arg(tail.pcm.size()));
+    check(!store.audioRange(id, 1.0, 0.5, &range, &error), "an inverted range is refused");
+    check(!store.audioRange(id, 0.0, 120.0, &range, &error), "a range over 60 s is refused");
+
+    // A session that was started and never pushed to is empty, not missing -
+    // start_session without a successful push is a real state.
+    store.createSession(QStringLiteral("trống"), QString(), QString(), QString(), 16000, 1);
+    asr::AudioRangeResponse empty;
+    check(store.audioRange(QStringLiteral("trống"), 0.0, 1.0, &empty, &error)
+              && empty.pcm.isEmpty(),
+          "a session with no audio answers empty rather than NOT_FOUND");
+
+    // ---- transcript --------------------------------------------------------
+    asr::StateResponse saved;
+    saved.sessionId = id;
+    saved.transcriptRevision = 7;
+    saved.transcriptFinal = true;
+    saved.state.title = QStringLiteral("Cuộc họp lưu");
+    asr::DisplayRow row;
+    row.rowId = QStringLiteral("r1");
+    row.speaker = QStringLiteral("0");
+    row.verifiedName = QStringLiteral("Trần Văn A");
+    row.mergedText = QStringLiteral("xin chào các đồng chí");
+    saved.state.rows.append(row);
+    store.saveState(id, saved);
+
+    asr::StateResponse loaded;
+    check(store.loadState(id, &loaded), "the transcript reads back");
+    check(loaded.transcriptRevision == 7 && loaded.transcriptFinal,
+          "revision and final survive the round trip");
+    check(loaded.state.rows.size() == 1
+              && loaded.state.rows.at(0).mergedText == row.mergedText
+              && loaded.state.rows.at(0).verifiedName == row.verifiedName,
+          "the row survives, including a Vietnamese verified name");
+
+    // ---- audit -------------------------------------------------------------
+    store.appendAudit(id, QStringLiteral("session_start"), QStringLiteral("{}"));
+    store.appendAudit(id, QStringLiteral("text_edit"), QStringLiteral("{\"editor\":\"nguyen\"}"));
+    const QList<asr::AuditEvent> history = store.auditHistory(id, 50);
+    check(history.size() == 2, QStringLiteral("both audit rows come back (%1)").arg(history.size()));
+    check(history.size() == 2 && history.at(0).event == QLatin1String("session_start"),
+          "oldest first, which is the order the client renders");
+
+    // ---- the session speaker registry --------------------------------------
+    reg::SessionSpeakerEntry incoming;
+    incoming.sessionSpeakerId = QStringLiteral("spk-1");
+    incoming.diarSlots = {QStringLiteral("0"), QStringLiteral("2")};
+    incoming.verifiedName = QStringLiteral("tự động");
+    incoming.windows = 12;
+    store.syncSpeakers(id, {incoming});
+
+    QList<reg::SessionSpeakerEntry> speakers = store.listSpeakers(id);
+    check(speakers.size() == 1 && speakers.at(0).diarSlots.size() == 2,
+          "a synced speaker comes back with its diar slots");
+    check(speakers.size() == 1 && speakers.at(0).status == QLatin1String("pending"),
+          "and starts pending");
+
+    // The rule that matters: a manual rename must survive a later automatic
+    // sync.  The tier's own export knows nothing about the correction and
+    // would otherwise silently undo a rename that already succeeded.
+    store.setVerifiedName(id, QStringLiteral("spk-1"), QStringLiteral("Nguyễn Văn B"), true);
+    incoming.verifiedName = QStringLiteral("tự động lần hai");
+    store.syncSpeakers(id, {incoming});
+    speakers = store.listSpeakers(id);
+    check(speakers.size() == 1
+              && speakers.at(0).verifiedName == QStringLiteral("Nguyễn Văn B"),
+          "a manual name is NOT overwritten by a later sync");
+
+    store.stageEvidence(id, QStringLiteral("spk-1"), {{0.0, 0.5}, {0.6, 1.0}},
+                        QStringLiteral("Nguyễn Văn B"));
+    speakers = store.listSpeakers(id);
+    check(speakers.size() == 1 && speakers.at(0).hasEvidence
+              && speakers.at(0).evidence.spanCount == 2,
+          "staged evidence is reported with its span count");
+    check(speakers.size() == 1
+              && qAbs(speakers.at(0).evidence.totalSpeechSec - 0.9) < 1e-6,
+          "and its total speech length");
+    check(store.evidenceSpans(id, QStringLiteral("spk-1")).size() == 2,
+          "the spans themselves read back");
+
+    store.updateSpeakerStatus(id, QStringLiteral("spk-1"), QStringLiteral("global_shared"),
+                              QStringLiteral("Nguyễn Văn B"), QString());
+    speakers = store.listSpeakers(id);
+    check(speakers.size() == 1 && speakers.at(0).status == QLatin1String("global_shared")
+              && speakers.at(0).publishedAt > 0.0,
+          "publishing records the status and when");
+
+    // ---- listing -----------------------------------------------------------
+    store.markFinished(id, 1.0);
+    QString cursor;
+    const QList<asr::SessionSummary> sessions = store.listSessions(10, QString(), &cursor);
+    check(sessions.size() == 2, QStringLiteral("both sessions list (%1)").arg(sessions.size()));
+    bool foundFinal = false;
+    for (const asr::SessionSummary &summary : sessions) {
+        if (summary.sessionId == id)
+            foundFinal = summary.final && qAbs(summary.durationSec - 1.0) < 1e-6;
+    }
+    check(foundFinal, "the finished session lists as final, with its duration");
+
+    // A disabled store must be silent rather than fatal: a deployment that
+    // wants no archive is a supported configuration.
+    SessionStore off;
+    QString offError;
+    check(off.open(QString(), &offError), "an empty database dir opens without error");
+    check(!off.enabled(), "and leaves the store disabled");
+    off.appendAudio(QStringLiteral("x"), QByteArray(16, 'x'));
+    off.appendAudit(QStringLiteral("x"), QStringLiteral("e"), QString());
+    check(off.auditHistory(QStringLiteral("x"), 10).isEmpty(),
+          "writes to a disabled store are no-ops, not crashes");
+
+    return g_failures;
+}
+
+int runStoreTests()
+{
+    g_failures = 0;
+    out() << "== s2t-qt-server: kho phiên (SQLite) ==\n";
+    store();
+    out() << (g_failures == 0 ? "store: OK\n"
+                              : QStringLiteral("store: %1 lỗi\n").arg(g_failures));
+    out().flush();
+    return g_failures == 0 ? 0 : 1;
+}
+
 int runCodecTests()
 {
     g_failures = 0;
@@ -1376,10 +1547,11 @@ int runLoopbackTests()
 int runAll()
 {
     const int codec = runCodecTests();
+    const int storeCode = runStoreTests();
     const int loop = runLoopbackTests();
     const int chainCode = runBufferTests();
     const int restartCode = runRestartTests();
-    return codec != 0 || loop != 0 || chainCode != 0 || restartCode != 0 ? 1 : 0;
+    return codec != 0 || storeCode != 0 || loop != 0 || chainCode != 0 || restartCode != 0 ? 1 : 0;
 }
 
 int runProbe(const QString &target, const QString &token)

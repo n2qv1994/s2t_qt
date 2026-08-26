@@ -129,6 +129,15 @@ BufferHub::BufferHub(const ServerConfig &config, QObject *parent)
         }
     }
 
+    QString storeError;
+    if (!m_store.open(m_config.databaseDir, &storeError)) {
+        // Not fatal: a meeting still runs without an archive, and refusing to
+        // start over it would take the live path down with the history.
+        LOG_ERROR(applog::cat::Session)
+            << "kho phiên không mở được -" << storeError
+            << "- máy chủ vẫn chạy, nhưng cuộc họp sẽ không được lưu lại";
+    }
+
     // Which tier this server talks to.  ServerConfig has already refused
     // anything but these two, so there is no "unknown backend" branch to write
     // here - a typo was rejected before any thread existed.
@@ -156,6 +165,7 @@ SessionBuffer::Settings BufferHub::settingsFor(const QString &client) const
 {
     SessionBuffer::Settings settings;
     settings.backend = m_backend.get();
+    settings.store = &m_store;
     settings.client = client;
     settings.capacityBytes =
         m_config.bufferBytesPerSession(kAssumedSampleRate, kAssumedChannels);

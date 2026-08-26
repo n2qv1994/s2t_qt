@@ -79,6 +79,17 @@ struct ServerConfig
     // talking to it.  Backs the "upstream_ready" flag in ping.
     int upstreamProbeMs = 5000;
 
+    // ---- the meeting archive ----------------------------------------------
+    //
+    // Where a meeting lives after it ends: metadata, the transcript, the audit
+    // log and the per-session speaker registry in SQLite, plus one flat
+    // .s16le per meeting for the audio.  Empty disables it, and every RPC that
+    // needs it then says so instead of answering with an empty success.
+    //
+    // Separate from journalDir on purpose: the journal is a QUEUE that is
+    // deleted once the tier has the audio, this is the ARCHIVE.
+    QString databaseDir;
+
     // ---- buffering ---------------------------------------------------------
     // How much audio one session may hold waiting for the pipeline before
     // push_audio starts refusing.  Refusing is the point: an unbounded buffer

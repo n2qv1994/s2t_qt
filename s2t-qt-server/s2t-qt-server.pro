@@ -1,4 +1,4 @@
-QT += core network
+QT += core network sql
 QT -= gui
 
 CONFIG += c++17 console
@@ -56,6 +56,7 @@ SOURCES += \
     CampPlusClient.cpp \
     LiveTranscript.cpp \
     SessionJournal.cpp \
+    SessionStore.cpp \
     SessionBuffer.cpp \
     BufferHub.cpp \
     BufferService.cpp \
@@ -70,6 +71,7 @@ HEADERS += \
     CampPlusClient.h \
     LiveTranscript.h \
     SessionJournal.h \
+    SessionStore.h \
     SessionBuffer.h \
     BufferHub.h \
     BufferService.h \

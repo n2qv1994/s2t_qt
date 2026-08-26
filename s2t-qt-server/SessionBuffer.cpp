@@ -1,5 +1,6 @@
 #include "SessionBuffer.h"
 
+#include "SessionStore.h"
 #include "core/Logger.h"
 
 #include <QDateTime>
@@ -49,6 +50,12 @@ SessionBuffer::SessionBuffer(const QString &sessionId, qint64 streamId,
     m_sampleRate = config.sampleRate;
     m_channels = config.channels;
     m_live.configure(config.title, config.sampleRate, config.channels, config.sourceTotalSec);
+
+    if (m_settings.store) {
+        m_settings.store->createSession(sessionId, config.title, settings.client, config.rawJson,
+                                        config.sampleRate, config.channels);
+        m_settings.store->appendAudit(sessionId, QStringLiteral("session_start"), config.rawJson);
+    }
 
     // The reply to start_session is ours to compose now: there is no adapter
     // answer to pass on.  It carries the empty state the client will start
@@ -393,6 +400,17 @@ grpc::Status SessionBuffer::applyTextEdit(const asr::TextEditRequest &request,
         QMutexLocker lock(&m_mutex);
         m_updatedAt = nowSeconds();
     }
+    if (m_settings.store) {
+        m_settings.store->appendAudit(
+            m_sessionId, QStringLiteral("text_edit"),
+            QStringLiteral("{\"editor\":\"%1\",\"start_sec\":%2,\"end_sec\":%3,\"words\":%4,"
+                           "\"revision\":%5}")
+                .arg(request.editorId)
+                .arg(request.startSec, 0, 'f', 3)
+                .arg(request.endSec, 0, 'f', 3)
+                .arg(request.replacementWords.size())
+                .arg(m_live.revision()));
+    }
     LOG_INFO(applog::cat::Session)
         << "text edit on" << m_sessionId << "by"
         << (request.editorId.isEmpty() ? QStringLiteral("?") : request.editorId) << "-"
@@ -412,6 +430,19 @@ grpc::Status SessionBuffer::renameSpeaker(const asr::RenameSpeakerRequest &reque
     {
         QMutexLocker lock(&m_mutex);
         m_updatedAt = nowSeconds();
+    }
+    if (m_settings.store) {
+        // A manual rename outranks any later automatic sync, so it is recorded
+        // as such - see SessionStore::syncSpeakers.
+        m_settings.store->setVerifiedName(m_sessionId, request.toSpeaker.isEmpty()
+                                                           ? request.fromSpeaker
+                                                           : request.toSpeaker,
+                                          request.verifiedName, true);
+        m_settings.store->appendAudit(
+            m_sessionId, QStringLiteral("rename_speaker"),
+            QStringLiteral("{\"editor\":\"%1\",\"from\":\"%2\",\"to\":\"%3\",\"name\":\"%4\"}")
+                .arg(request.editorId, request.fromSpeaker, request.toSpeaker,
+                     request.verifiedName));
     }
     LOG_INFO(applog::cat::Session) << "speaker rename on" << m_sessionId << "-"
                                    << request.fromSpeaker << "->" << request.toSpeaker
@@ -542,6 +573,11 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
             QMutexLocker lock(&m_mutex);
             ++m_forwardedPackets;
             m_forwardedBytes += quint64(packet.pcm.size());
+            // Archived only AFTER the tier accepted it, so the audio file and
+            // the transcript describe the same meeting.  A packet the tier
+            // rejected never became part of it.
+            if (m_settings.store)
+                m_settings.store->appendAudio(m_sessionId, packet.pcm);
             m_upstreamSourceSeenSec = response.sourceSeenSec;
             m_upstreamSpeechSeenSec = response.speechSeenSec;
             m_upstreamTiming = response.timing;
@@ -724,6 +760,23 @@ void SessionBuffer::run()
                 response.events.final = true;
                 response.result = tail;
                 response.state = snapshot.state;
+            }
+
+            // The archive is written here and only here for the transcript:
+            // once per meeting, at the end, rather than on every packet.  A
+            // three-hour state is megabytes, and the journal already covers
+            // crash recovery of the audio behind it.
+            if (m_settings.store) {
+                QMutexLocker stateLock(&m_stateMutex);
+                const asr::StateResponse snapshot =
+                    m_live.snapshot(m_sessionId, m_backendStreamId);
+                m_settings.store->saveState(m_sessionId, snapshot);
+                m_settings.store->markFinished(m_sessionId, m_live.sourceSeenSec());
+                m_settings.store->appendAudit(
+                    m_sessionId, QStringLiteral("session_stop"),
+                    QStringLiteral("{\"ok\":%1,\"duration_sec\":%2}")
+                        .arg(status.ok() ? QStringLiteral("true") : QStringLiteral("false"))
+                        .arg(m_live.sourceSeenSec(), 0, 'f', 3));
             }
 
             QMutexLocker lock(&m_mutex);

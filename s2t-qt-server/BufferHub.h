@@ -10,6 +10,7 @@
 
 #include "ServerConfig.h"
 #include "SessionBuffer.h"
+#include "SessionStore.h"
 #include "backend/InferenceBackend.h"
 #include "proto/BufferAdmin.h"
 
@@ -68,6 +69,9 @@ public:
     const ServerConfig &config() const { return m_config; }
     // The inference tier this server is pointed at.  Never null once ok().
     InferenceBackend &backend() { return *m_backend; }
+    // The meeting archive.  Always present; disabled when database/dir is empty,
+    // in which case every read answers empty and every write is a no-op.
+    SessionStore &store() { return m_store; }
 
     // False when the journal directory is already held by another instance.
     // The caller must then refuse to start: two servers replaying one journal
@@ -133,6 +137,10 @@ private:
     // blocks the very restart this journal exists to make possible.
     std::unique_ptr<QLockFile> m_lock;
     std::unique_ptr<InferenceBackend> m_backend;
+    // Mutable for the same reason m_mutex is: it is shared state that a const
+    // accessor legitimately hands out for writing.  The archive is not part of
+    // the hub's logical constness.
+    mutable SessionStore m_store;
     UpstreamProbe *m_probe = nullptr;
 
     mutable QMutex m_mutex;

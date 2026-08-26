@@ -93,6 +93,7 @@ static const KnownFlag kFlags[] = {
     {"--upstream-token", true},  {"--upstream-lanes", true},
     {"--backend", true},         {"--model", true},
     {"--enroll-url", true},      {"--enroll-timeout-ms", true},
+    {"--database-dir", true},
     {"--language", true},
     {"--journal-dir", true},     {"--durability", true},
     {"--journal-keep", true},    {"--orphan-timeout-sec", true},
@@ -150,6 +151,7 @@ bool ServerConfig::load(const QStringList &args, QString *error)
         upstreamToken = ini.value(QStringLiteral("upstream/token"), upstreamToken).toString();
         backend = ini.value(QStringLiteral("upstream/backend"), backend).toString();
         enrollUrl = ini.value(QStringLiteral("enroll/url"), enrollUrl).toString();
+        databaseDir = ini.value(QStringLiteral("database/dir"), databaseDir).toString();
         enrollTimeoutMs = ini.value(QStringLiteral("enroll/timeout_ms"), enrollTimeoutMs).toInt();
         model = ini.value(QStringLiteral("upstream/model"), model).toString();
         language = ini.value(QStringLiteral("upstream/language"), language).toString();
@@ -249,6 +251,9 @@ bool ServerConfig::load(const QStringList &args, QString *error)
         return false;
     got = false;
     if (!takeValue(args, QStringLiteral("--enroll-url"), &enrollUrl, &got, error))
+        return false;
+    got = false;
+    if (!takeValue(args, QStringLiteral("--database-dir"), &databaseDir, &got, error))
         return false;
     if (!takeInt(args, QStringLiteral("--enroll-timeout-ms"), &enrollTimeoutMs, error))
         return false;
@@ -362,6 +367,7 @@ void ServerConfig::save(const QString &path, QString *error) const
     ini.setValue(QStringLiteral("upstream/token"), upstreamToken);
     ini.setValue(QStringLiteral("upstream/backend"), backend);
     ini.setValue(QStringLiteral("enroll/url"), enrollUrl);
+    ini.setValue(QStringLiteral("database/dir"), databaseDir);
     ini.setValue(QStringLiteral("enroll/timeout_ms"), enrollTimeoutMs);
     ini.setValue(QStringLiteral("upstream/model"), model);
     ini.setValue(QStringLiteral("upstream/language"), language);
@@ -402,6 +408,7 @@ QStringList ServerConfig::describe() const
           << QStringLiteral("token client     : %1").arg(listenTokenState)
           << QStringLiteral("kết nối tối đa   : %1").arg(maxConnections)
           << QStringLiteral("tầng suy luận    : %1 (%2)").arg(upstreamTarget, backend)
+          << QStringLiteral("kho phiên        : %1").arg(databaseDir.isEmpty() ? QStringLiteral("(tắt)") : databaseDir)
           << QStringLiteral("đăng ký giọng    : %1").arg(enrollUrl.isEmpty() ? QStringLiteral("(tắt)") : enrollUrl)
           << QStringLiteral("mô hình          : %1").arg(model.isEmpty() ? QStringLiteral("(mặc định)") : model)
           << QStringLiteral("token suy luận   : %1").arg(upstreamTokenState)

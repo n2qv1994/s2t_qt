@@ -3,6 +3,7 @@
 #include "core/Logger.h"
 
 #include <QJsonArray>
+#include <QSet>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include "grpc/Methods.h"
@@ -169,8 +170,14 @@ void BufferService::registerMethods()
             return serve<asr::ReviewRequest, asr::StateResponse>(
                 call, out, [&](const asr::ReviewRequest &req, asr::StateResponse *resp) {
                     const SessionRef session = hub->find(req.sessionId);
-                    if (!session)
+                    if (!session) {
+                        // Not live any more - but it may still be in the
+                        // archive.  Reviewing a meeting from last week is the
+                        // normal case for this RPC, not the exception.
+                        if (hub->store().loadState(req.sessionId, resp))
+                            return grpc::Status();
                         return noSuchSession(req.sessionId, durable);
+                    }
                     // Below zero means "no bound", which is what an unset
                     // has_view_* field has always meant on this RPC.
                     return session->reviewState(req.hasViewStartSec ? req.viewStartSec : -1.0,
@@ -208,11 +215,24 @@ void BufferService::registerMethods()
             return serve<asr::ListSessionsRequest, asr::ListSessionsResponse>(
                 call, out,
                 [&](const asr::ListSessionsRequest &req, asr::ListSessionsResponse *resp) {
-                    // Only what this process is holding.  Once a meeting ages
-                    // past finished_retention_sec it is gone from here, and
-                    // there is no archive behind it yet - see SessionStore in
-                    // the handover notes.
-                    resp->sessions = hub->summaries(int(req.limit));
+                    // Live meetings first, then the archive.  A meeting that is
+                    // running exists in both - it was written to the store at
+                    // start - so the live entry wins: it is the one with a true
+                    // `running` flag and an up-to-the-second duration.
+                    QSet<QString> seen;
+                    if (req.cursor.isEmpty()) {
+                        for (const asr::SessionSummary &live : hub->summaries(0)) {
+                            resp->sessions.append(live);
+                            seen.insert(live.sessionId);
+                        }
+                    }
+                    QString nextCursor;
+                    for (const asr::SessionSummary &stored :
+                         hub->store().listSessions(int(req.limit), req.cursor, &nextCursor)) {
+                        if (!seen.contains(stored.sessionId))
+                            resp->sessions.append(stored);
+                    }
+                    resp->nextCursor = nextCursor;
                     return grpc::Status();
                 });
         });
@@ -235,15 +255,23 @@ void BufferService::registerMethods()
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetAudioRange),
-        [](const grpc::ServerCall &call, QByteArray *out) {
-            Q_UNUSED(out);
-            Q_UNUSED(call);
-            grpc::Status status;
-            status.code = grpc::Unimplemented;
-            status.message = QStringLiteral(
-                "máy chủ này chưa lưu kho audio để phát lại. Nhật ký phiên là hàng đợi, "
-                "không phải bản lưu - nghe lại một đoạn cần kho audio riêng, chưa làm.");
-            return status;
+        [hub](const grpc::ServerCall &call, QByteArray *out) {
+            return serve<asr::AudioRangeRequest, asr::AudioRangeResponse>(
+                call, out, [&](const asr::AudioRangeRequest &req, asr::AudioRangeResponse *resp) {
+                    QString error;
+                    if (hub->store().audioRange(req.sessionId, req.startSec, req.endSec, resp,
+                                                &error)) {
+                        return grpc::Status();
+                    }
+                    grpc::Status status;
+                    // A bad range is the caller's mistake; a missing archive is
+                    // the deployment's. The client shows the message either
+                    // way, so the codes are what tell them apart.
+                    status.code = hub->store().enabled() ? grpc::InvalidArgument
+                                                         : grpc::FailedPrecondition;
+                    status.message = error;
+                    return status;
+                });
         });
 
     m_server->registerMethod(
@@ -263,13 +291,12 @@ void BufferService::registerMethods()
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetAuditHistory),
-        [](const grpc::ServerCall &call, QByteArray *out) {
+        [hub](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::AuditHistoryRequest, asr::AuditHistoryResponse>(
                 call, out,
                 [&](const asr::AuditHistoryRequest &req, asr::AuditHistoryResponse *resp) {
-                    // An empty history is honest: nothing is recorded yet. The
-                    // edits themselves are logged, so nothing is silently lost.
                     resp->sessionId = req.sessionId;
+                    resp->events = hub->store().auditHistory(req.sessionId, int(req.limit));
                     return grpc::Status();
                 });
         });
@@ -437,25 +464,191 @@ void BufferService::registerMethods()
                 });
         });
 
-    // ---- SpeakerRegistryService: still needs a session store ---------------
+    // ---- SpeakerRegistryService: the per-session registry ------------------
     //
-    // These two are not pass-throughs.  ListSessionSpeakers reads the staged
-    // per-session registry, and SaveSessionSpeakers publishes a speaker from a
-    // meeting by collecting the audio behind its evidence spans and posting it
-    // to /enroll_from_pcm.  Both need the session store and the audio archive
-    // this server has yet to grow, so they say so rather than half-working.
+    // These two are not pass-throughs.  The registry lives in this server's own
+    // store, and publishing a speaker means collecting the audio behind its
+    // staged evidence spans and posting that to /enroll_from_pcm.
 
-    const auto needsStore = [](const grpc::ServerCall &, QByteArray *) {
-        grpc::Status status;
-        status.code = grpc::Unimplemented;
-        status.message = QStringLiteral(
-            "danh sách người nói theo phiên chưa có ở máy chủ này - nó cần kho phiên và kho "
-            "audio chưa được làm. Đăng ký trực tiếp (EnrollSpeaker) thì đã dùng được.");
-        return status;
-    };
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::ListSessionSpeakers),
+        [hub](const grpc::ServerCall &call, QByteArray *out) {
+            return serve<reg::ListSessionSpeakersRequest, reg::ListSessionSpeakersResponse>(
+                call, out,
+                [&](const reg::ListSessionSpeakersRequest &req,
+                    reg::ListSessionSpeakersResponse *resp) {
+                    resp->sessionId = req.sessionId;
+                    resp->speakers = hub->store().listSpeakers(req.sessionId);
+                    return grpc::Status();
+                });
+        });
 
-    for (const char *method : {rpcpath::ListSessionSpeakers, rpcpath::SaveSessionSpeakers})
-        m_server->registerMethod(QString::fromLatin1(method), needsStore);
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::SaveSessionSpeakers),
+        [hub, campp, deadline](const grpc::ServerCall &call, QByteArray *out) {
+            const int ms = deadline(call);
+            return serve<reg::SaveSessionSpeakersRequest, reg::SaveSessionSpeakersResponse>(
+                call, out,
+                [&](const reg::SaveSessionSpeakersRequest &req,
+                    reg::SaveSessionSpeakersResponse *resp) {
+                    resp->sessionId = req.sessionId;
+                    if (req.editorId.trimmed().isEmpty()) {
+                        grpc::Status bad;
+                        bad.code = grpc::InvalidArgument;
+                        bad.message = QStringLiteral("thiếu editor_id - mỗi quyết định publish đều "
+                                                     "được ghi nhật ký kèm người thao tác");
+                        return bad;
+                    }
+
+                    for (const reg::SpeakerSelection &selection : req.selections) {
+                        reg::SaveSpeakerResult result;
+                        result.sessionSpeakerId = selection.sessionSpeakerId;
+
+                        reg::SessionSpeakerEntry entry;
+                        if (!hub->store().speaker(req.sessionId, selection.sessionSpeakerId,
+                                                  &entry)) {
+                            result.ok = false;
+                            result.status = QStringLiteral("pending");
+                            result.error = QStringLiteral("phiên không có giọng '%1'")
+                                               .arg(selection.sessionSpeakerId);
+                            resp->results.append(result);
+                            continue;
+                        }
+
+                        // SESSION_ONLY is a decision, not a publish: it is
+                        // recorded and nothing leaves this server.
+                        if (selection.destination != reg::GlobalShared) {
+                            hub->store().updateSpeakerStatus(req.sessionId,
+                                                             selection.sessionSpeakerId,
+                                                             QStringLiteral("session_only"),
+                                                             QString(), QString());
+                            result.ok = true;
+                            result.status = QStringLiteral("session_only");
+                            resp->results.append(result);
+                            continue;
+                        }
+
+                        const QString globalName = selection.globalName.trimmed().isEmpty()
+                            ? entry.verifiedName.trimmed()
+                            : selection.globalName.trimmed();
+                        if (globalName.isEmpty()) {
+                            result.ok = false;
+                            result.status = entry.status;
+                            result.error = QStringLiteral(
+                                "chưa có tên để publish (global_name trống và giọng này cũng "
+                                "chưa được đặt verified_name)");
+                            resp->results.append(result);
+                            continue;
+                        }
+
+                        const QList<QPair<double, double>> spans =
+                            hub->store().evidenceSpans(req.sessionId, selection.sessionSpeakerId);
+                        if (spans.isEmpty()) {
+                            result.ok = false;
+                            result.status = entry.status;
+                            result.error = QStringLiteral(
+                                "giọng này chưa có bằng chứng nào được ghim - hãy dùng "
+                                "rename_speaker để gán tên cho nó trước");
+                            resp->results.append(result);
+                            continue;
+                        }
+
+                        // The audio behind the spans, concatenated.  This is
+                        // the same shape /enroll_from_pcm expects: raw s16le,
+                        // not a WAV.
+                        QByteArray pcm;
+                        quint32 sampleRate = 16000;
+                        for (const auto &span : spans) {
+                            asr::AudioRangeResponse chunk;
+                            QString error;
+                            if (!hub->store().audioRange(req.sessionId, span.first, span.second,
+                                                         &chunk, &error))
+                                continue;
+                            if (chunk.sampleRate)
+                                sampleRate = chunk.sampleRate;
+                            pcm.append(chunk.pcm);
+                        }
+                        if (pcm.isEmpty()) {
+                            result.ok = false;
+                            result.status = QStringLiteral("publish_failed");
+                            result.error = QStringLiteral(
+                                "không lấy được audio cho các đoạn bằng chứng của giọng này");
+                            hub->store().updateSpeakerStatus(req.sessionId,
+                                                             selection.sessionSpeakerId,
+                                                             QStringLiteral("publish_failed"),
+                                                             QString(), result.error);
+                            resp->results.append(result);
+                            continue;
+                        }
+
+                        // Keyed by (session, speaker) and never by name, so
+                        // re-publishing the same speaker under a different name
+                        // later replaces this exact sample instead of leaving
+                        // the old name's copy orphaned in the database.
+                        const QString tag = QStringLiteral("sess-%1-reg-%2")
+                                                .arg(req.sessionId, selection.sessionSpeakerId);
+                        QList<QPair<QByteArray, QByteArray>> headers;
+                        headers.append({QByteArrayLiteral("X-Speaker-Name"),
+                                        CampPlusClient::urlEncode(globalName)});
+                        headers.append({QByteArrayLiteral("X-Enroll-Write-Tag"),
+                                        CampPlusClient::urlEncode(tag)});
+                        headers.append({QByteArrayLiteral("X-Enroll-Search-Tag"),
+                                        CampPlusClient::urlEncode(tag)});
+                        headers.append({QByteArrayLiteral("X-Session-Id"),
+                                        CampPlusClient::urlEncode(req.sessionId)});
+                        headers.append({QByteArrayLiteral("X-Editor-Id"),
+                                        CampPlusClient::urlEncode(req.editorId.trimmed())});
+                        headers.append({QByteArrayLiteral("X-Sample-Rate"),
+                                        QByteArray::number(sampleRate)});
+                        headers.append({QByteArrayLiteral("Content-Type"),
+                                        QByteArrayLiteral("application/octet-stream")});
+
+                        QByteArray body;
+                        const grpc::Status posted = campp->post(
+                            QStringLiteral("/enroll_from_pcm"), pcm, headers, &body, ms);
+                        if (!posted.ok()) {
+                            result.ok = false;
+                            result.status = QStringLiteral("publish_failed");
+                            result.error = posted.message;
+                            hub->store().updateSpeakerStatus(req.sessionId,
+                                                             selection.sessionSpeakerId,
+                                                             QStringLiteral("publish_failed"),
+                                                             QString(), posted.message);
+                            resp->results.append(result);
+                            continue;
+                        }
+
+                        const QJsonObject object = QJsonDocument::fromJson(body).object();
+                        if (!object.value(QStringLiteral("enrolled")).toBool(true)) {
+                            result.ok = false;
+                            result.status = QStringLiteral("publish_failed");
+                            result.error = object.value(QStringLiteral("reason"))
+                                               .toString(QStringLiteral("mẫu không dùng được"));
+                            hub->store().updateSpeakerStatus(req.sessionId,
+                                                             selection.sessionSpeakerId,
+                                                             QStringLiteral("publish_failed"),
+                                                             QString(), result.error);
+                            resp->results.append(result);
+                            continue;
+                        }
+
+                        result.ok = true;
+                        result.status = QStringLiteral("global_shared");
+                        result.segmentsEnrolled =
+                            quint32(object.value(QStringLiteral("segments_enrolled")).toInt());
+                        hub->store().updateSpeakerStatus(req.sessionId,
+                                                         selection.sessionSpeakerId,
+                                                         QStringLiteral("global_shared"),
+                                                         globalName, QString());
+                        hub->store().appendAudit(
+                            req.sessionId, QStringLiteral("publish_speaker"),
+                            QStringLiteral("{\"editor\":\"%1\",\"speaker\":\"%2\",\"name\":\"%3\"}")
+                                .arg(req.editorId, selection.sessionSpeakerId, globalName));
+                        resp->results.append(result);
+                    }
+                    return grpc::Status();
+                });
+        });
 
     // ---- BufferAdminService: this process, not the pipeline ----------------
 
