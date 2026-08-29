@@ -1,5 +1,7 @@
 #include "DiagnosticsWindow.h"
 
+#include "Theme.h"
+
 #include "LogControls.h"
 #include "core/SelfTest.h"
 #include "core/SessionController.h"
@@ -101,7 +103,7 @@ DiagnosticsWindow::DiagnosticsWindow(SessionController *controller, AppConfig *c
     : QWidget(parent, Qt::Window), m_controller(controller), m_config(config)
 {
     setWindowTitle(QStringLiteral("Nhật ký & Chẩn đoán"));
-    resize(1180, 720);
+    // Size last - see theme::sizeToContent() at the end of this constructor.
 
     auto *tabs = new QTabWidget(this);
     tabs->addTab(buildLogTab(), QStringLiteral("Nhật ký"));
@@ -127,6 +129,11 @@ DiagnosticsWindow::DiagnosticsWindow(SessionController *controller, AppConfig *c
     }
     LOG_DEBUG(applog::cat::Ui) << "diagnostics window opened with" << m_entries.size()
                                << "buffered log lines";
+
+    // Last, once every filter combo has its Vietnamese items in it.  At a
+    // fixed 1180 px the filter row fitted under MinGW and ran "Tạm giữ" off
+    // the right edge on RHEL, where the same labels measure wider.
+    theme::sizeToContent(this, QSize(1180, 720));
 }
 
 DiagnosticsWindow::~DiagnosticsWindow()
@@ -214,6 +221,10 @@ QWidget *DiagnosticsWindow::buildLogTab()
     filterRow->addSpacing(12);
     filterRow->addWidget(new QLabel(QStringLiteral("Thành phần:"), page));
     m_category = new QComboBox(page);
+    // Same reason as the level combo: report the widest item now, not on the
+    // first show, or the row is laid out against a width that is about to
+    // change.
+    m_category->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     m_category->addItem(QStringLiteral("(tất cả)"), QString());
     for (const QString &name : applog::cat::all())
         m_category->addItem(name, name);
@@ -238,7 +249,7 @@ QWidget *DiagnosticsWindow::buildLogTab()
     m_view->setReadOnly(true);
     m_view->setMaximumBlockCount(kMaxRenderedBlocks);
     m_view->setLineWrapMode(QPlainTextEdit::NoWrap);
-    m_view->setStyleSheet(QStringLiteral("font-family:monospace; font-size:11px;"));
+    m_view->setFont(theme::mono());
     layout->addWidget(m_view, 1);
 
     auto *footer = new QHBoxLayout();
@@ -247,7 +258,7 @@ QWidget *DiagnosticsWindow::buildLogTab()
     m_logPath->setWordWrap(true);
     footer->addWidget(m_logPath, 1);
     m_counters = new QLabel(page);
-    m_counters->setStyleSheet(QStringLiteral("font-family:monospace;"));
+    m_counters->setFont(theme::mono());
     footer->addWidget(m_counters);
     layout->addLayout(footer);
 
@@ -304,7 +315,7 @@ QWidget *DiagnosticsWindow::buildDiagnosticsTab()
     m_bufferView = new QPlainTextEdit(bufferBox);
     m_bufferView->setReadOnly(true);
     m_bufferView->setLineWrapMode(QPlainTextEdit::NoWrap);
-    m_bufferView->setStyleSheet(QStringLiteral("font-family:monospace; font-size:11px;"));
+    m_bufferView->setFont(theme::mono());
     m_bufferView->setPlainText(QStringLiteral("Chưa đọc."));
     // Sized from the font rather than in pixels: Vietnamese labels measure
     // wider on RHEL than on the MinGW kit, and a fixed height clips there.
@@ -348,7 +359,7 @@ QWidget *DiagnosticsWindow::buildDiagnosticsTab()
     m_report = new QPlainTextEdit(page);
     m_report->setReadOnly(true);
     m_report->setLineWrapMode(QPlainTextEdit::NoWrap);
-    m_report->setStyleSheet(QStringLiteral("font-family:monospace; font-size:11px;"));
+    m_report->setFont(theme::mono());
     layout->addWidget(m_report, 1);
 
     connect(m_recheckButton, &QPushButton::clicked, this, [this]() {

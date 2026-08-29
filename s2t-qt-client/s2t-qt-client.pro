@@ -81,6 +81,8 @@ SOURCES += \
     core/TranscriptModel.cpp \
     core/SessionController.cpp \
     core/SelfTest.cpp \
+    ui/Theme.cpp \
+    ui/StatusPanel.cpp \
     ui/TimelineView.cpp \
     ui/Dialogs.cpp \
     ui/ReviewPanel.cpp \
@@ -107,6 +109,8 @@ HEADERS += \
     core/TranscriptModel.h \
     core/SessionController.h \
     core/SelfTest.h \
+    ui/Theme.h \
+    ui/StatusPanel.h \
     ui/TimelineView.h \
     ui/Dialogs.h \
     ui/ReviewPanel.h \

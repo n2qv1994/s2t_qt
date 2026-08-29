@@ -916,6 +916,65 @@ còn kẹt trên socket:
 
 ---
 
+## 12b. Tầng giao diện
+
+Trước 2026-08-29 giao diện không có tầng nào cả: chín tệp `ui/` mỗi tệp tự viết
+`setStyleSheet("font-family:monospace; font-size:11px; border:1px solid #d0d0d0")`
+với mã màu chọn từng chỗ một. Hệ quả là cùng một loại widget có ba viền khác
+nhau tuỳ cửa sổ, và một desktop nền tối vẫn bị vẽ chữ xám đậm lên những hộp
+trắng cứng.
+
+`ui/Theme.{h,cpp}` giờ là **nơi duy nhất** quyết định ứng dụng trông thế nào.
+`main()` gọi `theme::apply(app)` ngay sau khi dựng `QApplication`, trước widget
+đầu tiên.
+
+| Thứ | Lấy từ đâu |
+|---|---|
+| Màu | `theme::color(Role)` — vai trò ngữ nghĩa (`Surface`, `Border`, `TextMuted`, `Danger`…), có sẵn hai bảng sáng/tối |
+| Màu làn người nói | `theme::laneColor(i)` |
+| Kiểu chữ đẳng khoảng | `theme::mono()` |
+| Biểu tượng | `theme::icon(Glyph)` — vẽ bằng `QPainter`, không có tệp ảnh |
+| Phần còn lại | style sheet toàn ứng dụng dựng trong `buildStyleSheet()` |
+
+Bốn ràng buộc, và chúng là lý do tầng này tồn tại:
+
+- **Không viết mã màu thẳng trong tệp widget.** Thêm một `Role` mới ở đây, để
+  bảng màu tối cũng nhận được nó.
+- **Không viết cỡ chữ theo pixel.** Cùng một nhãn tiếng Việt đo rộng hơn
+  khoảng 90 px trên bộ phông của RHEL so với bộ của MinGW; một cỡ pixel vừa
+  trên kit này thì tràn trên kit kia. Dùng bội số của phông desktop.
+- **Style là Fusion trên cả hai kit, cố ý.** Style Windows 11 bỏ qua phần lớn
+  style sheet và mang theo metric riêng, nên giữ nó nghĩa là cùng một chương
+  trình trông như hai sản phẩm khác nhau, và mọi lần kiểm tra layout trên kit
+  này không nói được gì về kit kia.
+- **Không có `.qrc`, và đó là chủ ý** (xem lý do ở phần giao thức: cả dự án
+  build được chỉ với Qt). Vì vậy biểu tượng được *vẽ*, còn mũi tên của
+  `QComboBox`/`QSpinBox` — thứ style sheet bắt buộc phải có ảnh mới vẽ được —
+  được ghi ra `AppDataLocation/ui/*.png` lúc khởi động rồi trỏ tới bằng đường
+  dẫn tuyệt đối. Nếu ghi không được thì phần luật đó bị bỏ và style nền tảng
+  tự vẽ mũi tên của nó: xấu hơn, không bao giờ trống.
+
+`theme::apply()` cũng cài một `QTranslator` không đọc tệp nào, chỉ trả lời cho
+ngữ cảnh `QPlatformTheme`. Đó là chỗ Qt lấy chữ cho nút chuẩn, nên nó dịch
+"Save"/"Cancel"/"Close" của **mọi** `QDialogButtonBox` và `QMessageBox` sang
+tiếng Việt một lần, kể cả những hộp thoại chưa viết.
+
+**Cửa sổ chính chia việc theo người dùng, không theo widget:**
+
+- `MainWindow::buildActions()` dựng mỗi `QAction` **một lần**; menu và thanh
+  công cụ cùng tham chiếu tới nó. Hai `QAction` làm cùng một việc là cách một
+  nút bật/tắt lệch pha với thứ nó điều khiển.
+- Thanh công cụ chỉ giữ những việc hay dùng giữa cuộc họp. Sáu cửa sổ công cụ
+  nằm ở menu — nhồi hết lên thanh công cụ chính là thứ từng đẩy nút "Cấu hình"
+  vào menu tràn "»" đúng lúc mất kết nối và người vận hành cần nó.
+- Trạng thái sống (micro, đèn kết nối) ở đầu phải thanh công cụ; danh tính và
+  mã phiên ở thanh dưới.
+- `ui/StatusPanel` tách số liệu theo *ai hỏi*: một con số lớn cho người vận
+  hành, bốn dòng chỉ ra thời gian đi đâu, còn phân vị và bộ đếm mô hình nằm sau
+  nút "Chi tiết kỹ thuật".
+
+---
+
 ## 13. Bản đồ mã nguồn
 
 | Thư mục | Nội dung |
@@ -927,7 +986,7 @@ còn kẹt trên socket:
 | `s2t-qt-server/backend/` | `InferenceBackend` (ranh giới), `TritonBackend` (KServe v2), `RivaBackend` (`nvidia.riva.asr`) |
 | `s2t-qt-client/core/` | `SessionController` (mặt tiền), `SessionWorker`, `StatePoller`, `RpcExecutor`, `AudioQueue`, `TranscriptModel`, `AppConfig`, `SelfTest` |
 | `s2t-qt-client/audio/` | `AudioCapture`, `MicDenoise` (điều khiển xvf3800), `WavIo`, `Transcode` (ffmpeg) |
-| `s2t-qt-client/ui/` | `TimelineView`, `Dialogs`, `ReviewPanel`, `EnrollDialog`, `TraceWindow`, `EvidenceWindow`, `DiagnosticsWindow`, `LogControls` (combo chế độ/mức log dùng chung) |
+| `s2t-qt-client/ui/` | `Theme` (mã màu, kiểu chữ, biểu tượng, style sheet toàn ứng dụng), `StatusPanel` (cột phải của cửa sổ chính), `TimelineView`, `Dialogs`, `ReviewPanel`, `EnrollDialog`, `TraceWindow`, `EvidenceWindow`, `DiagnosticsWindow`, `SubtitleWindow`, `LogControls` (combo chế độ/mức log dùng chung) |
 | `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp`, `s2t-qt-server.service`, `s2t-qt-server.conf.sample`, `interop_check.py` (grpc thật gọi vào server này), `restart_check.py` (SIGKILL giữa cuộc họp) |
 | `docs/` | `huong-dan-su-dung.md` (vận hành), `luong-hoat-dong.md` (tài liệu này), `danh-sach-api.md` (hợp đồng gRPC cho client bên ngoài), `slide.pdf` (mô tả kiến trúc gốc) |
 

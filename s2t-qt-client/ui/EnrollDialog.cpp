@@ -1,5 +1,7 @@
 #include "EnrollDialog.h"
 
+#include "Theme.h"
+
 #include "audio/AudioCapture.h"
 #include "audio/MediaDecode.h"
 #include "audio/WavIo.h"
@@ -26,17 +28,35 @@
 
 namespace {
 
+// The four status tones, taken from the shared palette instead of from four
+// hand-picked Material colours: those were chosen for a light desktop and
+// painted dark text on a light plate no matter what scheme the operator's
+// machine was running.
 QString statusStyle(const QString &kind)
 {
+    theme::Tone tone = theme::Tone::Neutral;
     if (kind == QLatin1String("ok"))
-        return QStringLiteral("background:#e8f5e9; color:#1b5e20; padding:8px;");
-    if (kind == QLatin1String("err"))
-        return QStringLiteral("background:#ffebee; color:#b71c1c; padding:8px;");
-    if (kind == QLatin1String("warn"))
-        return QStringLiteral("background:#fff8e1; color:#8d6e00; padding:8px;");
-    if (kind == QLatin1String("busy"))
-        return QStringLiteral("background:#e3f2fd; color:#0d47a1; padding:8px;");
-    return QString();
+        tone = theme::Tone::Ok;
+    else if (kind == QLatin1String("err"))
+        tone = theme::Tone::Danger;
+    else if (kind == QLatin1String("warn"))
+        tone = theme::Tone::Warn;
+    else if (kind == QLatin1String("busy"))
+        tone = theme::Tone::Info;
+    else
+        return QString();
+
+    theme::Role ink = theme::Role::TextMuted;
+    theme::Role plate = theme::Role::SurfaceSunken;
+    switch (tone) {
+    case theme::Tone::Ok:      ink = theme::Role::Ok;     plate = theme::Role::OkSoft;     break;
+    case theme::Tone::Warn:    ink = theme::Role::Warn;   plate = theme::Role::WarnSoft;   break;
+    case theme::Tone::Danger:  ink = theme::Role::Danger; plate = theme::Role::DangerSoft; break;
+    case theme::Tone::Info:    ink = theme::Role::Accent; plate = theme::Role::AccentSoft; break;
+    case theme::Tone::Neutral: break;
+    }
+    return QStringLiteral("background:%1; color:%2; border-radius:6px; padding:8px 10px;")
+        .arg(theme::color(plate).name(), theme::color(ink).name());
 }
 
 QString kindLabel(const QString &kind)
@@ -67,13 +87,14 @@ EnrollDialog::EnrollDialog(SessionController *controller, const QString &editorI
     : QDialog(parent), m_controller(controller), m_editorId(editorId)
 {
     setWindowTitle(QStringLiteral("Đăng ký giọng nói (CAM++)"));
-    resize(880, 720);
+    // Size last - see theme::sizeToContent() at the end of this constructor.
 
     auto *layout = new QVBoxLayout(this);
     auto *header = new QLabel(
         m_editorId.isEmpty()
-            ? QStringLiteral("<b style='color:#b71c1c;'>Chưa nhập tên người thao tác</b> — "
-                             "nhập ở thanh trên của cửa sổ chính trước khi ghi âm hoặc lưu.")
+            ? QStringLiteral("<b style='color:%1;'>Chưa nhập tên người thao tác</b> — "
+                             "nhập ở thanh dưới của cửa sổ chính trước khi ghi âm hoặc lưu.")
+                  .arg(theme::color(theme::Role::Danger).name())
             : QStringLiteral("Người thao tác: <b>%1</b>").arg(m_editorId.toHtmlEscaped()),
         this);
     header->setWordWrap(true);
@@ -81,7 +102,7 @@ EnrollDialog::EnrollDialog(SessionController *controller, const QString &editorI
 
     auto *tabs = new QTabWidget(this);
     tabs->addTab(buildEnrollTab(), QStringLiteral("Đăng ký giọng"));
-    tabs->addTab(buildSessionTab(), QStringLiteral("Speaker của phiên"));
+    tabs->addTab(buildSessionTab(), QStringLiteral("Người nói trong phiên"));
     layout->addWidget(tabs, 1);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
@@ -96,6 +117,8 @@ EnrollDialog::EnrollDialog(SessionController *controller, const QString &editorI
 
     loadScript();
     loadRoster();
+
+    theme::sizeToContent(this, QSize(880, 720));
 }
 
 EnrollDialog::~EnrollDialog()
@@ -122,14 +145,27 @@ QWidget *EnrollDialog::buildEnrollTab()
     layout->addWidget(m_allowBelow);
 
     m_belowPolicy = new QListWidget(page);
-    m_belowPolicy->setMaximumHeight(120);
+    // Sized from the font rather than in pixels, and hidden until it has
+    // something to say: an empty framed box in the middle of the dialog reads
+    // as a control that failed to load.
+    m_belowPolicy->setMaximumHeight(m_belowPolicy->fontMetrics().height() * 6);
     m_belowPolicy->setWordWrap(true);
+    m_belowPolicy->setVisible(false);
     layout->addWidget(m_belowPolicy);
 
     m_script = new QTextEdit(page);
     m_script->setReadOnly(true);
-    m_script->setPlainText(QStringLiteral("đang tải đoạn văn bản..."));
-    m_script->setStyleSheet(QStringLiteral("font-size:16px; background:#f5f5f5;"));
+    m_script->setPlainText(QStringLiteral("Đang tải đoạn văn bản..."));
+    {
+        // This is the text somebody reads aloud into a microphone, so it is
+        // set large - but as a multiple of the desktop font rather than at
+        // 16 px, which is a different physical size on each of the two kits.
+        QFont reading = m_script->font();
+        reading.setPointSizeF(qMax(11.0, reading.pointSizeF() * 1.55));
+        m_script->setFont(reading);
+    }
+    m_script->setStyleSheet(QStringLiteral("background:%1;")
+                                .arg(theme::color(theme::Role::SurfaceAlt).name()));
     layout->addWidget(m_script, 1);
 
     auto *form = new QFormLayout();
@@ -141,7 +177,9 @@ QWidget *EnrollDialog::buildEnrollTab()
 
     auto *row = new QHBoxLayout();
     m_recordButton = new QPushButton(QStringLiteral("Bắt đầu ghi âm"), page);
+    theme::markPrimary(m_recordButton);
     m_timerLabel = new QLabel(QStringLiteral("0.0s"), page);
+    m_timerLabel->setFont(theme::mono());
     m_fileButton = new QPushButton(QStringLiteral("Nạp từ tệp…"), page);
     m_retryButton = new QPushButton(QStringLiteral("Gửi lại bản ghi"), page);
     m_retryButton->setVisible(false);
@@ -159,7 +197,13 @@ QWidget *EnrollDialog::buildEnrollTab()
     auto *rosterGroup = new QGroupBox(QStringLiteral("Danh sách giọng toàn cục"), page);
     auto *rosterLayout = new QVBoxLayout(rosterGroup);
     auto *reload = new QPushButton(QStringLiteral("Tải lại"), rosterGroup);
-    rosterLayout->addWidget(reload);
+    // In a QVBoxLayout a button fills the whole width, which reads as the
+    // group's banner rather than as something to press.  Put it on its own row
+    // with the slack after it.
+    auto *reloadRow = new QHBoxLayout();
+    reloadRow->addWidget(reload);
+    reloadRow->addStretch(1);
+    rosterLayout->addLayout(reloadRow);
     m_roster = new QListWidget(rosterGroup);
     rosterLayout->addWidget(m_roster);
     layout->addWidget(rosterGroup);
@@ -280,7 +324,7 @@ void EnrollDialog::toggleRecording()
     }
     if (m_editorId.isEmpty()) {
         setStatus(QStringLiteral("err"),
-                  QStringLiteral("Vui lòng nhập tên người thao tác (thanh trên) trước khi ghi âm."));
+                  QStringLiteral("Vui lòng nhập tên người thao tác (thanh dưới cửa sổ chính) trước khi ghi âm."));
         return;
     }
 
@@ -485,6 +529,7 @@ void EnrollDialog::loadRoster()
                     m_belowPolicy->addItem(text);
                 }
             }
+            m_belowPolicy->setVisible(m_belowPolicy->count() > 0);
             if (!m_sessionInput->text().trimmed().isEmpty())
                 m_registryStatus->setText(
                     QStringLiteral("DB chung: %1 speaker, revision %2, sidecar %3")
@@ -598,7 +643,7 @@ void EnrollDialog::saveSelections()
     }
     if (m_editorId.isEmpty()) {
         m_saveResults->setText(
-            QStringLiteral("Vui lòng nhập tên người thao tác (thanh trên) trước khi lưu."));
+            QStringLiteral("Vui lòng nhập tên người thao tác (thanh dưới cửa sổ chính) trước khi lưu."));
         return;
     }
 

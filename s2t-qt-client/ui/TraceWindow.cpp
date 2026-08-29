@@ -1,5 +1,7 @@
 #include "TraceWindow.h"
 
+#include "Theme.h"
+
 #include "audio/WavIo.h"
 
 #include <QAudioOutput>
@@ -245,7 +247,7 @@ TraceWindow::TraceWindow(SessionController *controller, QWidget *parent)
     : QWidget(parent, Qt::Window), m_controller(controller)
 {
     setWindowTitle(QStringLiteral("Pipeline Trace Tester"));
-    resize(1100, 760);
+    // Size last - see theme::sizeToContent() at the end of this constructor.
 
     auto *layout = new QVBoxLayout(this);
     auto *top = new QHBoxLayout();
@@ -254,6 +256,9 @@ TraceWindow::TraceWindow(SessionController *controller, QWidget *parent)
     top->addWidget(m_session, 1);
 
     m_stage = new QComboBox(this);
+    // Report the widest stage name now rather than growing to it on the first
+    // show, which would happen after this window has sized itself.
+    m_stage->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     m_stage->addItem(QStringLiteral("tất cả stage"), QString());
     for (const char *stage : {"streaming_asr", "correction_asr", "correction_a2_merge",
                               "correction_itn_merge", "correction_merge", "itn", "system_update",
@@ -262,12 +267,12 @@ TraceWindow::TraceWindow(SessionController *controller, QWidget *parent)
     }
     top->addWidget(m_stage);
 
-    auto *load = new QPushButton(QStringLiteral("Load"), this);
-    auto *clear = new QPushButton(QStringLiteral("Clear"), this);
+    auto *load = new QPushButton(QStringLiteral("Tải"), this);
+    auto *clear = new QPushButton(QStringLiteral("Xoá"), this);
     top->addWidget(load);
     top->addWidget(clear);
 
-    m_follow = new QCheckBox(QStringLiteral("realtime"), this);
+    m_follow = new QCheckBox(QStringLiteral("Theo thời gian thực"), this);
     m_follow->setChecked(true);
     top->addWidget(m_follow);
 
@@ -286,7 +291,7 @@ TraceWindow::TraceWindow(SessionController *controller, QWidget *parent)
 
     m_cards = new QListWidget(this);
     m_cards->setWordWrap(true);
-    m_cards->setStyleSheet(QStringLiteral("font-family:monospace; font-size:11px;"));
+    m_cards->setFont(theme::mono());
     layout->addWidget(m_cards, 1);
 
     auto *bottom = new QHBoxLayout();
@@ -334,6 +339,8 @@ TraceWindow::TraceWindow(SessionController *controller, QWidget *parent)
     connect(stitch, &QPushButton::clicked, this, &TraceWindow::stitchSelectedSpans);
 
     syncMode();
+
+    theme::sizeToContent(this, QSize(1100, 760));
 }
 
 void TraceWindow::setSession(const QString &sessionId)
@@ -401,7 +408,7 @@ void TraceWindow::poll()
         ? m_controller->sessionId()
         : m_session->text().trimmed();
     if (sessionId.isEmpty()) {
-        m_status->setText(QStringLiteral("chưa có session"));
+        m_status->setText(QStringLiteral("Chưa chọn phiên nào."));
         return;
     }
     m_busyLive = true;
@@ -455,7 +462,7 @@ void TraceWindow::loadHistoryPage()
         ? m_controller->sessionId()
         : m_session->text().trimmed();
     if (sessionId.isEmpty()) {
-        m_status->setText(QStringLiteral("chưa có session"));
+        m_status->setText(QStringLiteral("Chưa chọn phiên nào."));
         return;
     }
     m_busyHistory = true;

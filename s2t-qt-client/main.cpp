@@ -6,6 +6,7 @@
 #include "core/SelfTest.h"
 #include "core/SessionTypes.h"
 #include "proto/AsrSession.h"
+#include "ui/Theme.h"
 
 #include <QApplication>
 #include <QMetaType>
@@ -115,6 +116,14 @@ int main(int argc, char *argv[])
 #endif
 
     QApplication app(argc, argv);
+
+    // Style, palette and the global sheet, before the first widget exists.
+    // Everything visual in this program is decided in ui/Theme.cpp; nothing
+    // below here should be picking colours or font sizes of its own.
+    theme::apply(app);
+    LOG_INFO(applog::cat::Ui) << "theme applied - scheme="
+                              << (theme::isDark() ? "dark" : "light")
+                              << "- mono face:" << theme::monoFamily();
 
     // Everything that crosses a thread boundary through a queued signal or a
     // queued invokeMethod has to be a registered metatype, or Qt drops the

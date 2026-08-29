@@ -71,6 +71,12 @@ private:
     void paintLane(QPainter &painter, const Lane &lane, const QRect &band, double scrollX,
                    double visibleStartSec, double visibleEndSec);
     double lockedX(const QString &slotKey, double baseX, double minX, double width);
+    // How wide the speaker column has to be for the names actually in this
+    // session.  A constant fitted one font stack: 128 px held "Nguyễn Văn An"
+    // under MinGW and elided it to "Nguyễn Vă..." on RHEL, where the same
+    // string measures wider - and two people whose names share a prefix then
+    // become indistinguishable in the one column that identifies them.
+    int gutterWidth() const;
     void pruneWordPositions();
     void noteUserInteraction();
 

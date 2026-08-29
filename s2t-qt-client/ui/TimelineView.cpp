@@ -1,5 +1,7 @@
 #include "TimelineView.h"
 
+#include "Theme.h"
+
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -18,19 +20,37 @@ namespace {
 // under its own audio instead of shifting individual labels off their
 // timestamps to make room.
 const double kPxPerSec = 520.0;
-const int kGutterWidth = 128;
-const int kWaveHeight = 118;
-const int kRulerHeight = 30;
-const int kLaneHeight = 96;
+// Floor for the speaker column, not its width - see TimelineView::gutterWidth().
+const int kGutterMinWidth = 128;
+// Dot, the gap after it, and the padding either side of the label.
+const int kGutterPadding = 34;
+// The waveform is context and the lanes are the content, so the waveform gets
+// the smaller share.  At 118 px it took a seventh of the window to say
+// "somebody is talking", and the two rows of transcript underneath it - the
+// reason the window exists - had to share what was left.
+const int kWaveHeight = 76;
+const int kRulerHeight = 26;
+// One lane was 96 px tall to hold a chip about 30 px tall.  62 keeps the rows
+// separable without spending half the window on air; the chips are centred in
+// it rather than pinned to the top.
+const int kLaneHeight = 62;
 const double kFollowEase = 0.35;
 const double kFollowMaxStepPx = 180.0;
 const double kOverscanSec = 2.0;
 const int kWordPositionCacheMax = 8000;
 
-const QColor kLaneColors[4] = {
-    QColor(0x2e, 0xa6, 0x3e), QColor(0x1b, 0x7c, 0xf0),
-    QColor(0xe6, 0x4e, 0x4e), QColor(0x8b, 0x61, 0xd8),
-};
+// Type sizes are stated as a multiple of whatever the desktop font is rather
+// than in points.  The same Vietnamese word measures about 90 px wider under
+// the RHEL font stack than under MinGW, so a fixed 11.5 pt word chip is
+// legible on one kit and cramped on the other.
+QFont scaled(const QFont &base, double factor, bool bold)
+{
+    QFont font = base;
+    const double point = base.pointSizeF() > 0 ? base.pointSizeF() : 9.0;
+    font.setPointSizeF(qMax(6.0, point * factor));
+    font.setBold(bold);
+    return font;
+}
 
 QString formatClock(double seconds)
 {
@@ -59,7 +79,7 @@ TimelineView::TimelineView(QWidget *parent) : QAbstractScrollArea(parent)
     setFocusPolicy(Qt::StrongFocus);
     viewport()->setAutoFillBackground(true);
     QPalette palette = viewport()->palette();
-    palette.setColor(QPalette::Window, QColor(0xf8, 0xf8, 0xf8));
+    palette.setColor(QPalette::Window, theme::color(theme::Role::Surface));
     viewport()->setPalette(palette);
     horizontalScrollBar()->setSingleStep(40);
     verticalScrollBar()->setSingleStep(24);
@@ -68,6 +88,21 @@ TimelineView::TimelineView(QWidget *parent) : QAbstractScrollArea(parent)
             noteUserInteraction();
         viewport()->update();
     });
+}
+
+int TimelineView::gutterWidth() const
+{
+    int widest = 0;
+    if (m_model) {
+        const QFontMetrics metrics(scaled(font(), 1.1, true));
+        for (const Lane &lane : m_model->lanes())
+            widest = qMax(widest, metrics.horizontalAdvance(lane.label));
+    }
+    // Clamped to a third of the view: a pasted-in name of unreasonable length
+    // must not squeeze the transcript itself off the screen.  Past that point
+    // the label still elides, which is the right answer for one outlier.
+    return qBound(kGutterMinWidth, widest + kGutterPadding,
+                  qMax(kGutterMinWidth, viewport()->width() / 3));
 }
 
 void TimelineView::setModel(TranscriptModel *model)
@@ -116,7 +151,7 @@ void TimelineView::jumpToLatestText()
         return;
     const double target = m_model->latestTextEndSec() > 0.0 ? m_model->latestTextEndSec()
                                                             : m_model->sourceSeenSec();
-    const double trackWidth = qMax(120, viewport()->width() - kGutterWidth);
+    const double trackWidth = qMax(120, viewport()->width() - gutterWidth());
     const double desired = target * kPxPerSec - trackWidth * 0.72;
     m_programmaticScroll = true;
     horizontalScrollBar()->setValue(int(qBound(0.0, desired, double(horizontalScrollBar()->maximum()))));
@@ -142,7 +177,7 @@ double TimelineView::contentWidthPx() const
 
 void TimelineView::updateScrollRanges()
 {
-    const int trackWidth = qMax(120, viewport()->width() - kGutterWidth);
+    const int trackWidth = qMax(120, viewport()->width() - gutterWidth());
     const int maxH = qMax(0, int(contentWidthPx()) - trackWidth);
     horizontalScrollBar()->setRange(0, maxH);
     horizontalScrollBar()->setPageStep(trackWidth);
@@ -167,7 +202,7 @@ void TimelineView::applyFollow()
 {
     if (!m_follow || !m_model)
         return;
-    const double trackWidth = qMax(120, viewport()->width() - kGutterWidth);
+    const double trackWidth = qMax(120, viewport()->width() - gutterWidth());
     const double target = qBound(0.0, focusSeconds() * kPxPerSec, contentWidthPx());
     const double desired = qBound(0.0, target - trackWidth * 0.72,
                                   double(horizontalScrollBar()->maximum()));
@@ -267,9 +302,9 @@ void TimelineView::pruneWordPositions()
 
 void TimelineView::paintWaveform(QPainter &painter, const QRect &band, double scrollX) const
 {
-    painter.fillRect(band, QColor(0xf3, 0xf3, 0xf3));
+    painter.fillRect(band, theme::color(theme::Role::SurfaceSunken));
     const double mid = band.top() + band.height() * 0.5;
-    painter.setPen(QColor(0xb0, 0xb0, 0xb0));
+    painter.setPen(theme::color(theme::Role::Border));
     painter.drawLine(QPointF(band.left(), mid), QPointF(band.right(), mid));
 
     if (!m_model)
@@ -288,7 +323,7 @@ void TimelineView::paintWaveform(QPainter &painter, const QRect &band, double sc
     if (seen > 0.0 && trace.size() * stepSec < seen * 0.98)
         stepSec = seen / double(qMax(1, trace.size()));
 
-    const double amplitude = band.height() * 0.42;
+    const double amplitude = band.height() * 0.38;
     QPainterPath path;
     bool started = false;
     QList<QPointF> lower;
@@ -313,27 +348,42 @@ void TimelineView::paintWaveform(QPainter &painter, const QRect &band, double sc
     for (const QPointF &point : lower)
         path.lineTo(point);
     path.closeSubpath();
-    painter.fillPath(path, QColor(95, 95, 95, 174));
+    // Filled in the accent rather than in grey: the waveform is the one thing
+    // on this band that carries information, and a neutral fill made it read
+    // as chrome.
+    QColor fill = theme::color(theme::Role::Accent);
+    fill.setAlpha(theme::isDark() ? 110 : 70);
+    painter.fillPath(path, fill);
+    QColor edge = theme::color(theme::Role::Accent);
+    edge.setAlpha(170);
+    painter.strokePath(path, QPen(edge, 1.0));
 }
 
 void TimelineView::paintRuler(QPainter &painter, const QRect &band, double scrollX) const
 {
-    painter.fillRect(band, QColor(0xfa, 0xfa, 0xfa));
-    painter.setPen(QColor(0xd7, 0xd7, 0xd7));
+    painter.fillRect(band, theme::color(theme::Role::SurfaceAlt));
+    painter.setPen(theme::color(theme::Role::Border));
     painter.drawLine(band.bottomLeft(), band.bottomRight());
 
-    QFont font = painter.font();
-    font.setPointSizeF(8.5);
-    font.setBold(true);
-    painter.setFont(font);
+    painter.setFont(scaled(painter.font(), 0.92, true));
 
     const int firstTick = int(std::floor(scrollX / kPxPerSec));
     const int lastTick = int(std::ceil((scrollX + band.width()) / kPxPerSec));
+    const QColor major = theme::color(theme::Role::BorderStrong);
+    QColor minor = theme::color(theme::Role::Border);
+    minor.setAlpha(140);
     for (int tick = qMax(0, firstTick); tick <= lastTick; ++tick) {
         const double x = band.left() + tick * kPxPerSec - scrollX;
-        painter.setPen(QColor(0xd7, 0xd7, 0xd7));
+        // Quarter-second marks, so a two-second gap between words can be
+        // judged by eye instead of counted off the labels.
+        painter.setPen(minor);
+        for (int sub = 1; sub < 4; ++sub) {
+            const double subX = x + sub * kPxPerSec / 4.0;
+            painter.drawLine(QPointF(subX, band.bottom() - 5), QPointF(subX, band.bottom()));
+        }
+        painter.setPen(major);
         painter.drawLine(QPointF(x, band.top()), QPointF(x, band.bottom()));
-        painter.setPen(QColor(0x55, 0x55, 0x55));
+        painter.setPen(theme::color(theme::Role::TextMuted));
         painter.drawText(QPointF(x + 6, band.center().y() + 4), formatClock(tick));
     }
 }
@@ -341,19 +391,22 @@ void TimelineView::paintRuler(QPainter &painter, const QRect &band, double scrol
 void TimelineView::paintLane(QPainter &painter, const Lane &lane, const QRect &band, double scrollX,
                              double visibleStartSec, double visibleEndSec)
 {
-    painter.fillRect(band, QColor(0xff, 0xff, 0xff));
-    painter.setPen(QColor(0xe4, 0xe4, 0xe4));
+    // Alternating bands, so two speakers talking over each other stay visually
+    // separate even where neither row has a word under the cursor.
+    painter.fillRect(band, theme::color(lane.colorIndex % 2 == 0 ? theme::Role::Surface
+                                                                 : theme::Role::SurfaceAlt));
+    painter.setPen(theme::color(theme::Role::Border));
     painter.drawLine(band.bottomLeft(), band.bottomRight());
 
     // Baseline the words sit on, so an empty stretch still reads as "this
     // speaker's row continues here" rather than as a gap in the layout.
-    painter.setPen(QPen(QColor(120, 120, 120, 90), 1, Qt::DashLine));
+    QColor guide = theme::laneColor(lane.colorIndex);
+    guide.setAlpha(70);
+    painter.setPen(QPen(guide, 1, Qt::DashLine));
     const double baseline = band.top() + band.height() * 0.62;
     painter.drawLine(QPointF(band.left(), baseline), QPointF(band.right(), baseline));
 
-    QFont wordFont = painter.font();
-    wordFont.setPointSizeF(11.5);
-    wordFont.setBold(true);
+    const QFont wordFont = scaled(painter.font(), 1.25, true);
     const QFontMetricsF metrics(wordFont);
 
     double lastRight = -1e9;
@@ -382,15 +435,23 @@ void TimelineView::paintLane(QPainter &painter, const Lane &lane, const QRect &b
             continue;
 
         const double height = metrics.height() + 8.0;
-        const QRectF rect(screenX, band.top() + 10.0, width, height);
+        // Centred on the lane's baseline rather than pinned 10 px under its
+        // top edge: the chip and the dashed guide then read as one row, and
+        // the lane can be made shorter without the words drifting to its top.
+        const QRectF rect(screenX, baseline - height * 0.72, width, height);
 
-        QColor background = QColor(255, 255, 255, 235);
-        QColor border(0, 0, 0, 40);
-        QColor text(0x1f, 0x1f, 0x1f);
+        // A low-confidence word used to be a solid red block with near-black
+        // text on it, which is both hard to read and shouts louder than the
+        // word itself.  Tinted fill plus a coloured border says the same thing
+        // and leaves the word legible - which matters, because the point of
+        // flagging it is that somebody has to read it and decide.
+        QColor background = theme::color(theme::Role::Surface);
+        QColor border = theme::color(theme::Role::Border);
+        QColor text = theme::color(theme::Role::Text);
         if (word.low) {
-            background = QColor(255, 78, 78, 215);
-            border = QColor(0xb3, 0x33, 0x33);
-            text = QColor(0x25, 0x00, 0x00);
+            background = theme::color(theme::Role::DangerSoft);
+            border = theme::color(theme::Role::Danger);
+            text = theme::color(theme::Role::Danger);
         }
         painter.setPen(QPen(border, 1, word.provisional ? Qt::DashLine : Qt::SolidLine));
         painter.setBrush(background);
@@ -401,7 +462,7 @@ void TimelineView::paintLane(QPainter &painter, const Lane &lane, const QRect &b
         const bool active = m_activeCentreSec >= word.startSec - 0.03
             && m_activeCentreSec <= word.endSec + 0.03;
         if (active) {
-            painter.setPen(QPen(QColor(20, 90, 220), 2));
+            painter.setPen(QPen(theme::color(theme::Role::Accent), 2));
             painter.setBrush(Qt::NoBrush);
             painter.drawRoundedRect(rect, 5, 5);
         }
@@ -413,10 +474,8 @@ void TimelineView::paintLane(QPainter &painter, const Lane &lane, const QRect &b
         // The percentage is a low-confidence warning, not a second line under
         // every streamed word.
         if (word.low) {
-            QFont small = wordFont;
-            small.setPointSizeF(7.5);
-            painter.setFont(small);
-            painter.setPen(QColor(0x2a, 0x00, 0x00));
+            painter.setFont(scaled(wordFont, 0.65, false));
+            painter.setPen(theme::color(theme::Role::Danger));
             painter.drawText(QRectF(rect.left(), rect.bottom(), rect.width(), 12),
                              Qt::AlignCenter,
                              QStringLiteral("%1%").arg(int(std::lround(word.conf * 100.0))));
@@ -445,7 +504,7 @@ void TimelineView::paintEvent(QPaintEvent *event)
     const int height = viewport()->height();
     const double scrollX = horizontalScrollBar()->value();
     const int scrollY = verticalScrollBar()->value();
-    const QRect trackRect(kGutterWidth, 0, qMax(0, width - kGutterWidth), height);
+    const QRect trackRect(gutterWidth(), 0, qMax(0, width - gutterWidth()), height);
 
     const double visibleStartSec = scrollX / kPxPerSec;
     const double visibleEndSec = (scrollX + trackRect.width()) / kPxPerSec;
@@ -488,6 +547,15 @@ void TimelineView::paintEvent(QPaintEvent *event)
             paintLane(painter, lanes.at(i), QRect(laneArea.left(), y, laneArea.width(), kLaneHeight),
                       scrollX, visibleStartSec, visibleEndSec);
         }
+        // Below the last speaker there are no more lanes, and leaving that as
+        // the same white as a lane made the window look like one empty row
+        // running to the bottom of the screen.  Sinking it says where the
+        // transcript ends.
+        const int bottom = laneTop + lanes.size() * kLaneHeight - scrollY;
+        if (!lanes.isEmpty() && bottom < height) {
+            painter.fillRect(QRect(laneArea.left(), bottom, laneArea.width(), height - bottom),
+                             theme::color(theme::Role::SurfaceSunken));
+        }
     }
     painter.restore();
 
@@ -495,25 +563,29 @@ void TimelineView::paintEvent(QPaintEvent *event)
     painter.save();
     painter.setClipRect(trackRect);
     if (m_model) {
+        // Two heads, and they mean different things: where the audio has got
+        // to, and which word is being looked at.  Giving them the same weight
+        // in different colours made the pair read as one decoration, so the
+        // audio head is now a quiet hairline and the cursor keeps the accent.
         const double audioX = trackRect.left() + m_model->sourceSeenSec() * kPxPerSec - scrollX;
-        painter.setPen(QPen(QColor(0, 0, 0, 224), 2));
+        QColor head = theme::color(theme::Role::Text);
+        head.setAlpha(150);
+        painter.setPen(QPen(head, 1.5));
         painter.drawLine(QPointF(audioX, 0), QPointF(audioX, height));
         if (m_activeCentreSec >= 0.0) {
             const double textX = trackRect.left() + m_activeCentreSec * kPxPerSec - scrollX;
-            painter.setPen(QPen(QColor(255, 36, 36, 250), 3));
+            painter.setPen(QPen(theme::color(theme::Role::Accent), 2.5));
             painter.drawLine(QPointF(textX, 0), QPointF(textX, height));
         }
     }
     painter.restore();
 
     // Gutter last: it is pinned and must cover whatever scrolled under it.
-    painter.fillRect(QRect(0, 0, kGutterWidth, height), QColor(0xf7, 0xf7, 0xf7));
-    painter.setPen(QColor(0xd0, 0xd0, 0xd0));
-    painter.drawLine(kGutterWidth - 1, 0, kGutterWidth - 1, height);
+    painter.fillRect(QRect(0, 0, gutterWidth(), height), theme::color(theme::Role::SurfaceAlt));
+    painter.setPen(theme::color(theme::Role::Border));
+    painter.drawLine(gutterWidth() - 1, 0, gutterWidth() - 1, height);
 
-    QFont laneFont = painter.font();
-    laneFont.setPointSizeF(10.5);
-    laneFont.setBold(true);
+    const QFont laneFont = scaled(painter.font(), 1.1, true);
     painter.setFont(laneFont);
     if (m_model) {
         const QList<Lane> &lanes = m_model->lanes();
@@ -522,28 +594,41 @@ void TimelineView::paintEvent(QPaintEvent *event)
             if (y + kLaneHeight < laneTop || y > height)
                 continue;
             const Lane &lane = lanes.at(i);
-            const QColor color = kLaneColors[lane.colorIndex % 4];
-            painter.setPen(color);
-            painter.drawText(QRect(10, y, kGutterWidth - 16, kLaneHeight),
-                             Qt::AlignLeft | Qt::AlignVCenter,
-                             QStringLiteral("● ") + lane.label);
+            const QColor color = theme::laneColor(lane.colorIndex);
+            // A drawn dot rather than "● " in the string: the bullet glyph is
+            // missing from some of the fonts RHEL falls back to, and a missing
+            // glyph box next to every speaker name is worse than no marker.
+            const QRectF dot(10, y + kLaneHeight / 2.0 - 4, 8, 8);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(color);
+            painter.drawEllipse(dot);
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(theme::color(theme::Role::Text));
+            const QRect labelRect(int(dot.right()) + 7, y, gutterWidth() - int(dot.right()) - 13,
+                                  kLaneHeight);
+            painter.drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter,
+                             QFontMetricsF(laneFont)
+                                 .elidedText(lane.label, Qt::ElideRight, labelRect.width()));
         }
         if (lanes.isEmpty()) {
-            painter.setPen(QColor(0x8a, 0x8a, 0x8a));
-            painter.drawText(QRect(0, laneTop, width, 60), Qt::AlignCenter,
-                             QStringLiteral("— chưa có dữ liệu —"));
+            painter.setPen(theme::color(theme::Role::TextFaint));
+            painter.setFont(scaled(painter.font(), 1.0, false));
+            painter.drawText(QRect(gutterWidth(), laneTop, width - gutterWidth(), 90),
+                             Qt::AlignCenter | Qt::TextWordWrap,
+                             QStringLiteral("Chưa có bản chép nào.\n"
+                                            "Bấm \"Ghi âm từ micro\" hoặc \"Chạy tệp audio\" "
+                                            "để bắt đầu."));
         }
     }
 
     // Time under the play head, in the gutter, where it does not collide with
     // the words themselves.
     if (m_model) {
-        painter.setPen(QColor(0x33, 0x33, 0x33));
-        QFont small = laneFont;
-        small.setPointSizeF(9.0);
-        small.setBold(false);
-        painter.setFont(small);
-        painter.drawText(QRect(8, kWaveHeight, kGutterWidth - 12, kRulerHeight),
+        painter.setPen(theme::color(theme::Role::TextMuted));
+        // Monospace: this counter ticks five times a second and a proportional
+        // face makes the whole string shuffle sideways on every digit change.
+        painter.setFont(theme::mono(-0.5));
+        painter.drawText(QRect(8, kWaveHeight, gutterWidth() - 12, kRulerHeight),
                          Qt::AlignLeft | Qt::AlignVCenter,
                          formatPrecise(m_model->sourceSeenSec()));
     }

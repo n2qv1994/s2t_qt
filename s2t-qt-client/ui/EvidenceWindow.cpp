@@ -1,5 +1,7 @@
 #include "EvidenceWindow.h"
 
+#include "Theme.h"
+
 #include "audio/WavIo.h"
 
 #include <QAudioOutput>
@@ -97,7 +99,7 @@ EvidenceWindow::EvidenceWindow(SessionController *controller, QWidget *parent)
     : QWidget(parent, Qt::Window), m_controller(controller)
 {
     setWindowTitle(QStringLiteral("Pipeline Evidence / Nghiệm thu"));
-    resize(1200, 860);
+    // Size last - see theme::sizeToContent() at the end of this constructor.
 
     auto *outer = new QVBoxLayout(this);
     auto *top = new QHBoxLayout();
@@ -297,6 +299,8 @@ EvidenceWindow::EvidenceWindow(SessionController *controller, QWidget *parent)
     refreshDevice();
     refreshModels();
     refreshLatency();
+
+    theme::sizeToContent(this, QSize(1200, 860));
 }
 
 void EvidenceWindow::setSession(const QString &sessionId)
@@ -355,7 +359,8 @@ void EvidenceWindow::refreshDevice()
             .arg(telemetry.statePollMaxMs, 0, 'f', 0)
             .arg(telemetry.pollError.isEmpty()
                      ? QString()
-                     : QStringLiteral("<br><span style='color:#b71c1c;'>poll: %1</span>")
+                     : QStringLiteral("<br><span style='color:%1;'>poll: %2</span>")
+                           .arg(theme::color(theme::Role::Danger).name())
                            .arg(telemetry.pollError))
             .arg(history.isEmpty()
                      ? QString()
@@ -373,7 +378,8 @@ void EvidenceWindow::refreshModels()
         [this](const grpc::Status &status, const asr::ModelStatusResponse &response) {
             if (!status.ok()) {
                 m_modelSummary->setText(
-                    QStringLiteral("<span style='color:#b71c1c;'>Không đọc được từ Triton: %1</span>")
+                    QStringLiteral("<span style='color:%1;'>Không đọc được từ Triton: %2</span>")
+                        .arg(theme::color(theme::Role::Danger).name())
                         .arg(status.toString()));
                 m_models->setRowCount(0);
                 return;
@@ -390,8 +396,8 @@ void EvidenceWindow::refreshModels()
                                             entry.version.isEmpty() ? QStringLiteral("-")
                                                                     : entry.version));
                 auto *state = new QTableWidgetItem(entry.state);
-                state->setForeground(isReady ? QColor(0x1b, 0x5e, 0x20)
-                                             : QColor(0xb7, 0x1c, 0x1c));
+                state->setForeground(theme::color(isReady ? theme::Role::Ok
+                                                          : theme::Role::Danger));
                 m_models->setItem(i, 2, state);
             }
             m_modelSummary->setText(QStringLiteral("%1/%2 READY")
@@ -429,7 +435,7 @@ void EvidenceWindow::refreshLatency()
         const bool bad = sample.localQueueSec > 1.0 || sample.serverQueueSec > 1.0;
         const bool warn = sample.localQueueSec > 0.3 || sample.serverQueueSec > 0.3;
         if (bad || warn) {
-            const QColor color = bad ? QColor(0xb7, 0x1c, 0x1c) : QColor(0x8d, 0x6e, 0x00);
+            const QColor color = theme::color(bad ? theme::Role::Danger : theme::Role::Warn);
             localQueue->setForeground(color);
             serverQueue->setForeground(color);
         }
@@ -639,8 +645,8 @@ void EvidenceWindow::onDenoiseAbReady(const mic::DenoiseAbResult &result)
             : QStringLiteral("Chưa xác định được trạng thái lọc nhiễu TRƯỚC khi ghi mẫu "
                              "(ứng dụng mới khởi động, chưa có thao tác nào) - KHÔNG khôi phục.");
         m_denoiseRestore->setText(
-            QStringLiteral("<span style='color:#b71c1c;'>%1 Sau khi ghi mẫu, lọc nhiễu hiện "
-                           "đang: <b>%2</b>. Tự kiểm tra lại nếu cần đúng trạng thái ban đầu.</span>")
-                .arg(message, result.finalState));
+            QStringLiteral("<span style='color:%1;'>%2 Sau khi ghi mẫu, lọc nhiễu hiện "
+                           "đang: <b>%3</b>. Tự kiểm tra lại nếu cần đúng trạng thái ban đầu.</span>")
+                .arg(theme::color(theme::Role::Danger).name(), message, result.finalState));
     }
 }

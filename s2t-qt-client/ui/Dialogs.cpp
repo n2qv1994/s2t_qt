@@ -1,5 +1,7 @@
 #include "Dialogs.h"
 
+#include "Theme.h"
+
 #include "LogControls.h"
 #include "audio/AudioCapture.h"
 #include "core/Logger.h"
@@ -75,7 +77,7 @@ StartSessionDialog::StartSessionDialog(SessionController *controller, Purpose pu
 {
     setWindowTitle(purpose == Purpose::Microphone ? QStringLiteral("Bắt đầu ghi âm")
                                                   : QStringLiteral("Chạy tệp audio"));
-    resize(620, 560);
+    // Size last - see theme::sizeToContent() at the end of this constructor.
 
     auto *layout = new QVBoxLayout(this);
     auto *intro = new QLabel(
@@ -139,9 +141,13 @@ StartSessionDialog::StartSessionDialog(SessionController *controller, Purpose pu
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     m_confirm = buttons->addButton(purpose == Purpose::Microphone
-                                       ? QStringLiteral("BẮT ĐẦU GHI ÂM")
-                                       : QStringLiteral("CHỌN TỆP AUDIO"),
+                                       ? QStringLiteral("Bắt đầu ghi âm")
+                                       : QStringLiteral("Chọn tệp audio"),
                                    QDialogButtonBox::AcceptRole);
+    // A button added to a box by hand is not made default automatically, and
+    // this is the one thing the dialog exists to do.
+    m_confirm->setDefault(true);
+    theme::markPrimary(m_confirm);
     layout->addWidget(buttons);
 
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
@@ -152,6 +158,8 @@ StartSessionDialog::StartSessionDialog(SessionController *controller, Purpose pu
 
     reloadRoster();
     updateSummary();
+
+    theme::sizeToContent(this, QSize(620, 560));
 }
 
 void StartSessionDialog::reloadRoster()
@@ -312,7 +320,7 @@ SentenceEditDialog::SentenceEditDialog(SessionController *controller, const asr:
       m_commitBoundarySec(commitBoundarySec)
 {
     setWindowTitle(QStringLiteral("Sửa câu"));
-    resize(560, 320);
+    // Size last - see theme::sizeToContent() at the end of this constructor.
 
     auto *layout = new QVBoxLayout(this);
     auto *header = new QLabel(
@@ -337,6 +345,8 @@ SentenceEditDialog::SentenceEditDialog(SessionController *controller, const asr:
     connect(m_tokens, &QListWidget::itemChanged, this, &SentenceEditDialog::commitItem);
 
     rebuild();
+
+    theme::sizeToContent(this, QSize(560, 320));
 }
 
 void SentenceEditDialog::rebuild()
@@ -391,7 +401,7 @@ void SentenceEditDialog::commitItem(QListWidgetItem *item)
         return;
     }
     if (m_editorId.isEmpty()) {
-        m_info->setText(QStringLiteral("Cần nhập tên người thao tác (thanh trên) trước khi lưu."));
+        m_info->setText(QStringLiteral("Cần nhập tên người thao tác (thanh dưới cửa sổ chính) trước khi lưu."));
         m_rebuilding = true;
         item->setText(original);
         m_rebuilding = false;
@@ -462,7 +472,7 @@ AuditHistoryDialog::AuditHistoryDialog(SessionController *controller, const QStr
     : QDialog(parent), m_controller(controller)
 {
     setWindowTitle(QStringLiteral("Lịch sử hiệu chỉnh"));
-    resize(760, 520);
+    // Size last - see theme::sizeToContent() at the end of this constructor.
 
     auto *layout = new QVBoxLayout(this);
     auto *top = new QHBoxLayout();
@@ -487,6 +497,8 @@ AuditHistoryDialog::AuditHistoryDialog(SessionController *controller, const QStr
 
     if (!sessionId.isEmpty())
         reload();
+
+    theme::sizeToContent(this, QSize(760, 520));
 }
 
 void AuditHistoryDialog::reload()
@@ -580,7 +592,7 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
 
     m_server = new QLineEdit(config->serverTarget, this);
     m_server->setPlaceholderText(QStringLiteral("192.168.1.47:8800"));
-    form->addRow(QStringLiteral("Server buffer (host:port)"), m_server);
+    form->addRow(QStringLiteral("Máy chủ đệm (host:port)"), m_server);
 
     auto *tokenRow = new QHBoxLayout();
     m_token = new QLineEdit(config->apiToken, this);
@@ -596,7 +608,7 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
         m_device->addItem(device.description(), device.id());
     const int index = m_device->findData(config->inputDeviceId);
     m_device->setCurrentIndex(index >= 0 ? index : 0);
-    form->addRow(QStringLiteral("Microphone"), m_device);
+    form->addRow(QStringLiteral("Micro"), m_device);
 
     m_expectedName = new QLineEdit(config->expectedDeviceName, this);
     m_expectedName->setPlaceholderText(QStringLiteral("Speaker"));
@@ -609,7 +621,7 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
     m_sampleRate->setRange(8000, 192000);
     m_sampleRate->setSingleStep(1000);
     m_sampleRate->setValue(config->sampleRate);
-    form->addRow(QStringLiteral("Sample rate"), m_sampleRate);
+    form->addRow(QStringLiteral("Tần số lấy mẫu"), m_sampleRate);
 
     m_channels = new QSpinBox(this);
     m_channels->setRange(1, 2);
@@ -650,11 +662,11 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
     // what a deployed workstation needs when something has to be sent back.
     m_logMode = new QComboBox(this);
     logcontrols::fillModes(m_logMode, config->logMode);
-    form->addRow(QStringLiteral("Chế độ log"), m_logMode);
+    form->addRow(QStringLiteral("Chế độ nhật ký"), m_logMode);
 
     m_logLevel = new QComboBox(this);
     logcontrols::fillLevels(m_logLevel, config->logLevel);
-    form->addRow(QStringLiteral("Mức log"), m_logLevel);
+    form->addRow(QStringLiteral("Mức nhật ký"), m_logLevel);
 
     m_logPath = new QLabel(this);
     m_logPath->setWordWrap(true);
@@ -679,10 +691,9 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
     // RHEL font stack than under MinGW.  620x400 fits Windows and cut the hint
     // in half there.  Keep the old numbers as a floor so the kit that already
     // fitted does not change, and never open larger than the screen.
-    QSize target = sizeHint().expandedTo(QSize(620, 400));
-    if (const QScreen *display = screen())
-        target = target.boundedTo(display->availableGeometry().size());
-    resize(target);
+    // This is exactly what theme::sizeToContent() does, so use it - and get
+    // the RHEL "screen is 0x0" guard with it.
+    theme::sizeToContent(this, QSize(620, 400));
 }
 
 void SettingsDialog::updateLogHint()

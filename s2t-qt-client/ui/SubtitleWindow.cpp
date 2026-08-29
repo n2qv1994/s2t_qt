@@ -158,7 +158,10 @@ SubtitleWindow::SubtitleWindow(SessionController *controller, AppConfig *config,
     m_audioOnly = new QLabel(QStringLiteral("Nguồn chỉ có âm thanh —\nphụ đề hiện ở khung bên phải."),
                              m_stage);
     m_audioOnly->setAlignment(Qt::AlignCenter);
-    m_audioOnly->setStyleSheet(QStringLiteral("background:#101014;color:#8a8a95;"));
+    // Deliberately dark whatever the desktop scheme is: this plate stands in
+    // for the video surface, and a white rectangle where the picture should be
+    // is read as a fault rather than as "this source has no picture".
+    m_audioOnly->setStyleSheet(QStringLiteral("background:#101014; color:#8a8a95;"));
     m_stage->addWidget(m_video);
     m_stage->addWidget(m_audioOnly);
     m_stage->setCurrentWidget(m_audioOnly);

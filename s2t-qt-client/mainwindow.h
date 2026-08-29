@@ -24,6 +24,7 @@ class TraceWindow;
 class SubtitleWindow;
 class EvidenceWindow;
 class DiagnosticsWindow;
+class StatusPanel;
 
 class MainWindow : public QMainWindow
 {
@@ -56,7 +57,16 @@ private slots:
     void onWordActivated(double startSec, double endSec, const QPoint &globalPos);
 
 private:
+    // buildUi() is split by *what the operator is doing* rather than by widget
+    // type: the actions exist once and are placed twice - once in a menu, so
+    // every capability is discoverable and has a shortcut, and once on the
+    // toolbar if it is something reached for during a live meeting.
     void buildUi();
+    void buildActions();
+    void buildMenus();
+    void buildToolBar();
+    void buildStatusBar();
+    void buildCentral();
     void refreshHighlights();
     void refreshDelayBox();
     void refreshTicker();
@@ -68,12 +78,10 @@ private:
     TimelineView *m_timeline = nullptr;
     QTextEdit *m_ticker = nullptr;
     QStackedWidget *m_stack = nullptr;
-    QListWidget *m_highlights = nullptr;
-    QLabel *m_highlightTitle = nullptr;
-    QLabel *m_statusLine = nullptr;
-    QLabel *m_delayBox = nullptr;
+    StatusPanel *m_status = nullptr;
     QLabel *m_connectionPill = nullptr;
     QLabel *m_deviceLabel = nullptr;
+    QLabel *m_sessionLabel = nullptr;
     QLineEdit *m_operatorId = nullptr;
 
     QAction *m_micAction = nullptr;
@@ -86,8 +94,16 @@ private:
     QAction *m_denoiseOnAction = nullptr;
     QAction *m_denoiseOffAction = nullptr;
     QAction *m_lowConfAction = nullptr;
+    QAction *m_reviewAction = nullptr;
+    QAction *m_historyAction = nullptr;
+    QAction *m_subtitleAction = nullptr;
+    QAction *m_traceAction = nullptr;
+    QAction *m_evidenceAction = nullptr;
+    QAction *m_enrollAction = nullptr;
+    QAction *m_logAction = nullptr;
+    QAction *m_settingsAction = nullptr;
+    QAction *m_quitAction = nullptr;
 
-    QString m_highlightsKey;
     QDockWidget *m_reviewDock = nullptr;
     ReviewPanel *m_reviewPanel = nullptr;
     TraceWindow *m_traceWindow = nullptr;

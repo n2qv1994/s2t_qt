@@ -1,5 +1,7 @@
 #include "ReviewPanel.h"
 
+#include "Theme.h"
+
 #include "Dialogs.h"
 #include "audio/WavIo.h"
 #include "core/Logger.h"
@@ -68,7 +70,7 @@ ReviewPanel::ReviewPanel(SessionController *controller, QWidget *parent)
     layout->setContentsMargins(8, 6, 8, 6);
 
     auto *top = new QHBoxLayout();
-    top->addWidget(new QLabel(QStringLiteral("REVIEW"), this));
+    top->addWidget(new QLabel(QStringLiteral("Cuộc họp:"), this));
     m_picker = new QComboBox(this);
     m_picker->setMinimumWidth(320);
     m_picker->addItem(QStringLiteral("— chọn cuộc họp —"), QString());
@@ -367,7 +369,7 @@ void ReviewPanel::renderRows()
         auto *text = new QTableWidgetItem(rowText(row));
         if (locked) {
             text->setFlags(text->flags() & ~Qt::ItemIsEditable);
-            text->setForeground(QColor(0x8a, 0x8a, 0x8a));
+            text->setForeground(theme::color(theme::Role::TextFaint));
             text->setToolTip(QStringLiteral(
                                  "Đoạn này vẫn sau điểm chốt (%1s) — correction có thể còn sửa "
                                  "lại. Chờ vài giây hoặc đợi cuộc họp kết thúc rồi sửa.")
@@ -391,7 +393,7 @@ void ReviewPanel::onCellChanged(int row, int column)
         return;
     }
     if (m_editorId.isEmpty()) {
-        emit statusMessage(QStringLiteral("cần nhập tên người thao tác (thanh trên) trước khi lưu"));
+        emit statusMessage(QStringLiteral("cần nhập tên người thao tác (thanh dưới cửa sổ chính) trước khi lưu"));
         m_populating = true;
         m_table->item(row, column)->setText(rowText(source));
         m_populating = false;
@@ -464,7 +466,7 @@ void ReviewPanel::renameSpeaker(const QString &fromSpeaker, const QString &curre
         return;
     }
     if (m_editorId.isEmpty()) {
-        emit statusMessage(QStringLiteral("cần nhập tên người thao tác (thanh trên) trước khi lưu"));
+        emit statusMessage(QStringLiteral("cần nhập tên người thao tác (thanh dưới cửa sổ chính) trước khi lưu"));
         return;
     }
     QStringList others;

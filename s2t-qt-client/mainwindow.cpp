@@ -6,6 +6,8 @@
 #include "ui/EnrollDialog.h"
 #include "ui/EvidenceWindow.h"
 #include "ui/ReviewPanel.h"
+#include "ui/StatusPanel.h"
+#include "ui/Theme.h"
 #include "ui/TimelineView.h"
 #include "ui/SubtitleWindow.h"
 #include "ui/TraceWindow.h"
@@ -15,11 +17,14 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFontMetrics>
+#include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QScreen>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -33,17 +38,6 @@
 
 namespace {
 
-QString formatClock(double seconds)
-{
-    const double value = qMax(0.0, seconds);
-    const int minutes = int(value) / 60;
-    const double rest = value - minutes * 60;
-    return QStringLiteral("%1:%2")
-        .arg(minutes, 2, 10, QLatin1Char('0'))
-        .arg(rest, 5, 'f', 2, QLatin1Char('0'));
-}
-
-const char *kSpeakerColors[] = {"#1a56db", "#c00030", "#1a7a2e", "#8b00a0", "#a04000"};
 
 } // namespace
 
@@ -70,6 +64,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     });
     connect(m_controller, &SessionController::sessionStarted, this, [this](const QString &id) {
         m_timeline->resetForSession();
+        m_sessionLabel->setText(id);
         statusBar()->showMessage(QStringLiteral("Đã tạo phiên %1").arg(id), 8000);
         refreshActions();
     });
@@ -101,22 +96,306 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::buildUi()
 {
-    setWindowTitle(QStringLiteral("S2T · Realtime ASR / Diarization"));
+    setWindowTitle(QStringLiteral("S2T · Ghi âm & chuyển văn bản trực tiếp"));
 
+    buildActions();
+    buildMenus();
+    buildToolBar();
+    buildCentral();
+    buildStatusBar();
+
+    m_reviewPanel = new ReviewPanel(m_controller, this);
+    connect(m_reviewPanel, &ReviewPanel::statusMessage, this,
+            [this](const QString &message) { statusBar()->showMessage(message, 10000); });
+    // "&&", not "&": a QDockWidget title goes through mnemonic processing the
+    // same way an action's text does, and a lone ampersand is swallowed.
+    m_reviewDock = new QDockWidget(QStringLiteral("Soát && sửa bản chép"), this);
+    m_reviewDock->setWidget(m_reviewPanel);
+    m_reviewDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    addDockWidget(Qt::BottomDockWidgetArea, m_reviewDock);
+    m_reviewDock->hide();
+    // The toolbar button and the dock's own close box are the same state, so
+    // closing the dock has to un-press the button or the two disagree.
+    connect(m_reviewDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        QSignalBlocker blocker(m_reviewAction);
+        m_reviewAction->setChecked(visible);
+    });
+
+    // The window opens wide enough for its own toolbar and never wider than
+    // the screen.  A hard-coded width fits exactly one font stack: the same
+    // Vietnamese labels measure about 90 px wider on RHEL than under MinGW,
+    // and QToolBar lays items out at their size hint and runs off the edge
+    // rather than shrinking them.  Since the tool windows moved into the menu
+    // bar the row is much shorter than it was, but the rule still holds.
+    QToolBar *bar = findChild<QToolBar *>();
+    int width = qMax(1440, bar ? bar->sizeHint().width() + 48 : 0);
+    int height = 900;
+    // theme::screenRoom(), not QScreen::availableGeometry() - see its comment.
+    // The deployed RHEL host reports its screen as 0x0, and the old code here
+    // clamped with qMin(width, 0), asking for a zero-wide window and getting
+    // whatever the layout's minimum happened to be.  It looked like it worked
+    // because nobody had measured the window on that host.
+    const QSize room = theme::screenRoom(this);
+    if (room.isValid()) {
+        width = qMin(width, room.width());
+        height = qMin(height, room.height());
+    }
+    resize(width, height);
+
+    statusBar()->showMessage(QStringLiteral("Sẵn sàng."));
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+//
+// Created once, here, and referenced from both the menu bar and the toolbar.
+// Two QActions doing the same job is how a checkable item ends up out of sync
+// with the thing it controls.
+// ---------------------------------------------------------------------------
+
+void MainWindow::buildActions()
+{
+    m_micAction = new QAction(theme::icon(theme::Glyph::Record, theme::Tone::Danger),
+                              QStringLiteral("Ghi âm từ micro"), this);
+    m_micAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+R")));
+    m_micAction->setToolTip(QStringLiteral(
+        "Thu microphone trên máy này và gửi lên Server buffer bằng gRPC (Ctrl+R)"));
+    connect(m_micAction, &QAction::triggered, this, &MainWindow::startMicrophone);
+
+    m_pauseAction = new QAction(theme::icon(theme::Glyph::Pause),
+                                QStringLiteral("Tạm dừng"), this);
+    m_pauseAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+P")));
+    m_pauseAction->setToolTip(QStringLiteral(
+        "Tạm dừng gửi microphone, không kết thúc phiên. Audio nói lúc tạm dừng "
+        "không được gửi sau khi tiếp tục. (Ctrl+P)"));
+    connect(m_pauseAction, &QAction::triggered, this, &MainWindow::togglePause);
+
+    m_stopAction = new QAction(theme::icon(theme::Glyph::Stop), QStringLiteral("Dừng phiên"), this);
+    m_stopAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+.")));
+    m_stopAction->setToolTip(
+        QStringLiteral("Kết thúc audio hiện tại và flush correction (Ctrl+.)"));
+    connect(m_stopAction, &QAction::triggered, this, &MainWindow::stopSession);
+
+    m_fileAction = new QAction(theme::icon(theme::Glyph::File),
+                               QStringLiteral("Chạy tệp audio..."), this);
+    m_fileAction->setShortcut(QKeySequence::Open);
+    m_fileAction->setToolTip(QStringLiteral("Chạy lại một tệp WAV/M4A qua đúng pipeline (Ctrl+O)"));
+    connect(m_fileAction, &QAction::triggered, this, &MainWindow::startFileReplay);
+
+    m_quitAction = new QAction(QStringLiteral("Thoát"), this);
+    m_quitAction->setShortcut(QKeySequence::Quit);
+    connect(m_quitAction, &QAction::triggered, this, &MainWindow::close);
+
+    m_liveAction = new QAction(theme::icon(theme::Glyph::Live), QStringLiteral("Bám trực tiếp"),
+                               this);
+    m_liveAction->setCheckable(true);
+    m_liveAction->setChecked(true);
+    m_liveAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
+    m_liveAction->setToolTip(QStringLiteral(
+        "Timeline tự cuộn theo audio đang tới. Cuộn tay sẽ tự tắt chế độ này. (Ctrl+L)"));
+    // toggled, not triggered.  On `triggered` a second press unchecked the
+    // button and then turned following straight back on, because
+    // setFollowEnabled() returns early when nothing changed and never emitted
+    // followChanged() to put the tick back - so the button read "off" while
+    // the timeline was still following.
+    connect(m_liveAction, &QAction::toggled, this, [this](bool on) {
+        if (on)
+            m_timeline->setFollowTarget(TimelineView::FollowTarget::Audio);
+        m_timeline->setFollowEnabled(on);
+    });
+
+    m_textAction = new QAction(theme::icon(theme::Glyph::JumpText),
+                               QStringLiteral("Tới chữ mới nhất"), this);
+    m_textAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+J")));
+    m_textAction->setToolTip(QStringLiteral("Nhảy tới từ mới nhất đã nhận được (Ctrl+J)"));
+    connect(m_textAction, &QAction::triggered, this, [this]() { m_timeline->jumpToLatestText(); });
+
+    m_tickerAction = new QAction(theme::icon(theme::Glyph::Ticker),
+                                 QStringLiteral("Chữ chạy"), this);
+    m_tickerAction->setCheckable(true);
+    m_tickerAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
+    m_tickerAction->setToolTip(QStringLiteral(
+        "Đổi timeline sang một dòng chữ chạy, cỡ lớn, để chiếu lên màn hình chung (Ctrl+T)"));
+    connect(m_tickerAction, &QAction::toggled, this, &MainWindow::toggleTicker);
+
+    m_lowConfAction = new QAction(theme::icon(theme::Glyph::LowConf),
+                                  QStringLiteral("Hiện từ yếu"), this);
+    m_lowConfAction->setCheckable(true);
+    m_lowConfAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+W")));
+    m_lowConfAction->setToolTip(QStringLiteral(
+        "Mặc định các từ dưới ngưỡng tin cậy bị ẩn khỏi timeline (giống UI cũ). "
+        "Bật để xem tất cả, kể cả từ độ tin cậy thấp. (Ctrl+W)"));
+    connect(m_lowConfAction, &QAction::toggled, this, [this](bool on) {
+        m_controller->model().setShowLowConfidence(on);
+        m_timeline->refresh();
+    });
+
+    // A lone "&" is Qt's mnemonic marker and is eaten from the label, so any
+    // ampersand meant to be read has to be doubled.  setWindowTitle() is the
+    // one place that does not apply.
+    m_reviewAction = new QAction(theme::icon(theme::Glyph::Review),
+                                 QStringLiteral("Soát && sửa"), this);
+    m_reviewAction->setCheckable(true);
+    m_reviewAction->setShortcut(QKeySequence(QStringLiteral("F9")));
+    m_reviewAction->setToolTip(QStringLiteral(
+        "Mở bảng soát bản chép ở dưới: nghe lại từng câu, sửa chữ, đặt tên người nói (F9)"));
+    connect(m_reviewAction, &QAction::triggered, this, &MainWindow::openReview);
+
+    m_subtitleAction = new QAction(theme::icon(theme::Glyph::Subtitle),
+                                   QStringLiteral("Phụ đề"), this);
+    m_subtitleAction->setShortcut(QKeySequence(QStringLiteral("F6")));
+    m_subtitleAction->setToolTip(QStringLiteral(
+        "Cửa sổ phụ đề cỡ lớn, không viền, để đưa sang màn hình thứ hai (F6)"));
+    connect(m_subtitleAction, &QAction::triggered, this, &MainWindow::openSubtitles);
+
+    m_historyAction = new QAction(theme::icon(theme::Glyph::History),
+                                  QStringLiteral("Lịch sử hiệu chỉnh..."), this);
+    m_historyAction->setShortcut(QKeySequence(QStringLiteral("F7")));
+    connect(m_historyAction, &QAction::triggered, this, &MainWindow::openAuditHistory);
+
+    m_traceAction = new QAction(theme::icon(theme::Glyph::Trace),
+                                QStringLiteral("Pipeline trace..."), this);
+    m_traceAction->setShortcut(QKeySequence(QStringLiteral("F8")));
+    connect(m_traceAction, &QAction::triggered, this, &MainWindow::openTrace);
+
+    m_evidenceAction = new QAction(theme::icon(theme::Glyph::Evidence),
+                                   QStringLiteral("Nghiệm thu pipeline..."), this);
+    m_evidenceAction->setShortcut(QKeySequence(QStringLiteral("F10")));
+    connect(m_evidenceAction, &QAction::triggered, this, &MainWindow::openEvidence);
+
+    m_enrollAction = new QAction(theme::icon(theme::Glyph::Enroll),
+                                 QStringLiteral("Đăng ký giọng nói..."), this);
+    m_enrollAction->setShortcut(QKeySequence(QStringLiteral("F5")));
+    connect(m_enrollAction, &QAction::triggered, this, &MainWindow::openEnrollment);
+
+    m_logAction = new QAction(theme::icon(theme::Glyph::Log),
+                              QStringLiteral("Nhật ký && chẩn đoán"), this);
+    m_logAction->setShortcut(QKeySequence(QStringLiteral("F12")));
+    m_logAction->setToolTip(QStringLiteral(
+        "Xem nhật ký hoạt động ngay trong ứng dụng và chạy các phép chẩn đoán "
+        "(probe máy chủ, self-test giao thức) mà không cần cửa sổ lệnh. (F12)"));
+    connect(m_logAction, &QAction::triggered, this, &MainWindow::openDiagnostics);
+
+    m_settingsAction = new QAction(theme::icon(theme::Glyph::Settings),
+                                   QStringLiteral("Cấu hình..."), this);
+    m_settingsAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
+    connect(m_settingsAction, &QAction::triggered, this, &MainWindow::openSettings);
+
+    m_denoiseOnAction = new QAction(theme::icon(theme::Glyph::Denoise),
+                                    QStringLiteral("Bật lọc nhiễu"), this);
+    connect(m_denoiseOnAction, &QAction::triggered, this,
+            [this]() { m_controller->setDenoise(true); });
+    m_denoiseOffAction = new QAction(QStringLiteral("Tắt lọc nhiễu"), this);
+    connect(m_denoiseOffAction, &QAction::triggered, this,
+            [this]() { m_controller->setDenoise(false); });
+
+    // Six of these actions are only ever shown inside a menu.  Without an
+    // application-wide context their shortcuts would do nothing until that
+    // menu happened to be open, which is not what a shortcut is for.
+    for (QAction *action : findChildren<QAction *>())
+        action->setShortcutContext(Qt::ApplicationShortcut);
+}
+
+void MainWindow::buildMenus()
+{
+    QMenuBar *menu = menuBar();
+
+    QMenu *session = menu->addMenu(QStringLiteral("Phiên"));
+    session->addAction(m_micAction);
+    session->addAction(m_fileAction);
+    session->addSeparator();
+    session->addAction(m_pauseAction);
+    session->addAction(m_stopAction);
+    session->addSeparator();
+    session->addAction(m_enrollAction);
+    session->addSeparator();
+    session->addAction(m_quitAction);
+
+    QMenu *view = menu->addMenu(QStringLiteral("Hiển thị"));
+    view->addAction(m_liveAction);
+    view->addAction(m_textAction);
+    view->addSeparator();
+    view->addAction(m_tickerAction);
+    view->addAction(m_lowConfAction);
+    view->addSeparator();
+    view->addAction(m_reviewAction);
+    view->addAction(m_subtitleAction);
+
+    QMenu *mic = menu->addMenu(QStringLiteral("Micro"));
+    mic->addAction(m_denoiseOnAction);
+    mic->addAction(m_denoiseOffAction);
+
+    QMenu *tools = menu->addMenu(QStringLiteral("Công cụ"));
+    tools->addAction(m_historyAction);
+    tools->addAction(m_traceAction);
+    tools->addAction(m_evidenceAction);
+    tools->addSeparator();
+    tools->addAction(m_logAction);
+    tools->addAction(m_settingsAction);
+}
+
+void MainWindow::buildToolBar()
+{
     auto *bar = addToolBar(QStringLiteral("Chính"));
+    bar->setObjectName(QStringLiteral("s2tMainToolBar"));
     bar->setMovable(false);
-    bar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    bar->setFloatable(false);
+    bar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    // Icon size follows the font, so a desktop running at 125% does not get a
+    // 16 px icon next to 20 px text.
+    const int glyph = qMax(16, QFontMetrics(bar->font()).height());
+    bar->setIconSize(QSize(glyph, glyph));
 
-    m_connectionPill = new QLabel(QStringLiteral("● ĐANG KIỂM TRA"), this);
-    m_connectionPill->setMargin(6);
+    // Group 1 - the transport.  What starts and stops audio, nothing else.
+    bar->addAction(m_micAction);
+    bar->addAction(m_pauseAction);
+    bar->addAction(m_stopAction);
+    bar->addAction(m_fileAction);
+    bar->addSeparator();
+
+    // Group 2 - what the timeline shows.  Every item here is a view toggle and
+    // none of them touch the session.
+    bar->addAction(m_liveAction);
+    bar->addAction(m_textAction);
+    bar->addAction(m_tickerAction);
+    bar->addAction(m_lowConfAction);
+    bar->addSeparator();
+
+    // Group 3 - the two panels reached for mid-meeting.  The other six windows
+    // are in the menu bar only: putting all of them here is what used to push
+    // "Cấu hình" into the "»" overflow exactly when the connection went bad
+    // and an operator needed it to fix the server address.
+    bar->addAction(m_reviewAction);
+    bar->addAction(m_subtitleAction);
+
+    // This one button changes its own label at run time ("Bám trực tiếp" when
+    // it is following, "Đang xem lại" when the operator has scrolled away), and
+    // a toolbar item that resizes re-flows every item after it.  Pin it to the
+    // wider of its two states, measured rather than guessed - the two strings
+    // differ by more on the RHEL font stack than on the MinGW one.
+    if (QWidget *liveButton = bar->widgetForAction(m_liveAction)) {
+        const QFontMetrics metrics(liveButton->font());
+        const int text = qMax(metrics.horizontalAdvance(QStringLiteral("Bám trực tiếp")),
+                              metrics.horizontalAdvance(QStringLiteral("Đang xem lại")));
+        liveButton->setMinimumWidth(text + bar->iconSize().width() + 6 * theme::kGap);
+    }
+
+    auto *spacer = new QWidget(bar);
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    bar->addWidget(spacer);
+
+    // The right end of the bar is state, not verbs: the two indicators an
+    // operator glances at without stopping what they are doing.
+    m_deviceLabel = new QLabel(bar);
+    m_deviceLabel->setProperty("s2tMuted", true);
+    m_deviceLabel->setMargin(theme::kGapTight);
+    bar->addWidget(m_deviceLabel);
+
+    m_connectionPill = new QLabel(QStringLiteral("● ĐANG KIỂM TRA"), bar);
     // Fixed to the widest of its four states, measured rather than guessed.
-    //
-    // Without this the label resizes when the connection state changes, the
-    // whole toolbar re-flows, and "Cấu hình" - the last action - drops into the
-    // overflow menu.  It does that exactly when the state goes bad, which is
-    // exactly when an operator is reaching for it to fix the server address.
-    // Caught on RHEL, where Vietnamese labels measure wider than on the MinGW
-    // kit and the toolbar has less slack to absorb the change.
+    // Without this the label resizes when the connection state changes and the
+    // whole toolbar re-flows under it - and it does that exactly when the
+    // state goes bad, which is when the operator is reading it.
     {
         const QStringList states{QStringLiteral("● ĐANG KIỂM TRA"),
                                  QStringLiteral("● ĐÃ KẾT NỐI AI"),
@@ -128,163 +407,104 @@ void MainWindow::buildUi()
         int widest = 0;
         for (const QString &text : states)
             widest = qMax(widest, metrics.horizontalAdvance(text));
-        m_connectionPill->setMinimumWidth(widest + 2 * m_connectionPill->margin());
+        m_connectionPill->setMinimumWidth(widest + 6 * theme::kGapTight);
     }
     bar->addWidget(m_connectionPill);
-    bar->addSeparator();
+    // A spacer the width of the bar's own padding, so the pill does not sit
+    // flush against the window edge.
+    auto *tail = new QWidget(bar);
+    tail->setFixedWidth(theme::kGapTight);
+    bar->addWidget(tail);
+}
 
-    m_micAction = bar->addAction(QStringLiteral("BẮT ĐẦU GHI ÂM"), this, &MainWindow::startMicrophone);
-    m_micAction->setToolTip(QStringLiteral(
-        "Thu microphone trên máy này và gửi lên Server buffer bằng gRPC"));
-    m_pauseAction = bar->addAction(QStringLiteral("PAUSE"), this, &MainWindow::togglePause);
-    m_pauseAction->setToolTip(QStringLiteral(
-        "Tạm dừng gửi microphone, không kết thúc phiên. Audio nói lúc tạm dừng "
-        "không được gửi sau khi tiếp tục."));
-    m_stopAction = bar->addAction(QStringLiteral("STOP"), this, &MainWindow::stopSession);
-    m_stopAction->setToolTip(QStringLiteral("Kết thúc audio hiện tại và flush correction"));
-    m_fileAction = bar->addAction(QStringLiteral("AUDIO"), this, &MainWindow::startFileReplay);
-    m_fileAction->setToolTip(QStringLiteral("Chạy lại một tệp WAV qua đúng pipeline"));
-    bar->addSeparator();
+void MainWindow::buildStatusBar()
+{
+    // The bottom bar carries identity and the session id, which change at most
+    // once per meeting; the top bar carries the two things that change while
+    // the meeting runs.  Splitting them that way is most of why the toolbar no
+    // longer overflows.
+    auto *operatorLabel = new QLabel(QStringLiteral("Người thao tác:"), this);
+    operatorLabel->setProperty("s2tMuted", true);
 
-    m_deviceLabel = new QLabel(this);
-    m_deviceLabel->setMargin(6);
-    bar->addWidget(m_deviceLabel);
-    bar->addSeparator();
-
-    m_denoiseOnAction = bar->addAction(QStringLiteral("DENOISE ON"), this,
-                                       [this]() { m_controller->setDenoise(true); });
-    m_denoiseOffAction = bar->addAction(QStringLiteral("DENOISE OFF"), this,
-                                        [this]() { m_controller->setDenoise(false); });
-    bar->addSeparator();
-
-    m_textAction = bar->addAction(QStringLiteral("TEXT"), this,
-                                  [this]() { m_timeline->jumpToLatestText(); });
-    m_textAction->setToolTip(QStringLiteral("Nhảy tới chữ mới nhất"));
-    m_liveAction = bar->addAction(QStringLiteral("LIVE"), this, [this]() {
-        m_timeline->setFollowTarget(TimelineView::FollowTarget::Audio);
-        m_timeline->setFollowEnabled(true);
-    });
-    m_liveAction->setCheckable(true);
-    m_liveAction->setChecked(true);
-    m_tickerAction = bar->addAction(QStringLiteral("TICKER"));
-    m_tickerAction->setCheckable(true);
-    m_tickerAction->setToolTip(QStringLiteral("Chuyển sang chế độ chữ chạy một dòng"));
-    connect(m_tickerAction, &QAction::toggled, this, &MainWindow::toggleTicker);
-
-    m_lowConfAction = bar->addAction(QStringLiteral("HIỆN TỪ YẾU"));
-    m_lowConfAction->setCheckable(true);
-    m_lowConfAction->setToolTip(QStringLiteral(
-        "Mặc định các từ dưới ngưỡng tin cậy bị ẩn khỏi timeline (giống UI cũ). "
-        "Bật để xem tất cả, kể cả từ độ tin cậy thấp."));
-    connect(m_lowConfAction, &QAction::toggled, this, [this](bool on) {
-        m_controller->model().setShowLowConfidence(on);
-        m_timeline->refresh();
-    });
-    bar->addSeparator();
-
-    bar->addAction(QStringLiteral("REVIEW"), this, &MainWindow::openReview);
-    bar->addAction(QStringLiteral("LỊCH SỬ"), this, &MainWindow::openAuditHistory);
-    bar->addAction(QStringLiteral("PHỤ ĐỀ"), this, &MainWindow::openSubtitles);
-    bar->addAction(QStringLiteral("TRACE"), this, &MainWindow::openTrace);
-    bar->addAction(QStringLiteral("NGHIỆM THU"), this, &MainWindow::openEvidence);
-    bar->addAction(QStringLiteral("SETUP"), this, &MainWindow::openEnrollment);
-    auto *logAction = bar->addAction(QStringLiteral("NHẬT KÝ"), this, &MainWindow::openDiagnostics);
-    logAction->setToolTip(QStringLiteral(
-        "Xem nhật ký hoạt động ngay trong ứng dụng và chạy các phép chẩn đoán "
-        "(probe máy chủ, self-test giao thức) mà không cần cửa sổ lệnh."));
-    bar->addAction(QStringLiteral("Cấu hình"), this, &MainWindow::openSettings);
-
-    auto *spacer = new QWidget(this);
-    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    bar->addWidget(spacer);
-    bar->addWidget(new QLabel(QStringLiteral("Người thao tác: "), this));
     m_operatorId = new QLineEdit(this);
-    m_operatorId->setMaximumWidth(160);
     m_operatorId->setMaxLength(80);
     m_operatorId->setPlaceholderText(QStringLiteral("tên của bạn"));
+    m_operatorId->setClearButtonEnabled(true);
     // Deliberately not remembered between runs: this name is recorded as the
     // person answerable for an edit, and a field that refills itself with
     // whoever used this machine last files one person's work under another's.
     m_operatorId->setToolTip(QStringLiteral(
         "Ghi vào lịch sử hiệu chỉnh. Phải nhập lại mỗi lần mở ứng dụng."));
-    bar->addWidget(m_operatorId);
+    m_operatorId->setFixedWidth(
+        qMax(160, QFontMetrics(m_operatorId->font()).horizontalAdvance(QLatin1Char('m')) * 18));
 
+    m_sessionLabel = new QLabel(QStringLiteral("chưa có phiên"), this);
+    m_sessionLabel->setProperty("s2tMuted", true);
+    m_sessionLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_sessionLabel->setToolTip(QStringLiteral("Mã phiên hiện tại trên Server buffer."));
+
+    // QStatusBar packs permanent widgets with no gap at all, so the session id
+    // ran straight into the next label.  A hairline separator between the two
+    // groups is cheaper to read than more whitespace.
+    auto *divider = new QFrame(this);
+    divider->setFrameShape(QFrame::VLine);
+    divider->setFixedWidth(1);
+    divider->setStyleSheet(QStringLiteral("border:none; background:%1; margin:3px %2px;")
+                               .arg(theme::color(theme::Role::Border).name())
+                               .arg(theme::kGap));
+
+    statusBar()->addPermanentWidget(m_sessionLabel);
+    statusBar()->addPermanentWidget(divider);
+    statusBar()->addPermanentWidget(operatorLabel);
+    statusBar()->addPermanentWidget(m_operatorId);
+    statusBar()->setSizeGripEnabled(true);
+}
+
+void MainWindow::buildCentral()
+{
     m_timeline = new TimelineView(this);
     m_timeline->setModel(&m_controller->model());
     connect(m_timeline, &TimelineView::wordActivated, this, &MainWindow::onWordActivated);
     connect(m_timeline, &TimelineView::followChanged, this, [this](bool enabled) {
+        QSignalBlocker blocker(m_liveAction);
         m_liveAction->setChecked(enabled);
-        m_liveAction->setText(enabled ? QStringLiteral("LIVE") : QStringLiteral("REVIEW"));
+        // The label is the state, not a second button: while following is off
+        // the timeline is a document being read, and saying so is clearer than
+        // leaving an unpressed "Bám trực tiếp" and no explanation.
+        m_liveAction->setText(enabled ? QStringLiteral("Bám trực tiếp")
+                                      : QStringLiteral("Đang xem lại"));
     });
 
     m_ticker = new QTextEdit(this);
     m_ticker->setReadOnly(true);
-    m_ticker->setStyleSheet(QStringLiteral("font-size:20px; line-height:1.6;"));
+    m_ticker->setFrameShape(QFrame::NoFrame);
+    {
+        // Projection mode: sized off the desktop font so it stays readable at
+        // the back of a room without pinning a pixel size that only suits one
+        // of the two font stacks.
+        QFont large = m_ticker->font();
+        large.setPointSizeF(qMax(13.0, large.pointSizeF() * 2.0));
+        m_ticker->setFont(large);
+    }
 
     m_stack = new QStackedWidget(this);
     m_stack->addWidget(m_timeline);
     m_stack->addWidget(m_ticker);
 
-    auto *side = new QWidget(this);
-    auto *sideLayout = new QVBoxLayout(side);
-    sideLayout->setContentsMargins(8, 8, 8, 8);
-    m_highlightTitle = new QLabel(QStringLiteral("Highlights (< 75%)"), side);
-    sideLayout->addWidget(m_highlightTitle);
-    m_statusLine = new QLabel(QStringLiteral("connecting..."), side);
-    m_statusLine->setWordWrap(true);
-    m_statusLine->setStyleSheet(QStringLiteral("font-family:monospace; font-size:11px;"));
-    sideLayout->addWidget(m_statusLine);
-    m_delayBox = new QLabel(QStringLiteral("delay: --"), side);
-    m_delayBox->setWordWrap(true);
-    m_delayBox->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    m_delayBox->setStyleSheet(QStringLiteral(
-        "font-family:monospace; font-size:11px; border:1px solid #d0d0d0; padding:6px;"));
-    sideLayout->addWidget(m_delayBox);
-    m_highlights = new QListWidget(side);
-    m_highlights->setWordWrap(true);
-    sideLayout->addWidget(m_highlights, 1);
+    m_status = new StatusPanel(this);
 
     auto *splitter = new QSplitter(Qt::Horizontal, this);
+    splitter->setChildrenCollapsible(false);
     splitter->addWidget(m_stack);
-    splitter->addWidget(side);
+    splitter->addWidget(m_status);
     splitter->setStretchFactor(0, 1);
-    splitter->setSizes({1200, 320});
+    splitter->setStretchFactor(1, 0);
+    // The panel needs enough room for "Tiếng nói · văn bản" plus its value on
+    // one line; asking it rather than guessing keeps it whole on both kits.
+    const int sidebar = qMax(300, m_status->sizeHint().width());
+    splitter->setSizes({1200, sidebar});
     setCentralWidget(splitter);
-
-    m_reviewPanel = new ReviewPanel(m_controller, this);
-    connect(m_reviewPanel, &ReviewPanel::statusMessage, this,
-            [this](const QString &message) { statusBar()->showMessage(message, 10000); });
-    m_reviewDock = new QDockWidget(QStringLiteral("Review"), this);
-    m_reviewDock->setWidget(m_reviewPanel);
-    m_reviewDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
-    addDockWidget(Qt::BottomDockWidgetArea, m_reviewDock);
-    m_reviewDock->hide();
-
-    // The toolbar is one single row of Vietnamese labels, so how wide it wants
-    // to be is a function of the font the platform picked: MinGW and RHEL
-    // disagree by roughly 90 px for the same text.  A hard-coded window width
-    // therefore fits on one toolchain and clips the trailing "Người thao tác"
-    // field on the other - QToolBar lays its items out at their size hint and
-    // runs off the edge rather than shrinking them.  Ask the toolbar what it
-    // needs instead, and never open narrower than that.
-    int width = qMax(1560, bar->sizeHint().width());
-    int height = 900;
-    if (const QScreen *display = screen()) {
-        const QRect room = display->availableGeometry();
-        width = qMin(width, room.width());
-        height = qMin(height, room.height());
-    }
-    // On a screen too narrow for the whole row, take the difference out of the
-    // one item that can afford to give it back, rather than letting the layout
-    // clip it off the edge where it cannot be read or clicked at all.
-    const int shortfall = bar->sizeHint().width() - width;
-    if (shortfall > 0)
-        m_operatorId->setMaximumWidth(qMax(72, m_operatorId->maximumWidth() - shortfall));
-    resize(width, height);
-
-    statusBar()->showMessage(QStringLiteral("Sẵn sàng"));
 }
-
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     LOG_INFO(applog::cat::Ui) << "close requested - sessionRunning="
@@ -356,9 +576,13 @@ void MainWindow::togglePause()
 
 void MainWindow::openReview()
 {
-    LOG_INFO(applog::cat::Ui) << "action: toggle the review panel";
-    m_reviewDock->setVisible(!m_reviewDock->isVisible());
-    if (!m_reviewDock->isVisible())
+    // Driven by the action's own checked state now that the toolbar button
+    // and the dock's close box are the same switch; reading the dock instead
+    // would invert it on the way in from the menu.
+    const bool show = m_reviewAction->isChecked();
+    LOG_INFO(applog::cat::Ui) << "action: review panel ->" << (show ? "open" : "closed");
+    m_reviewDock->setVisible(show);
+    if (!show)
         return;
     m_reviewPanel->setEditorId(m_operatorId->text().trimmed());
     m_reviewPanel->refreshSessionList();
@@ -466,20 +690,6 @@ void MainWindow::onModelUpdated()
     refreshHighlights();
     if (m_tickerAction->isChecked())
         refreshTicker();
-
-    const TranscriptModel &model = m_controller->model();
-    m_highlightTitle->setText(
-        QStringLiteral("Highlights (< %1%)").arg(model.state().confThresholdPct));
-    m_statusLine->setText(
-        QStringLiteral("rows=%1 prov=%2 phrases=%3 low=%4 lanes=%5 virt=%6/%7 %8")
-            .arg(model.rows().size())
-            .arg(model.provisionalRows().size())
-            .arg(model.state().nPhrases)
-            .arg(model.state().nLow)
-            .arg(model.lanes().size())
-            .arg(m_timeline->visibleWordCount())
-            .arg(m_timeline->totalWordCount())
-            .arg(model.state().done ? QStringLiteral("[DONE]") : QStringLiteral("[LIVE]")));
 }
 
 void MainWindow::onStatusUpdated()
@@ -492,7 +702,7 @@ void MainWindow::onStatusUpdated()
         const qint64 elapsed =
             qint64(QDateTime::currentMSecsSinceEpoch() / 1000 - m_controller->micStatusSince());
         if (elapsed >= 0) {
-            label += QStringLiteral(" (%1:%2)")
+            label += QStringLiteral(" · %1:%2")
                          .arg(elapsed / 60, 2, 10, QLatin1Char('0'))
                          .arg(elapsed % 60, 2, 10, QLatin1Char('0'));
         }
@@ -505,9 +715,22 @@ void MainWindow::onStatusUpdated()
         tips << QStringLiteral("thiết bị: %1").arg(m_controller->deviceName());
     tips << QStringLiteral("lọc nhiễu: %1").arg(m_controller->denoiseStateKey());
     m_deviceLabel->setToolTip(tips.join(QStringLiteral(" · ")));
-    m_deviceLabel->setStyleSheet(status == MicStatus::Error || status == MicStatus::DeviceReconnecting
-                                     ? QStringLiteral("color:#a31515; font-weight:bold;")
-                                     : QString());
+    // A microphone that has stopped or is re-opening is a state the operator
+    // has to act on, so it gets the danger colour; anything else stays in the
+    // muted role and does not compete with the connection pill next to it.
+    const bool bad = status == MicStatus::Error || status == MicStatus::DeviceReconnecting;
+    m_deviceLabel->setStyleSheet(
+        QStringLiteral("color:%1;%2")
+            .arg(theme::color(bad ? theme::Role::Danger : theme::Role::TextMuted).name(),
+                 bad ? QStringLiteral(" font-weight:700;") : QString()));
+
+    const QString session = m_controller->sessionId();
+    // Only a real id gets the monospace face: it is there to be compared with
+    // a log line character by character.  The placeholder is prose and reads
+    // badly with the wide fixed advance.
+    m_sessionLabel->setFont(session.isEmpty() ? font() : theme::mono());
+    m_sessionLabel->setText(session.isEmpty() ? QStringLiteral("chưa có phiên")
+                                              : QStringLiteral("phiên %1").arg(session));
 }
 
 void MainWindow::onConnectionUpdated()
@@ -519,13 +742,13 @@ void MainWindow::onConnectionUpdated()
     // an operator to stop recording when the right answer is to keep going.
     if (!connected) {
         m_connectionPill->setText(QStringLiteral("● MẤT KẾT NỐI"));
-        m_connectionPill->setStyleSheet(QStringLiteral("color:#a31515; font-weight:bold;"));
+        theme::stylePill(m_connectionPill, theme::Tone::Danger);
     } else if (!upstream) {
         m_connectionPill->setText(QStringLiteral("● ĐANG ĐỆM"));
-        m_connectionPill->setStyleSheet(QStringLiteral("color:#8a6100; font-weight:bold;"));
+        theme::stylePill(m_connectionPill, theme::Tone::Warn);
     } else {
         m_connectionPill->setText(QStringLiteral("● ĐÃ KẾT NỐI AI"));
-        m_connectionPill->setStyleSheet(QStringLiteral("color:#176524; font-weight:bold;"));
+        theme::stylePill(m_connectionPill, theme::Tone::Ok);
     }
     m_connectionPill->setToolTip(m_controller->connectionDetail());
 }
@@ -535,48 +758,28 @@ void MainWindow::refreshActions()
     const bool running = m_controller->isRunning();
     const MicStatus status = m_controller->micStatus();
     m_micAction->setEnabled(!running);
-    m_micAction->setText(running && status == MicStatus::Recording ? QStringLiteral("ĐANG GHI")
-                                                                  : QStringLiteral("BẮT ĐẦU GHI ÂM"));
+    m_micAction->setText(running && status == MicStatus::Recording
+                             ? QStringLiteral("Đang ghi")
+                             : QStringLiteral("Ghi âm từ micro"));
     m_fileAction->setEnabled(!running);
     m_stopAction->setEnabled(running);
     const bool pausable = running
         && (status == MicStatus::Recording || status == MicStatus::Paused);
     m_pauseAction->setEnabled(pausable);
-    m_pauseAction->setText(status == MicStatus::Paused ? QStringLiteral("RESUME")
-                                                       : QStringLiteral("PAUSE"));
+    m_pauseAction->setText(status == MicStatus::Paused ? QStringLiteral("Tiếp tục")
+                                                       : QStringLiteral("Tạm dừng"));
+    m_pauseAction->setIcon(theme::icon(status == MicStatus::Paused ? theme::Glyph::Record
+                                                                  : theme::Glyph::Pause));
     const bool haveControlApp = !m_config.micControlApp.trimmed().isEmpty();
     m_denoiseOnAction->setEnabled(haveControlApp);
     m_denoiseOffAction->setEnabled(haveControlApp);
+    m_historyAction->setEnabled(!m_controller->sessionId().isEmpty());
 }
 
 void MainWindow::refreshHighlights()
 {
-    const QList<asr::Highlight> &items = m_controller->model().state().highlights;
-    // Rebuild only on an actual change.  Comparing counts alone would miss a
-    // correction that rewrote a highlight's text without adding one, which is
-    // exactly the case this panel exists to show.
-    QString renderKey;
-    for (const asr::Highlight &highlight : items) {
-        renderKey += QStringLiteral("%1|%2|%3|%4\n")
-                         .arg(highlight.startSec, 0, 'f', 2)
-                         .arg(highlight.speaker)
-                         .arg(highlight.confPct)
-                         .arg(highlight.text);
-    }
-    if (renderKey == m_highlightsKey)
-        return;
-    m_highlightsKey = renderKey;
-    m_highlights->clear();
-    if (items.isEmpty()) {
-        m_highlights->addItem(QStringLiteral("Không có low-confidence highlight."));
-        return;
-    }
-    for (const asr::Highlight &highlight : items) {
-        m_highlights->addItem(QStringLiteral("%1 · %2 · %3%\n%4")
-                                  .arg(formatClock(highlight.startSec), highlight.speaker)
-                                  .arg(highlight.confPct)
-                                  .arg(highlight.text));
-    }
+    m_status->setHighlights(m_controller->model().state().highlights,
+                            m_controller->model().state().confThresholdPct);
 }
 
 void MainWindow::refreshDelayBox()
@@ -595,86 +798,88 @@ void MainWindow::refreshDelayBox()
     const double speed = wallSec > 0.05 ? audioSec / wallSec : 0.0;
     const double textSec = model.latestTextEndSec();
 
-    QStringList lines;
-    if (textSec <= 0.0) {
-        lines << QStringLiteral("<b>word freshness lag: --</b>");
-    } else {
+    StatusReadout readout;
+    readout.running = m_controller->isRunning();
+    readout.done = state.done;
+    readout.hasText = textSec > 0.0;
+    readout.audioSec = audioSec;
+    readout.wallSec = wallSec;
+    readout.speed = speed;
+    readout.speechSec = speechSec;
+    readout.textSec = textSec;
+    readout.wallScale = speed > 1.05 ? speed : 1.0;
+    readout.accelerated = speed > 1.2;
+    if (readout.hasText) {
         // Deliberately excludes trailing VAD silence: the durable ingress
-        // queue is a different measurement and gets its own line, so a green
-        // 0.15 s word gap cannot hide a many-minute server backlog.
-        const double rawDelay = qMax(0.0, audioSec - textSec);
-        const double speechDelay = qMax(0.0, speechSec - textSec);
-        const double replayScale = speed > 1.05 ? speed : 1.0;
-        const bool accelerated = speed > 1.2;
-        lines << QStringLiteral("<b>word freshness lag: %1</b>")
-                     .arg(accelerated
-                              ? QStringLiteral("%1 audio-s ≈ %2 wall-s")
-                                    .arg(speechDelay, 0, 'f', 2)
-                                    .arg(speechDelay / replayScale, 0, 'f', 2)
-                              : QStringLiteral("%1s").arg(speechDelay, 0, 'f', 2));
-        lines << QStringLiteral("delay(raw): %1")
-                     .arg(accelerated
-                              ? QStringLiteral("%1 audio-s ≈ %2 wall-s")
-                                    .arg(rawDelay, 0, 'f', 2)
-                                    .arg(rawDelay / replayScale, 0, 'f', 2)
-                              : QStringLiteral("%1s").arg(rawDelay, 0, 'f', 2));
+        // queue is a different measurement and gets its own row, so a 0.15 s
+        // word gap cannot hide a many-minute server backlog.
+        readout.freshnessSec = qMax(0.0, speechSec - textSec);
+        readout.rawDelaySec = qMax(0.0, audioSec - textSec);
     }
+    readout.haveBacklog = m_controller->isRunning() || telemetry.sentSec > 0.0;
+    readout.backlogLocalSec = telemetry.localQueueSec;
+    readout.backlogServerSec = telemetry.serverQueueSec;
+    readout.ackLastMs = telemetry.rpcLastMs;
+    readout.ackMaxMs = telemetry.rpcMaxMs;
+    readout.aiWaitMs = telemetry.aiWaitLastMs;
 
-    const double endToEnd = telemetry.localQueueSec + telemetry.serverQueueSec;
-    if (m_controller->isRunning() || telemetry.sentSec > 0.0) {
-        lines << QStringLiteral("<b>capture→AI backlog: %1s</b> (máy này %2s + server %3s)")
-                     .arg(endToEnd, 0, 'f', 2)
-                     .arg(telemetry.localQueueSec, 0, 'f', 2)
-                     .arg(telemetry.serverQueueSec, 0, 'f', 2);
-        lines << QStringLiteral("ACK RTT=%1ms (max %2) · AI wait=%3ms · network+gRPC≈%4ms · "
-                                "one-way≈%5ms")
-                     .arg(telemetry.rpcLastMs, 0, 'f', 0)
-                     .arg(telemetry.rpcMaxMs, 0, 'f', 0)
-                     .arg(telemetry.aiWaitLastMs, 0, 'f', 0)
-                     .arg(telemetry.transportRoundTripMs, 0, 'f', 0)
-                     .arg(telemetry.transportOneWayEstMs, 0, 'f', 0);
+    // Everything below is for whoever is diagnosing the pipeline, not for
+    // whoever is running the meeting, so it goes behind the fold.
+    QStringList detail;
+    if (readout.hasText) {
+        detail << QStringLiteral("delay(raw)      %1 s")
+                      .arg(readout.rawDelaySec, 0, 'f', 2);
     }
-
-    lines << QStringLiteral("audio=%1 wall=%2 speed=%3x")
-                 .arg(formatClock(audioSec), formatClock(wallSec))
-                 .arg(speed > 0 ? QString::number(speed, 'f', 2) : QStringLiteral("--"));
-    lines << QStringLiteral("speech=%1 text=%2")
-                 .arg(formatClock(speechSec),
-                      textSec > 0 ? formatClock(textSec) : QStringLiteral("--"));
-
+    if (readout.haveBacklog) {
+        detail << QStringLiteral("ACK max         %1 ms").arg(telemetry.rpcMaxMs, 0, 'f', 0);
+        detail << QStringLiteral("network+gRPC    %1 ms  (một chiều ≈%2 ms)")
+                      .arg(telemetry.transportRoundTripMs, 0, 'f', 0)
+                      .arg(telemetry.transportOneWayEstMs, 0, 'f', 0);
+    }
     const asr::LatencyServer &server = state.latency.server;
     if (server.sumP50 > 0) {
-        lines << QStringLiteral("server sum=%1/%2ms asr=%3 diar=%4 verify=%5 itn=%6")
-                     .arg(server.sumP50, 0, 'f', 0)
-                     .arg(server.sumP95, 0, 'f', 0)
-                     .arg(server.asrP50, 0, 'f', 0)
-                     .arg(server.diarP50, 0, 'f', 0)
-                     .arg(server.verifyP50, 0, 'f', 0)
-                     .arg(server.itnP50, 0, 'f', 0);
+        detail << QStringLiteral("server p50/p95  %1 / %2 ms")
+                      .arg(server.sumP50, 0, 'f', 0)
+                      .arg(server.sumP95, 0, 'f', 0);
+        detail << QStringLiteral("  asr %1 · diar %2 · verify %3 · itn %4 ms")
+                      .arg(server.asrP50, 0, 'f', 0)
+                      .arg(server.diarP50, 0, 'f', 0)
+                      .arg(server.verifyP50, 0, 'f', 0)
+                      .arg(server.itnP50, 0, 'f', 0);
     }
     const asr::LatencyClient &client = state.latency.client;
     if (client.e2eP50 > 0) {
-        lines << QStringLiteral("client e2e=%1/%2ms prep=%3 wait=%4 parse=%5")
-                     .arg(client.e2eP50, 0, 'f', 0)
-                     .arg(client.e2eP95, 0, 'f', 0)
-                     .arg(client.prepareP50, 0, 'f', 0)
-                     .arg(client.waitP50, 0, 'f', 0)
-                     .arg(client.parseP50, 0, 'f', 0);
+        detail << QStringLiteral("client p50/p95  %1 / %2 ms")
+                      .arg(client.e2eP50, 0, 'f', 0)
+                      .arg(client.e2eP95, 0, 'f', 0);
+        detail << QStringLiteral("  prep %1 · wait %2 · parse %3 ms")
+                      .arg(client.prepareP50, 0, 'f', 0)
+                      .arg(client.waitP50, 0, 'f', 0)
+                      .arg(client.parseP50, 0, 'f', 0);
     }
+    // The model counters used to sit in the operator's line of sight, where
+    // they said nothing an operator can act on.  They are still worth having
+    // when a transcript looks wrong, so they moved here rather than away.
+    detail << QStringLiteral("rows %1 · tạm %2 · cụm %3 · yếu %4 · làn %5 · vẽ %6/%7 %8")
+                  .arg(model.rows().size())
+                  .arg(model.provisionalRows().size())
+                  .arg(state.nPhrases)
+                  .arg(state.nLow)
+                  .arg(model.lanes().size())
+                  .arg(m_timeline->visibleWordCount())
+                  .arg(m_timeline->totalWordCount())
+                  .arg(state.done ? QStringLiteral("[XONG]") : QStringLiteral("[TRỰC TIẾP]"));
+    readout.detail = detail;
+
+    QStringList problems;
     if (!telemetry.pollError.isEmpty())
-        lines << QStringLiteral("<span style='color:#a31515;'>poll: %1</span>").arg(telemetry.pollError);
+        problems << telemetry.pollError;
     if (!m_controller->errorText().isEmpty())
-        lines << QStringLiteral("<span style='color:#a31515;'>%1</span>").arg(m_controller->errorText());
+        problems << m_controller->errorText();
+    readout.error = problems.join(QStringLiteral("\n"));
 
-    const bool ok = textSec > 0.0 && endToEnd <= 1.0;
-    m_delayBox->setStyleSheet(QStringLiteral(
-                                  "font-family:monospace; font-size:11px; border:1px solid %1; "
-                                  "padding:6px; color:%2;")
-                                  .arg(ok ? QStringLiteral("#63a96b") : QStringLiteral("#d0d0d0"),
-                                       ok ? QStringLiteral("#166b22") : QStringLiteral("#1f1f1f")));
-    m_delayBox->setText(lines.join(QStringLiteral("<br>")));
+    m_status->setReadout(readout);
 }
-
 void MainWindow::refreshTicker()
 {
     const TranscriptModel &model = m_controller->model();
@@ -697,11 +902,16 @@ void MainWindow::refreshTicker()
         if (lane.startsWith(QLatin1String("sid:")))
             speakerIndex = lane.mid(4).toInt();
         else
-            speakerIndex = qAbs(qHash(lane)) % 5;
-        html += QStringLiteral("<span style=\"color:%1;opacity:%2;\">%3 </span>")
-                    .arg(QString::fromLatin1(kSpeakerColors[speakerIndex % 5]),
-                         word.provisional ? QStringLiteral("0.45") : QStringLiteral("1.0"),
-                         word.text.toHtmlEscaped());
+            speakerIndex = int(qHash(lane));
+        // Provisional words are drawn in a lighter shade of the same speaker
+        // colour rather than at reduced opacity: QTextEdit's HTML subset
+        // ignores `opacity`, so the old rule rendered every word identically
+        // and nothing on screen said which text was still going to change.
+        QColor ink = theme::laneColor(speakerIndex);
+        if (word.provisional)
+            ink = theme::isDark() ? ink.darker(135) : ink.lighter(155);
+        html += QStringLiteral("<span style=\"color:%1;\">%2 </span>")
+                    .arg(ink.name(), word.text.toHtmlEscaped());
     }
     m_ticker->setHtml(html);
     m_ticker->moveCursor(QTextCursor::End);

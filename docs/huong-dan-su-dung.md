@@ -24,20 +24,20 @@ Tài liệu này dành cho người vận hành.
 
 ### 1.1 Cấu hình lần đầu
 
-Mở **Cấu hình** trên thanh công cụ và điền:
+Mở **Công cụ → Cấu hình** (`Ctrl+,`) và điền:
 
 | Mục | Ý nghĩa |
 |---|---|
-| **Server buffer (host:port)** | Địa chỉ của `s2t-qt-server`. Mặc định `192.168.1.47:8800`. **Không phải** địa chỉ tầng suy luận (`:8700`) — xem ghi chú ngay dưới bảng. |
+| **Máy chủ đệm (host:port)** | Địa chỉ của `s2t-qt-server`. Mặc định `192.168.1.47:8800`. **Không phải** địa chỉ tầng suy luận (`:8700`) — xem ghi chú ngay dưới bảng. |
 | **Bearer token** | Token xác thực của Server buffer. Bấm **Từ tệp...** để đọc từ tệp thay vì gõ tay. Token của tầng suy luận là việc của server và không nằm trên máy này. |
-| **Microphone** | Thiết bị thu. `(mặc định hệ thống)` để hệ điều hành tự chọn. |
+| **Micro** | Thiết bị thu. `(mặc định hệ thống)` để hệ điều hành tự chọn. |
 | **Tên thiết bị bắt buộc chứa** | Chuỗi mà tên thiết bị phải chứa, mặc định `Speaker`. |
-| **Sample rate / Số kênh** | Mặc định 48000 Hz, 1 kênh. Phải là định dạng thiết bị hỗ trợ. |
+| **Tần số lấy mẫu / Số kênh** | Mặc định 48000 Hz, 1 kênh. Phải là định dạng thiết bị hỗ trợ. |
 | **Hàng đợi tối đa** | Số giây audio đã thu nhưng chưa được server xác nhận, được phép tồn đọng trên máy này. Mặc định 60 s. |
 | **xvF3800 host-control** | Đường dẫn tới `xvf_host.exe`, dùng cho nút bật/tắt lọc nhiễu phần cứng. |
-| **Bật pipeline trace** | Bật thì mỗi phiên mới lưu vết từng chặng xử lý, xem được ở cửa sổ TRACE. |
+| **Bật pipeline trace** | Bật thì mỗi phiên mới lưu vết từng chặng xử lý, xem được ở cửa sổ **Pipeline trace** (`F8`). |
 | **Phát lại tệp theo tốc độ thật** | Bật: mô phỏng đúng nhịp cuộc họp (dùng để đo độ trễ). Tắt: xử lý lại một bản ghi càng nhanh càng tốt. |
-| **Chế độ log / Mức log** | Xem [mục 7](#7-nhật-ký-và-chẩn-đoán). |
+| **Chế độ nhật ký / Mức nhật ký** | Xem [mục 7](#7-nhật-ký-và-chẩn-đoán). |
 
 Cấu hình được lưu lại và tự nạp ở lần mở sau.
 
@@ -53,19 +53,55 @@ Cấu hình được lưu lại và tự nạp ở lần mở sau.
 > tên, ứng dụng sẽ thu nhầm thiết bị mà không báo gì. Có ràng buộc này thì nó
 > dừng lại và nói rõ.
 
-### 1.2 Tên người thao tác
+### 1.2 Bố cục cửa sổ chính
 
-Ô **Người thao tác** ở góc phải thanh công cụ. **Phải nhập lại mỗi lần mở ứng
-dụng** — đây là cố ý: tên này được ghi vào nhật ký kiểm toán như người chịu
-trách nhiệm cho mỗi lần sửa. Một ô tự điền lại tên người dùng máy lần trước sẽ
-ghi công việc của người này dưới tên người khác.
+Cửa sổ được chia theo **ai hỏi câu gì**, không theo loại widget:
+
+| Vùng | Chứa gì |
+|---|---|
+| **Thanh menu** (trên cùng) | Toàn bộ chức năng, kèm phím tắt. Mọi thứ đều tìm được ở đây, kể cả những cửa sổ không có nút trên thanh công cụ. |
+| **Thanh công cụ** | Chỉ những **việc** hay dùng giữa cuộc họp, chia ba nhóm: điều khiển ghi âm · cách hiển thị timeline · hai bảng hay mở. Bên phải là **trạng thái**: tình trạng micro và đèn kết nối. |
+| **Giữa** | Timeline bản chép (hoặc chế độ chữ chạy). |
+| **Cột phải** | Độ trễ và danh sách cụm từ cần soát lại. |
+| **Thanh dưới** | Thông báo, mã phiên, và ô **Người thao tác**. |
+
+Nguyên tắc: thanh **trên** là những gì thay đổi liên tục trong lúc họp; thanh
+**dưới** là những gì thay đổi nhiều nhất một lần mỗi cuộc họp.
+
+Phím tắt hay dùng:
+
+| Phím | Việc |
+|---|---|
+| `Ctrl+R` | Ghi âm từ micro |
+| `Ctrl+O` | Chạy tệp audio |
+| `Ctrl+P` | Tạm dừng / Tiếp tục |
+| `Ctrl+.` | Dừng phiên |
+| `Ctrl+L` | Bám trực tiếp theo audio |
+| `Ctrl+J` | Nhảy tới chữ mới nhất |
+| `Ctrl+T` | Chế độ chữ chạy |
+| `Ctrl+W` | Hiện từ độ tin cậy thấp |
+| `F5` | Đăng ký giọng nói |
+| `F6` | Phụ đề trực tiếp |
+| `F7` | Lịch sử hiệu chỉnh |
+| `F8` | Pipeline trace |
+| `F9` | Bảng soát & sửa |
+| `F10` | Nghiệm thu pipeline |
+| `F12` | Nhật ký & chẩn đoán |
+| `Ctrl+,` | Cấu hình |
+
+### 1.3 Tên người thao tác
+
+Ô **Người thao tác** ở **góc phải thanh dưới** cửa sổ. **Phải nhập lại mỗi lần
+mở ứng dụng** — đây là cố ý: tên này được ghi vào nhật ký kiểm toán như người
+chịu trách nhiệm cho mỗi lần sửa. Một ô tự điền lại tên người dùng máy lần
+trước sẽ ghi công việc của người này dưới tên người khác.
 
 Không có tên người thao tác thì không sửa được văn bản và không đăng ký được
 giọng nói.
 
-### 1.3 Kiểm tra kết nối
+### 1.4 Kiểm tra kết nối
 
-Đèn báo ở đầu thanh công cụ tự cập nhật mỗi 3 giây. Nó có **ba** trạng thái,
+Đèn báo ở **góc phải thanh công cụ** tự cập nhật mỗi 3 giây. Nó có **ba** trạng thái,
 không phải hai, vì giờ có hai chặng mạng và hai chặng ấy hỏng theo hai cách
 khác nhau — cần hai cách xử lý khác nhau:
 
@@ -86,7 +122,7 @@ tình trạng tầng suy luận.
 
 ### 2.1 Bắt đầu
 
-1. Bấm **BẮT ĐẦU GHI ÂM**.
+1. Bấm **Ghi âm từ micro** (`Ctrl+R`).
 2. Trong hộp thoại, điền phần siêu dữ liệu (đều tùy chọn):
    - **Tên phiên**, **Người tham gia** (cách nhau bằng dấu phẩy).
    - **Mức bảo mật** — chỉ lưu nhãn, *không* thay cho phân quyền phía server.
@@ -94,7 +130,7 @@ tình trạng tầng suy luận.
 3. Chọn phạm vi nhận diện người nói:
    - **Không giới hạn** — so khớp với toàn bộ database giọng nói chung.
    - **Chỉ những người được chọn** — tick tên trong danh sách bên dưới.
-4. Bấm **BẮT ĐẦU GHI ÂM**.
+4. Bấm **Bắt đầu ghi âm**.
 
 > **Ba trạng thái, không phải hai.** "Không giới hạn" là so khớp toàn bộ DB.
 > "Chỉ những người được chọn" mà **không tick ai** là một chỉ thị khác hẳn:
@@ -106,22 +142,36 @@ nằm treo trên server.
 
 ### 2.2 Trong lúc ghi
 
-| Nút | Tác dụng |
-|---|---|
-| **PAUSE** | Ngừng gửi audio, **không** kết thúc phiên. Lời nói trong lúc tạm dừng bị bỏ ngay lúc thu — không được gửi bù sau khi tiếp tục. |
-| **STOP** | Kết thúc phiên: gửi nốt audio còn trong hàng đợi rồi chốt bản chép. |
-| **DENOISE ON / OFF** | Bật/tắt lọc nhiễu phần cứng trên mic (cần `xvf_host`). |
-| **TEXT** | Nhảy tới chữ mới nhất. |
-| **LIVE** | Bật/tắt tự bám theo audio đang chạy. Cuộn tay sẽ tự tắt nó. |
-| **TICKER** | Chuyển sang chế độ một dòng chữ chạy, chữ to. |
-| **HIỆN TỪ YẾU** | Mặc định các từ dưới ngưỡng tin cậy bị ẩn. Bật để xem tất cả. |
+| Nút | Phím | Tác dụng |
+|---|---|---|
+| **Tạm dừng** | `Ctrl+P` | Ngừng gửi audio, **không** kết thúc phiên. Lời nói trong lúc tạm dừng bị bỏ ngay lúc thu — không được gửi bù sau khi tiếp tục. Bấm lại (nút đổi thành **Tiếp tục**) để chạy tiếp. |
+| **Dừng phiên** | `Ctrl+.` | Kết thúc phiên: gửi nốt audio còn trong hàng đợi rồi chốt bản chép. |
+| **Bám trực tiếp** | `Ctrl+L` | Timeline tự cuộn theo audio đang tới. Cuộn tay sẽ tự tắt nó, và nút đổi nhãn thành **Đang xem lại**. |
+| **Tới chữ mới nhất** | `Ctrl+J` | Nhảy tới từ mới nhất đã nhận được. |
+| **Chữ chạy** | `Ctrl+T` | Chuyển sang chế độ một dòng chữ chạy, chữ to. |
+| **Hiện từ yếu** | `Ctrl+W` | Mặc định các từ dưới ngưỡng tin cậy bị ẩn. Bật để xem tất cả. |
 
-Bảng bên phải hiển thị **Highlights** (các đoạn dưới 75% tin cậy) và một ô
-`delay` với số liệu độ trễ theo thời gian thực.
+Lọc nhiễu phần cứng của mic (cần `xvf_host`) nằm ở menu **Micro** — nó được đặt
+một lần cho cả buổi chứ không phải thứ bật tắt liên tục, nên không chiếm chỗ
+trên thanh công cụ.
+
+**Cột phải** trả lời hai câu hỏi, theo thứ tự:
+
+1. **Độ trễ văn bản** — một con số lớn: chữ đang chậm hơn lời nói bao nhiêu
+   giây. Xanh dưới 1.5 s, vàng tới 4 s, đỏ trên đó. Ngay dưới là bốn dòng nói
+   thời gian đang trôi đi đâu: tồn đọng tới AI (hàng đợi máy này + hàng đợi
+   server), thời gian ACK và chờ AI, tiến độ audio so với đồng hồ, và mốc
+   tiếng nói so với mốc văn bản.
+2. **Cần soát lại** — các cụm từ mô hình tự đánh giá dưới ngưỡng tin cậy, kèm
+   mốc thời gian, người nói và phần trăm. Đây là danh sách việc cần làm ở bảng
+   **Soát & sửa**.
+
+Các số phân vị của máy chủ và của máy này, cùng bộ đếm của mô hình bản chép,
+nằm sau nút **Chi tiết kỹ thuật** — cần khi báo lỗi, không cần lúc điều hành.
 
 ### 2.3 Kết thúc
 
-Bấm **STOP**. Thanh trạng thái hiện "Đang kết thúc: gửi nốt audio và flush
+Bấm **Dừng phiên**. Thanh trạng thái hiện "Đang kết thúc: gửi nốt audio và flush
 correction...". Bước này có thể mất từ vài giây đến vài phút — server còn phải
 xử lý hết phần audio đã nhận. Đừng đóng ứng dụng trong lúc này.
 
@@ -131,7 +181,7 @@ Xong sẽ có thông báo kèm mã phiên, thời lượng và số revision.
 
 ## 3. Chạy lại một tệp audio
 
-Bấm **AUDIO**, khai báo siêu dữ liệu và phạm vi người nói giống mục 2, rồi chọn
+Bấm **Chạy tệp audio** (`Ctrl+O`), khai báo siêu dữ liệu và phạm vi người nói giống mục 2, rồi chọn
 tệp `.wav` hoặc `.m4a`.
 
 - `.m4a` và `.wav` không phải PCM 16-bit sẽ được chuyển mã qua **ffmpeg** trước
@@ -145,7 +195,7 @@ mà không cần dựng lại cuộc họp.
 
 ## 4. Soát lại và sửa bản chép
 
-Bấm **REVIEW** để mở bảng soát lại ở đáy cửa sổ.
+Bấm **Soát & sửa** (`F9`) để mở bảng soát lại ở đáy cửa sổ.
 
 - **Tải danh sách** rồi chọn phiên; hoặc gõ thẳng `session_id`.
 - **Sửa một câu**: bấm đúp vào ô văn bản, sửa, xác nhận.
@@ -160,13 +210,13 @@ bạn tải về, chỉnh sửa sẽ bị từ chối và bảng tự tải lạ
 Nếu nhận được *"chưa chốt tới đoạn này, thử lại sau vài giây"*: đoạn đó vẫn còn
 là kết quả tạm, chưa chốt. Đợi vài giây rồi sửa lại.
 
-Bấm **LỊCH SỬ** để xem toàn bộ nhật ký kiểm toán của phiên: ai sửa gì, lúc nào.
+Menu **Công cụ → Lịch sử hiệu chỉnh** (`F7`) xem toàn bộ nhật ký kiểm toán của phiên: ai sửa gì, lúc nào.
 
 ---
 
 ## 5. Đăng ký giọng nói
 
-Bấm **SETUP**. Cần có tên người thao tác.
+Menu **Phiên → Đăng ký giọng nói** (`F5`). Cần có tên người thao tác.
 
 **Đăng ký giọng mới — thu trực tiếp:**
 1. Nhập tên hiển thị.
@@ -195,35 +245,35 @@ không cần chuẩn bị gì trước.
 > chủ chứ không phải của bạn: khoá `enroll/url` trong `/etc/s2t-qt-server.conf`
 > đang để trống. Báo người quản trị.
 
-**Gán giọng cho một phiên:** ở phần *Speaker của phiên*, mỗi speaker phát hiện
+**Gán giọng cho một phiên:** ở phần *Người nói trong phiên*, mỗi speaker phát hiện
 được trong phiên có thể để nguyên, gán vào một người đã có trong DB, hoặc tạo
 mới. Bấm **Lưu lựa chọn**. Từng speaker được báo kết quả riêng — một cái lỗi
 không kéo theo các cái còn lại.
 
 ---
 
-## 6. Cửa sổ TRACE và NGHIỆM THU
+## 6. Cửa sổ Pipeline trace và Nghiệm thu
 
-**TRACE** — xem từng chặng pipeline đã nhận gì và làm gì với nó, theo số thứ tự
+**Pipeline trace** (`F8`) — xem từng chặng pipeline đã nhận gì và làm gì với nó, theo số thứ tự
 sự kiện. Hai chế độ tách bạch: *realtime* chỉ giữ các thẻ mới nhất (không phình
 theo thời gian), *lịch sử* lật ngược về quá khứ theo trang. Nghe lại được audio
 thô của từng sự kiện và ghép nhiều span để nghe liền. Cần bật **pipeline trace**
 lúc tạo phiên.
 
-**NGHIỆM THU** — bằng chứng để nghiệm thu hệ thống:
+**Nghiệm thu pipeline** (`F10`) — bằng chứng để nghiệm thu hệ thống:
 
 - **Mô hình đang dùng** — kiến trúc và version model phía server.
 - **Thiết bị & hàng đợi** — lịch sử chuyển trạng thái mic của phiên hiện tại và
   biểu đồ độ trễ: RTT, thời gian chờ AI, phần mạng + gRPC, hàng đợi hai phía.
 - **Bằng chứng lọc nhiễu** — ghi ~7 giây đối chứng tắt/bật lọc nhiễu để nghe so
   sánh. Phải dừng phiên mic trước.
-- **VAD / Segment**, **CAM++ verify**, **Speaker của phiên** — tra theo `session_id`.
+- **VAD / Segment**, **CAM++ verify**, **Người nói trong phiên** — tra theo `session_id`.
 
 ---
 
 ## 7. Nhật ký và chẩn đoán
 
-Bấm **NHẬT KÝ** để mở cửa sổ *Nhật ký & Chẩn đoán*.
+Menu **Công cụ → Nhật ký & chẩn đoán** (`F12`) mở cửa sổ *Nhật ký & Chẩn đoán*.
 
 ### 7.1 Tab Nhật ký
 
@@ -406,7 +456,7 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 7.3
 
 - **Audio lúc tạm dừng không bao giờ được gửi bù.** Bỏ ngay lúc thu, không phải
   lúc gửi.
-- **Phiên không tự kết thúc khi mất mạng hay mất mic.** Chỉ có nút STOP, lỗi
+- **Phiên không tự kết thúc khi mất mạng hay mất mic.** Chỉ có nút **Dừng phiên**, lỗi
   không khắc phục được, hoặc đóng ứng dụng mới kết thúc phiên.
 - **Đóng ứng dụng khi đang ghi sẽ cắt phiên** mà không flush correction. Ứng
   dụng có hỏi lại trước khi làm.
