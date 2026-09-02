@@ -1148,3 +1148,90 @@ python3 tools/restart_check.py ./s2t-qt-server [--durability fsync]
     Phải là `QLockFile` chứ không phải một tệp `O_EXCL`: nó ghi pid và chiếm
     lại khoá của một tiến trình đã chết, nên `SIGKILL` không để lại khoá chết
     chặn mất đúng cái lần khởi động lại mà nhật ký sinh ra để phục vụ.
+23. **Danh tính người nói phải đi cùng các từ của gói, và đường sửa của điều
+    hành viên không được mang danh tính nào.** Trong `LiveTranscript`,
+    `replaceSpan()` (gói từ tầng suy luận) và `applyEdit()` (điều hành viên sửa
+    chữ) cùng dùng chung `spliceWords()`, nhưng khác nhau đúng ở ba tham số
+    `speaker` / `speakerProb` / `verifiedName`. Gói **có** ba thứ đó và phải
+    truyền xuống; thao tác sửa **không có**, và mỗi từ giữ nguyên làn cũ của nó
+    — nếu không thì sửa một câu sẽ gán nó cho người khác.
+
+    Đây là một lỗi có thật, phát hiện 2026-09-02: `replaceSpan()` gọi thẳng
+    `applyEdit()`, mà `asr_words` thì **luôn** có mốc thời gian, nên đó là
+    đường đi của *mọi* gói. Hệ quả là tên người nói mà `asr_diar_session` trả
+    về (đo được: `verified_name="Anna"`, `verify_score` 0,84) bị vứt sạch, và
+    mọi dòng đã chốt hiện ra là "Người 1". Rất khó thấy, vì hàng tạm được gán
+    thẳng trong `apply()` nên **vẫn** có tên đúng.
+24. **Correction sửa chữ, không sửa người nói.** `merged_words` của một
+    correction thường trải dài hàng phút, nên đóng dấu `speaker` của gói hiện
+    tại lên cả khoảng đó sẽ xoá sạch phân vai của mọi câu nó phủ. Vì vậy
+    `apply()` gọi `replaceSpan(correction.mergedWords, QString(), 0, QString())`
+    — không mang danh tính nào — và mỗi từ được sửa thừa kế làn + tên của **đúng
+    từ nó thay thế**, tra theo thời gian (`priorAt()`), chứ không phải của từ
+    đầu tiên trong khoảng: một correction có thể phủ nhiều lượt nói, gán tất cả
+    cho người đầu tiên là gộp những người vốn đã được tách đúng.
+
+    Đo được ngày 2026-09-02 trên mẫu 5 phút: dòng ở 00:21 lần lượt mang nhãn
+    Newsman → Anna → (không tên) → "Người 4" — vẫn đúng những chữ ấy, bốn người
+    khác nhau, chỉ vì các correction lăn qua nó.
+25. **Người nói của một từ tra theo mốc thời gian của chính nó, không theo
+    `PushAudioResponse.speaker`.** Trường `speaker` mô tả **gói vừa được giải
+    mã**, còn các từ trong gói đó đã được nói trước đó vài giây — ASR trả chữ
+    trễ hơn lời nói. Trong một buổi phỏng vấn, khoảng trễ ấy đủ để câu hỏi rơi
+    sang người trả lời.
+
+    Nguồn đúng là `diar_chunk_preds_flat` + `diar_chunk_preds_shape` +
+    `diar_subframe_start_ms/end_ms` — ma trận điểm `[số lát x số người]` kèm
+    mốc của từng lát, **vốn đã có sẵn trên đường truyền** trong
+    `asr::Diarization` và trước 2026-09-02 không ai dùng.
+    `LiveTranscript::foldDiarization()` gộp chúng thành các lượt nói (các lát
+    liên tiếp cùng người được nhập một), `speakerAt()` trả về lượt phủ nhiều
+    nhất khoảng `[start, end]` của từ. Ngưỡng `kDiarFloor = 0.5`: dưới mức đó
+    không ai đủ rõ để nhận lát ấy, và im lặng thì tốt hơn là bịa ra một lượt
+    nói từ tiếng ồn nền.
+
+    Kéo theo: **tên đã xác minh của gói chỉ áp cho làn của gói đó**
+    (`word.speaker == chunkSpeaker`). Khi một từ có thể rơi vào làn khác với
+    làn đang được giải mã, gán bừa tên ấy là đặt tên người đang nói lên lời của
+    người đã nói.
+
+    Kiểm chứng 2026-09-02, mẫu phỏng vấn 2:33: trước khi sửa, câu mở đầu của
+    người phỏng vấn bị cắt đôi và nửa sau gán cho ứng viên; sau khi sửa, cả câu
+    nằm đúng dưới `Interviewer`.
+26. **Làn của một từ được đóng băng ở lần xếp chỗ đầu tiên.** `asr_words` là
+    cửa sổ trượt rộng khoảng tám giây, còn mỗi gói chỉ mang **một** giá trị
+    `speaker` cho toàn bộ cửa sổ đó. Đóng dấu giá trị ấy lên cả lô nghĩa là mọi
+    ranh giới lượt nói nằm trong tám giây bị gán lại cho người đang nói ở thời
+    điểm hiện tại. Trong một buổi phỏng vấn — nơi các lượt cách nhau vài giây —
+    hậu quả là câu hỏi bị gán cho người trả lời.
+
+    Vì vậy `speaker` của gói chỉ áp cho những từ **cửa sổ chưa từng xếp chỗ**
+    (`placedAt()` — so khớp theo bao hàm thời gian, không phải "từ gần nhất
+    phía trước", nếu không một từ hoàn toàn mới sẽ bị đóng băng vào làn của
+    người nói trước đó). Tên cũng theo quy tắc ấy, và chỉ được nâng cấp **một
+    lần**, từ "chưa có tên" sang một tên đã xác minh.
+    `s2t-qt-client/core/TranscriptModel.cpp` đóng băng làn y hệt và nói rõ lý
+    do — server giờ giữ trạng thái nên phải theo cùng luật.
+
+    Đo được ngày 2026-09-02 trên mẫu phỏng vấn 2:33: "điểm mạnh của bạn là gì"
+    rơi vào ứng viên, còn câu trả lời của cô ấy rơi vào người phỏng vấn.
+27. **Tên đi theo từng từ, không đi theo làn người nói.** Trong
+    `spliceWords()`, mỗi từ giữ cái tên nó được gán lúc nó đến (`Placed::name`),
+    y như `_verified_name` trên mỗi word của `grpc_session_adapter.py`. Gắn tên
+    theo làn thì mỗi câu trả lời mới cho làn đó sẽ **viết lại quá khứ**: tầng
+    suy luận liên tục đổi ý giữa các ứng viên nó đang cân nhắc, nên một cuộc
+    họp mà Newsman nói trước sẽ bị đổi hết lời của anh ta thành người được gọi
+    tên sau cùng. Đo được ngày 2026-09-02: cả 8 dòng đầu bị gán lại thành
+    "Cowoker".
+28. **Tên giữ chỗ không được đè lên tên thật.** Tầng suy luận trả
+    `verified_name="unknown"` xen kẽ với tên thật suốt cuộc họp, nên để lọt sẽ
+    làm tên nhấp nháy mất vài trăm mili-giây một lần.
+    `LiveTranscript::isPlaceholderName()` giữ danh sách các cách nói "chưa nhận
+    ra ai", và nó phải **khớp** với `TranscriptModel::isRealName()` bên client:
+    bên này quyết định cái gì được *lưu*, bên kia quyết định cái gì được *vẽ*,
+    lệch nhau thì sinh ra những dòng trông như vô danh mà không ai giải thích
+    được.
+29. **`speaker = -1` không phải là người nói số -1.** Đó là "diarization chưa
+    quyết được". Dựng nó thành một làn riêng sẽ đẻ ra người nói ma "Người 0" ở
+    client, vì `DisplayRow.speaker` được client đọc bằng `toInt()`. Các từ đó
+    chờ cửa sổ trượt gửi lại kèm làn thật.

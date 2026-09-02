@@ -53,6 +53,13 @@ public:
     bool applyEdit(quint64 baseRevision, double startSec, double endSec,
                    const QList<asr::Word> &words);
 
+    // True for every spelling the pipeline uses to mean "nobody was verified".
+    // The client has the same rule in TranscriptModel::isRealName() and remains
+    // the authority on what gets *drawn*; this copy exists because the server
+    // now has to decide something the client cannot: whether an incoming name
+    // is worth overwriting a name it already has.
+    static bool isPlaceholderName(const QString &name);
+
     // Moves every word and row from one diarization slot to another, and
     // optionally attaches a verified name.  An empty name clears it, which is
     // deliberate: proto3 cannot tell "unset" from "empty", and the client's
@@ -80,8 +87,37 @@ private:
                      const QString &verifiedName);
     void appendWords(const QList<asr::Word> &words, const QString &speaker, float speakerProb,
                      const QString &verifiedName);
+    // The worker behind both applyEdit() and replaceSpan().  The three speaker
+    // arguments are what an operator edit does NOT have and a tier chunk does:
+    // an edit only moves text around and must leave the diarization alone,
+    // while a chunk carries the answer to "who is talking" and would otherwise
+    // have it dropped on the floor here.
+    bool spliceWords(quint64 baseRevision, double startSec, double endSec,
+                     const QList<asr::Word> &words, const QString &speaker, float speakerProb,
+                     const QString &verifiedName);
     void rebuildPhrases(asr::DisplayRow *row) const;
     void recount();
+
+    // Who was speaking when, accumulated from the per-subframe diarization the
+    // tier sends with every chunk.  This is the only source that can place a
+    // word correctly: PushAudioResponse.speaker is a single value describing
+    // the chunk that has just been decoded, while the words in that chunk were
+    // spoken seconds earlier and may belong to the other person entirely.
+    struct DiarTurn
+    {
+        double startSec = 0.0;
+        double endSec = 0.0;
+        QString speaker;
+    };
+    void foldDiarization(const asr::Diarization &diarization);
+    // The slot that covers most of [startSec, endSec], or empty when the
+    // diarization has nothing to say about that stretch.
+    QString speakerAt(double startSec, double endSec) const;
+
+    // Consecutive subframes of the same speaker are merged, so this is bounded
+    // by how often the speakers change hands rather than by the length of the
+    // meeting: a two-minute interview folds ~1900 subframes into a few dozen.
+    QList<DiarTurn> m_turns;
 
     QString m_title;
     quint32 m_sampleRate = 16000;

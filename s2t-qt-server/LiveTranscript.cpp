@@ -2,6 +2,8 @@
 
 #include <QDateTime>
 #include <QHash>
+#include <QRegularExpression>
+#include <QSet>
 
 #include <algorithm>
 
@@ -10,6 +12,16 @@ namespace {
 double nowSeconds()
 {
     return double(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
+}
+
+// asr_diar_session answers -1 while diarization has not decided who is speaking
+// yet, which is not the same as speaker 0.  Treated as "no slot", so those
+// words wait for the rolling window to re-send them with a real one instead of
+// freezing into a lane of their own - the client renders DisplayRow.speaker as
+// a bare integer, so a "-1" lane surfaces as the phantom speaker "Người 0".
+bool isUnassignedSlot(const QString &speaker)
+{
+    return speaker.isEmpty() || speaker == QLatin1String("-1");
 }
 
 // A gap longer than this between two words from the same speaker still starts a
@@ -41,6 +53,9 @@ void LiveTranscript::configure(const QString &title, quint32 sampleRate, quint32
     m_sampleRate = qMax(1u, sampleRate);
     m_channels = qMax(1u, channels);
     m_startedAt = nowSeconds();
+    // Diarization slots are per stream: carrying a previous meeting's turns
+    // over would place this one's first words on last one's speakers.
+    m_turns.clear();
 }
 
 quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
@@ -72,6 +87,11 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
     m_ampTrace.append(response.asrConfidence);
     if (m_ampStepSec <= 0.0 && response.chunkEndSec > response.chunkStartSec)
         m_ampStepSec = response.chunkEndSec - response.chunkStartSec;
+
+    // Folded before any word is placed: a word is assigned the slot that was
+    // speaking at ITS OWN timestamps, and the subframes covering those
+    // timestamps have to be on the timeline before the lookup happens.
+    foldDiarization(response.diarization);
 
     // asr_words is a ROLLING WINDOW, not a delta.
     //
@@ -110,10 +130,19 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
     // nothing wider.  Synthesising a wider one would tell us to wipe canonical
     // text that the correction never touched; grpc_session_adapter.py's
     // _correction_bounds carries the same rule and the same warning.
-    if (!response.correction.mergedWords.isEmpty()) {
-        replaceSpan(response.correction.mergedWords, response.speaker, response.speakerProb,
-                    response.verifiedName);
-    }
+    // A correction rewrites TEXT, never who said it - so it carries no speaker
+    // of its own, exactly like an operator edit, and every corrected word
+    // inherits the slot and name of the word it replaces.
+    //
+    // Stamping the chunk's speaker across it instead is what wrecked the
+    // transcript before 2026-09-02: merged_words routinely spans minutes of
+    // meeting, so one correction relabelled everything it covered as whoever
+    // happened to be talking at that instant.  Measured on the 5-minute sample:
+    // the row at 00:21 was labelled Newsman, then Anna, then nobody, then
+    // "Người 4" - same words, four different speakers, purely from corrections
+    // rolling over it.
+    if (!response.correction.mergedWords.isEmpty())
+        replaceSpan(response.correction.mergedWords, QString(), 0.0f, QString());
 
     // The interim edge.  Replaced wholesale every time, never appended.
     if (!response.streamingText.isEmpty()) {
@@ -168,7 +197,13 @@ void LiveTranscript::replaceSpan(const QList<asr::Word> &words, const QString &s
         ++m_revision;
         return;
     }
-    applyEdit(m_revision, from, to, words);
+    // The chunk's own speaker and verified name have to travel with its words.
+    // They used to stop here - replaceSpan() called the operator-edit path,
+    // which has no speaker arguments - and because asr_words always carries
+    // timings, that was the path every single chunk took.  The result was a
+    // transcript whose committed rows had an empty speaker and no name at all
+    // while the provisional row, set directly in apply(), showed both.
+    spliceWords(m_revision, from, to, words, speaker, speakerProb, verifiedName);
 }
 
 void LiveTranscript::appendWords(const QList<asr::Word> &words, const QString &speaker,
@@ -178,8 +213,8 @@ void LiveTranscript::appendWords(const QList<asr::Word> &words, const QString &s
         asr::Word word = incoming;
         // The tier may tag words individually or only per chunk; a per-word tag
         // wins, because diarization inside a chunk is the finer answer.
-        if (word.speaker.isEmpty())
-            word.speaker = speaker;
+        if (isUnassignedSlot(word.speaker))
+            word.speaker = isUnassignedSlot(speaker) ? QString() : speaker;
 
         const bool sameTurn = !m_rows.isEmpty() && m_rows.last().speaker == word.speaker
             && (word.startSec - m_rows.last().endSec) <= kTurnGapSec;
@@ -364,55 +399,252 @@ asr::CanonicalTranscript LiveTranscript::transcript() const
     return out;
 }
 
+void LiveTranscript::foldDiarization(const asr::Diarization &diarization)
+{
+    // diar_chunk_preds_flat is a [subframes x speakers] score matrix, flattened
+    // row-major, with one start/end pair per row.  The winning column is the
+    // slot; below kDiarFloor nobody is speaking clearly enough to claim the
+    // subframe, and saying nothing is better than inventing a turn out of room
+    // tone.
+    constexpr float kDiarFloor = 0.5f;
+
+    if (diarization.shape.size() != 2)
+        return;
+    const int rows = diarization.shape.at(0);
+    const int cols = diarization.shape.at(1);
+    if (rows <= 0 || cols <= 0 || diarization.flatScores.size() < rows * cols)
+        return;
+    if (diarization.subframeStartMs.size() < rows || diarization.subframeEndMs.size() < rows)
+        return;
+
+    for (int row = 0; row < rows; ++row) {
+        int best = -1;
+        float bestScore = kDiarFloor;
+        for (int col = 0; col < cols; ++col) {
+            const float score = diarization.flatScores.at(row * cols + col);
+            if (score > bestScore) {
+                bestScore = score;
+                best = col;
+            }
+        }
+        if (best < 0)
+            continue;
+
+        const double from = double(diarization.subframeStartMs.at(row)) / 1000.0;
+        const double to = double(diarization.subframeEndMs.at(row)) / 1000.0;
+        if (to <= from)
+            continue;
+        // The tier re-sends the window it is working on, so a subframe already
+        // folded in must not extend the timeline a second time.
+        if (!m_turns.isEmpty() && to <= m_turns.last().endSec + 1e-6)
+            continue;
+
+        const QString slot = QString::number(best);
+        if (!m_turns.isEmpty() && m_turns.last().speaker == slot
+            && from <= m_turns.last().endSec + 0.2) {
+            m_turns.last().endSec = to;
+        } else {
+            m_turns.append({from, to, slot});
+        }
+    }
+}
+
+QString LiveTranscript::speakerAt(double startSec, double endSec) const
+{
+    if (endSec <= startSec)
+        endSec = startSec + 1e-3;
+    QString best;
+    double bestOverlap = 0.0;
+    for (const DiarTurn &turn : m_turns) {
+        if (turn.endSec <= startSec)
+            continue;
+        if (turn.startSec >= endSec)
+            break; // kept in time order
+        const double overlap = qMin(endSec, turn.endSec) - qMax(startSec, turn.startSec);
+        if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            best = turn.speaker;
+        }
+    }
+    return best;
+}
+
+bool LiveTranscript::isPlaceholderName(const QString &name)
+{
+    const QString value = name.trimmed().toLower();
+    if (value.isEmpty())
+        return true;
+    // Kept in step with TranscriptModel::isRealName() in the client.  Both
+    // lists have to agree: this one decides what is stored, that one decides
+    // what is drawn, and a name that passes here only to be hidden there is a
+    // row that looks unidentified for no reason anybody can see.
+    static const QSet<QString> placeholders = {
+        QStringLiteral("unknown"), QStringLiteral("unk"), QStringLiteral("?"),
+        QStringLiteral("spk?"), QStringLiteral("speaker?"),
+    };
+    if (placeholders.contains(value))
+        return true;
+    if (value.startsWith(QStringLiteral("unknown_")) || value.startsWith(QStringLiteral("unknown-")))
+        return true;
+    static const QRegularExpression bare(QStringLiteral("^speaker_\\d+$"));
+    return bare.match(value).hasMatch();
+}
+
 bool LiveTranscript::applyEdit(quint64 baseRevision, double startSec, double endSec,
                                const QList<asr::Word> &words)
+{
+    // An operator edit changes text, never who said it, so it passes no
+    // speaker of its own and every word keeps the slot it already had.
+    return spliceWords(baseRevision, startSec, endSec, words, QString(), 0.0f, QString());
+}
+
+bool LiveTranscript::spliceWords(quint64 baseRevision, double startSec, double endSec,
+                                 const QList<asr::Word> &words, const QString &speaker,
+                                 float speakerProb, const QString &verifiedName)
 {
     if (baseRevision != m_revision)
         return false;
 
+    const QString chunkSpeaker = isUnassignedSlot(speaker) ? QString() : speaker;
+
+    // The name a word was given when it arrived travels with the word, not with
+    // its diarization slot.  Keying it on the slot instead means every later
+    // answer for that slot rewrites history: the tier flips between the
+    // candidates it is weighing, and a meeting where Newsman spoke first ends
+    // up with all of his lines relabelled as whoever was named last.
+    // grpc_session_adapter.py carries the same rule as `_verified_name` on each
+    // word rather than on the row.
+    struct Placed
+    {
+        asr::Word word;
+        QString name;
+        float prob = 0.0f;
+    };
+
     // Rebuild from the flat word list: splicing rows in place would have to get
     // turn boundaries right a second time, and the two answers would drift.
-    QList<asr::Word> kept;
-    QString speakerAtRange;
+    QList<Placed> kept;
+    QList<Placed> replaced; // what used to be in the span, in time order
+    QHash<QString, QString> nameBySpeaker;
     for (const asr::DisplayRow &row : m_rows) {
+        if (!row.verifiedName.isEmpty())
+            nameBySpeaker.insert(row.speaker, row.verifiedName);
         for (const asr::Word &word : row.displayTokens) {
             const bool inside = word.startSec >= startSec && word.startSec < endSec;
-            if (inside) {
-                if (speakerAtRange.isEmpty())
-                    speakerAtRange = word.speaker;
-                continue;
-            }
-            kept.append(word);
+            if (inside)
+                replaced.append({word, row.verifiedName, row.speakerProb});
+            else
+                kept.append({word, row.verifiedName, row.speakerProb});
         }
     }
+
+    // Who was speaking at `at`, according to the words being replaced.  Per
+    // word rather than one answer for the whole span: a correction can cover
+    // several turns, and giving all of them the first speaker's slot merges
+    // people who were told apart correctly the first time.
+    const auto priorAt = [&replaced](double at) -> const Placed * {
+        const Placed *best = nullptr;
+        for (const Placed &item : replaced) {
+            if (item.word.startSec <= at + 1e-6)
+                best = &item;
+            if (at >= item.word.startSec && at < item.word.endSec)
+                return &item;
+        }
+        return best;
+    };
+
+    // The word that used to sit at exactly this position, if there was one.
+    // Strictly containment, unlike priorAt(): "which word is this one
+    // replacing" and "who was talking around here" are different questions,
+    // and answering the first with the nearest earlier word would freeze a
+    // brand-new word onto the previous speaker's lane.
+    const auto placedAt = [&replaced](double at) -> const Placed * {
+        for (const Placed &item : replaced) {
+            if (at >= item.word.startSec - 1e-6 && at < item.word.endSec)
+                return &item;
+        }
+        return nullptr;
+    };
     for (const asr::Word &incoming : words) {
         asr::Word word = incoming;
-        if (word.speaker.isEmpty())
-            word.speaker = speakerAtRange;
         // An editor that gives no timing gets the range it replaced, so the
         // word still sorts into the right place in the meeting.
         if (word.startSec <= 0.0)
             word.startSec = startSec;
         if (word.endSec <= word.startSec)
             word.endSec = endSec;
-        kept.append(word);
-    }
-    std::stable_sort(kept.begin(), kept.end(), [](const asr::Word &a, const asr::Word &b) {
-        return a.startSec < b.startSec;
-    });
 
-    // Keep the verified names that were attached to each diarization slot; they
-    // are a property of the speaker, not of the words being replaced.
-    QHash<QString, QString> verifiedBySpeaker;
-    for (const asr::DisplayRow &row : m_rows) {
-        if (!row.verifiedName.isEmpty())
-            verifiedBySpeaker.insert(row.speaker, row.verifiedName);
+        const Placed *prior = priorAt(word.startSec);
+        const Placed *already = placedAt(word.startSec);
+
+        // A word's lane is frozen the first time it is placed.
+        //
+        // asr_words is a rolling window about eight seconds wide and the chunk
+        // carries ONE speaker for all of it, so stamping that speaker across
+        // the batch relabels every turn boundary inside the window to whoever
+        // is talking right now.  In an interview - where the turns are a few
+        // seconds apart - that swaps the question onto the person answering
+        // it.  Measured on the 2:33 sample: "điểm mạnh của bạn là gì" ended up
+        // under the candidate and her answer under the interviewer.
+        //
+        // So the chunk's speaker applies only to words this window has not
+        // placed before.  s2t-qt-client/core/TranscriptModel.cpp freezes lanes
+        // the same way, for the same reason, and says so.
+        if (isUnassignedSlot(word.speaker)) {
+            // A word that has been placed keeps its lane - the freeze has to
+            // win, or a correction that nudges the timings by a few
+            // milliseconds re-runs the lookup and can land the word on the
+            // other side of a turn boundary.  For a word being placed for the
+            // FIRST time, diarization at that word's own timestamps is the
+            // right source: it is the only one that knows who was speaking
+            // then rather than now.
+            if (already && !isUnassignedSlot(already->word.speaker))
+                word.speaker = already->word.speaker;
+            else if (const QString atWord = speakerAt(word.startSec, word.endSec);
+                     !atWord.isEmpty())
+                word.speaker = atWord;
+            else if (!chunkSpeaker.isEmpty())
+                word.speaker = chunkSpeaker;
+            else if (prior)
+                word.speaker = prior->word.speaker;
+        }
+
+        // The name for the words that just arrived.  A placeholder does not
+        // erase what the word is already called: the tier goes on emitting
+        // "unknown" for chunks it cannot score, and letting those through
+        // would make an identified speaker lose their name every few hundred
+        // milliseconds.
+        QString name;
+        float prob = speakerProb;
+        if (already && !isPlaceholderName(already->name)) {
+            // Already identified: keep it.  Only one upgrade is allowed per
+            // word, from "no name" to a verified one - the same single-step
+            // rule TranscriptModel applies to lanes, and what stops a word
+            // changing hands every time the window rolls over it.
+            name = already->name;
+            prob = already->prob;
+        } else if (!isPlaceholderName(verifiedName) && word.speaker == chunkSpeaker) {
+            // The chunk's name belongs to the chunk's slot.  Now that a word can
+            // land on a different slot than the one being decoded, handing it
+            // this name anyway would put the person who is talking now onto the
+            // words of the person who was talking then.
+            name = verifiedName.trimmed();
+        } else if (prior) {
+            name = prior->name;
+            prob = prior->prob;
+        } else {
+            name = nameBySpeaker.value(word.speaker);
+        }
+        kept.append({word, name, prob});
     }
+    std::stable_sort(kept.begin(), kept.end(), [](const Placed &a, const Placed &b) {
+        return a.word.startSec < b.word.startSec;
+    });
 
     m_rows.clear();
     m_nextRowId = 1;
-    for (const asr::Word &word : kept)
-        appendWords({word}, word.speaker, 0.0f, verifiedBySpeaker.value(word.speaker));
+    for (const Placed &placed : kept)
+        appendWords({placed.word}, placed.word.speaker, placed.prob, placed.name);
 
     ++m_revision;
     ++m_version;
