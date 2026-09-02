@@ -179,13 +179,18 @@ Xong sẽ có thông báo kèm mã phiên, thời lượng và số revision.
 
 ---
 
-## 3. Chạy lại một tệp audio
+## 3. Chạy lại một tệp audio hoặc video
 
 Bấm **Chạy tệp audio** (`Ctrl+O`), khai báo siêu dữ liệu và phạm vi người nói giống mục 2, rồi chọn
-tệp `.wav` hoặc `.m4a`.
+tệp. Nhận cả **video**: `.wav .m4a .mp3 .aac .flac .ogg .mp4 .mkv .mov .avi`.
 
-- `.m4a` và `.wav` không phải PCM 16-bit sẽ được chuyển mã qua **ffmpeg** trước
-  (cần có `ffmpeg` trên PATH).
+- Tệp không phải WAV PCM 16-bit được giải mã tự động. Nếu máy có `ffmpeg` trên
+  PATH thì dùng nó; nếu không thì dùng **FFmpeg đi kèm Qt Multimedia**, nên
+  **không cần cài gì thêm trên máy trạm**. Với video, chỉ luồng tiếng được lấy.
+- Mọi nguồn đều được đưa về **16 kHz mono** trước khi gửi, vì
+  `asr_diar_session` nhận một tensor float không kèm nhịp lấy mẫu và mặc định
+  coi mọi thứ là 16 kHz — đưa 48 kHz vào thì bản chép nghe trôi chảy nhưng sai
+  hoàn toàn, chứ không báo lỗi.
 - Tốc độ phát lại theo tùy chọn **Phát lại tệp theo tốc độ thật** trong Cấu hình.
 
 Tệp đi qua **đúng pipeline** như microphone, nên đây là cách tái hiện một sự cố

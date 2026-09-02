@@ -179,7 +179,8 @@ void MainWindow::buildActions()
     m_fileAction = new QAction(theme::icon(theme::Glyph::File),
                                QStringLiteral("Chạy tệp audio..."), this);
     m_fileAction->setShortcut(QKeySequence::Open);
-    m_fileAction->setToolTip(QStringLiteral("Chạy lại một tệp WAV/M4A qua đúng pipeline (Ctrl+O)"));
+    m_fileAction->setToolTip(
+        QStringLiteral("Chạy lại một tệp âm thanh hoặc video qua đúng pipeline (Ctrl+O)"));
     connect(m_fileAction, &QAction::triggered, this, &MainWindow::startFileReplay);
 
     m_quitAction = new QAction(QStringLiteral("Thoát"), this);
@@ -548,8 +549,9 @@ void MainWindow::startFileReplay()
         return;
     }
     const QString path = QFileDialog::getOpenFileName(
-        this, QStringLiteral("Chọn tệp audio"), QString(),
-        QStringLiteral("Audio (*.wav *.m4a);;WAV (*.wav);;M4A/AAC (*.m4a)"));
+        this, QStringLiteral("Chọn tệp audio hoặc video"), QString(),
+        QStringLiteral("Âm thanh / video (*.wav *.m4a *.mp3 *.aac *.flac *.ogg *.mp4 *.mkv "
+                       "*.mov *.avi);;WAV (*.wav);;Tất cả (*)"));
     if (path.isEmpty()) {
         LOG_INFO(applog::cat::Ui) << "action: no file picked";
         return;

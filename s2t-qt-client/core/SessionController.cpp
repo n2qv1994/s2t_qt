@@ -3,6 +3,7 @@
 #include "core/Logger.h"
 #include "SessionWorker.h"
 #include "StatePoller.h"
+#include "audio/MediaDecode.h"
 #include "audio/Transcode.h"
 #include "audio/WavIo.h"
 
@@ -264,21 +265,38 @@ void SessionController::startFile(const QString &path, bool restrict, const QStr
         << "file replay requested" << path << "- restrict=" << restrict
         << "expected=[" << expected.join(QStringLiteral(", ")) << "]" << "mode=" << meta.mode;
     QString error;
+    wav::Pcm pcm;
     // .m4a and non-PCM .wav go through ffmpeg first; a plain 16-bit PCM WAV
     // comes straight back and no temporary is created.
     const QString decodedPath = audio::ensurePcmWav(path, &error);
-    if (decodedPath.isEmpty()) {
-        LOG_ERROR(applog::cat::Session) << "decoding the audio file failed:" << error;
-        emit errorMessage(error.isEmpty() ? QStringLiteral("không đọc được tệp audio") : error);
-        return;
+    if (!decodedPath.isEmpty()) {
+        if (decodedPath != path)
+            LOG_DEBUG(applog::cat::Session) << "transcoded through ffmpeg ->" << decodedPath;
+        pcm = wav::readWav(decodedPath, &error);
+        if (decodedPath != path)
+            QFile::remove(decodedPath); // already fully read into memory
     }
-    if (decodedPath != path)
-        LOG_DEBUG(applog::cat::Session) << "transcoded through ffmpeg ->" << decodedPath;
-    const wav::Pcm pcm = wav::readWav(decodedPath, &error);
-    if (decodedPath != path)
-        QFile::remove(decodedPath); // already fully read into memory
     if (!pcm.isValid()) {
-        LOG_ERROR(applog::cat::Session) << "reading the WAV failed:" << error;
+        // No ffmpeg binary, or a container it would not take: fall back to the
+        // FFmpeg Qt itself ships with, which is the same decoder QMediaPlayer
+        // uses and needs nothing installed on the workstation.
+        //
+        // This is not a nicety.  The RHEL host has no ffmpeg on PATH at all, so
+        // until 2026-09-02 the replay path there could open a plain PCM WAV and
+        // nothing else - an operator picking the .mp4 of their own meeting got
+        // "không tìm thấy ffmpeg" and no way forward, while the subtitle window
+        // beside it played the same file.
+        QString mediaError;
+        pcm = audio::decodeMedia(path, &mediaError);
+        if (pcm.isValid()) {
+            LOG_INFO(applog::cat::Session)
+                << "decoded through Qt Multimedia (no ffmpeg binary needed)" << path;
+        } else if (!mediaError.isEmpty()) {
+            error = mediaError;
+        }
+    }
+    if (!pcm.isValid()) {
+        LOG_ERROR(applog::cat::Session) << "decoding the media file failed:" << error;
         emit errorMessage(error.isEmpty() ? QStringLiteral("không đọc được tệp audio") : error);
         return;
     }
