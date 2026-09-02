@@ -50,3 +50,16 @@ core.[0-9]*
 # A live server config carries the two Bearer tokens in plain text.  The
 # committed sample under tools/ deliberately has neither.
 s2t-qt-server.conf
+
+# ---- Media dùng để kiểm thử ----
+# sample/ là chỗ để video/audio thật của người dùng, và nó không thuộc về mã
+# nguồn: bốn tệp từng nằm ở đây chiếm ~90 MB, và mỗi lần đổi bộ mẫu là một lần
+# repo phình thêm chừng đó.  Đây đúng là kiểu phình đã buộc phải dọn lịch sử
+# bằng force push hồi 2026-08-24 (khi ấy là 100 MB thư mục build/).
+#
+# Ngoài ra chúng còn là **giọng nói thật của người thật** — đưa lên một
+# repository là chuyện dữ liệu cá nhân, không chỉ là chuyện dung lượng.
+#
+# Cây trên RHEL giữ bộ mẫu riêng của nó và `tools/deploy_rhel.sh` không đụng
+# tới; xem chú thích ở đầu script đó.
+sample/
