@@ -987,7 +987,7 @@ tiếng Việt một lần, kể cả những hộp thoại chưa viết.
 | `s2t-qt-client/core/` | `SessionController` (mặt tiền), `SessionWorker`, `StatePoller`, `RpcExecutor`, `AudioQueue`, `TranscriptModel`, `AppConfig`, `SelfTest` |
 | `s2t-qt-client/audio/` | `AudioCapture`, `MicDenoise` (điều khiển xvf3800), `WavIo`, `Transcode` (ffmpeg) |
 | `s2t-qt-client/ui/` | `Theme` (mã màu, kiểu chữ, biểu tượng, style sheet toàn ứng dụng), `StatusPanel` (cột phải của cửa sổ chính), `TimelineView`, `Dialogs`, `ReviewPanel`, `EnrollDialog`, `TraceWindow`, `EvidenceWindow`, `DiagnosticsWindow`, `SubtitleWindow`, `LogControls` (combo chế độ/mức log dùng chung) |
-| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp`, `s2t-qt-server.service`, `s2t-qt-server.conf.sample`, `interop_check.py` (grpc thật gọi vào server này), `restart_check.py` (SIGKILL giữa cuộc họp) |
+| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp`, `s2t-qt-server.service`, `s2t-qt-server.conf.sample`, `interop_check.py` (grpc thật gọi vào server này), `restart_check.py` (SIGKILL giữa cuộc họp), `export_transcript.py` (lấy toàn văn một cuộc họp qua `get_review_state` và xuất `.docx`) |
 | `docs/` | `huong-dan-su-dung.md` (vận hành), `luong-hoat-dong.md` (tài liệu này), `danh-sach-api.md` (hợp đồng gRPC cho client bên ngoài), `slide.pdf` (mô tả kiến trúc gốc) |
 
 `shared/` được nạp bằng `include(shared/shared.pri)` hoặc

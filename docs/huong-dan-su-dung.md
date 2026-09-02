@@ -202,6 +202,13 @@ mà không cần dựng lại cuộc họp.
 
 Bấm **Soát & sửa** (`F9`) để mở bảng soát lại ở đáy cửa sổ.
 
+> **Với cuộc họp dài, đây là nơi duy nhất xem được toàn văn.** Khung bản chép
+> đang chạy chỉ giữ **15 phút gần nhất** (và tối đa 180 dòng), để một cuộc họp
+> nhiều giờ không làm chương trình phình ra vô hạn. Đoạn trôi quá mốc đó không
+> mất — nó nằm đủ trên máy chủ — nhưng phải mở Soát & sửa mới thấy, cuộn khung
+> đang chạy thì không ra. Muốn lấy cả cuộc họp thành một tệp thì dùng
+> `tools/export_transcript.py`, nó xuất `.txt` và `.docx` đã gộp theo người nói.
+
 - **Tải danh sách** rồi chọn phiên; hoặc gõ thẳng `session_id`.
 - **Sửa một câu**: bấm đúp vào ô văn bản, sửa, xác nhận.
 - **Đổi tên người nói**: bấm đúp vào ô người nói. Có thể đặt tên hiển thị hoặc
