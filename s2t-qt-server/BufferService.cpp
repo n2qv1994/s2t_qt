@@ -276,15 +276,29 @@ void BufferService::registerMethods()
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetPipelineTrace),
-        [](const grpc::ServerCall &call, QByteArray *out) {
+        [hub](const grpc::ServerCall &call, QByteArray *out) {
             return serve<asr::PipelineTraceRequest, asr::PipelineTraceResponse>(
                 call, out,
                 [&](const asr::PipelineTraceRequest &req, asr::PipelineTraceResponse *resp) {
-                    // enabled=false is the contract's own way of saying "this
-                    // deployment does not collect traces", and the client
-                    // already draws that case. Better than UNIMPLEMENTED here.
                     resp->sessionId = req.sessionId;
-                    resp->enabled = false;
+                    // enabled reports whether this deployment collects traces
+                    // at all, which is the same question as whether there is a
+                    // store to collect them into.  It answered a flat false
+                    // until 2026-09-21 - the contract allows that, but it cost
+                    // the pipeline team the one tool they use to trace a wrong
+                    // punctuation mark back to the window that decided it.
+                    resp->enabled = hub->store().enabled();
+                    if (!resp->enabled)
+                        return grpc::Status();
+                    bool hasMore = false;
+                    resp->events = hub->store().traceHistory(req.sessionId, req.afterSeq,
+                                                             int(req.limit), req.stages, &hasMore);
+                    resp->hasMore = hasMore;
+                    // The cursor for the next poll.  Where nothing came back
+                    // it stays where the caller left it, so an idle session
+                    // does not rewind them to the start of the meeting.
+                    resp->nextSeq = resp->events.isEmpty() ? req.afterSeq
+                                                           : resp->events.last().seq;
                     return grpc::Status();
                 });
         });
@@ -418,6 +432,211 @@ void BufferService::registerMethods()
                     return status;
                 });
         });
+
+    // ---- the global registry's lifecycle -----------------------------------
+    //
+    // An enrolment used to be one-way from here: the five RPCs that let an
+    // operator look at the shared database, take a voice out of it, or hear
+    // what a recording would become before committing it, existed in the
+    // .proto and in the reference adapter and nowhere in this server.  The
+    // practical result was a database nobody could tidy - 62 speakers on the
+    // deployed host as of 2026-09-21, including `5`, `A` and `a1`, every one
+    // of them something a meeting can be matched against.
+
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::PreviewEnrollment),
+        [campp, deadline](const grpc::ServerCall &call, QByteArray *out) {
+            const int ms = deadline(call);
+            return serve<reg::PreviewEnrollmentRequest, reg::PreviewEnrollmentResponse>(
+                call, out,
+                [&](const reg::PreviewEnrollmentRequest &req, reg::PreviewEnrollmentResponse *resp) {
+                    if (req.wav.isEmpty()) {
+                        grpc::Status bad;
+                        bad.code = grpc::InvalidArgument;
+                        bad.message = QStringLiteral("thiếu dữ liệu WAV");
+                        return bad;
+                    }
+                    // No editor_id, deliberately, and it is not an oversight:
+                    // a preview writes nothing - no database row, no catalogue
+                    // entry, no audit line - so there is nothing to attribute.
+                    // /enroll_preview on the far side requires none either.
+                    QList<QPair<QByteArray, QByteArray>> headers;
+                    headers.append({QByteArrayLiteral("X-Speaker-Name"),
+                                    CampPlusClient::urlEncode(req.displayName.trimmed())});
+                    headers.append({QByteArrayLiteral("Content-Type"),
+                                    QByteArrayLiteral("application/octet-stream")});
+                    if (req.allowBelowPolicy)
+                        headers.append({QByteArrayLiteral("X-Allow-Below-Policy"),
+                                        QByteArrayLiteral("1")});
+
+                    QByteArray body;
+                    const grpc::Status status =
+                        campp->post(QStringLiteral("/enroll_preview"), req.wav, headers, &body, ms);
+                    if (!status.ok()) {
+                        // Same rule as EnrollSpeaker: a rejected sample is
+                        // advice for the operator, not a broken server.
+                        resp->ok = false;
+                        resp->error = status.message;
+                        return grpc::Status();
+                    }
+                    const QJsonObject object = QJsonDocument::fromJson(body).object();
+                    resp->ok = true;
+                    resp->speakerId = object.value(QStringLiteral("spk_id")).toString();
+                    resp->rawSeconds = object.value(QStringLiteral("raw_seconds")).toDouble();
+                    resp->speechSecondsAfterVad =
+                        object.value(QStringLiteral("speech_seconds_after_vad")).toDouble();
+                    resp->policyCompliant =
+                        object.value(QStringLiteral("policy_compliant")).toBool();
+                    resp->warning = object.value(QStringLiteral("warning")).toString();
+                    // base64 on the wire because the service answers JSON; the
+                    // proto field is bytes, so it is decoded here and the
+                    // client gets a playable WAV rather than a string.
+                    resp->trimmedWav = QByteArray::fromBase64(
+                        object.value(QStringLiteral("trimmed_wav_b64")).toString().toLatin1());
+                    return status;
+                });
+        });
+
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::ListGlobalSpeakers),
+        [campp, deadline](const grpc::ServerCall &call, QByteArray *out) {
+            const int ms = deadline(call);
+            return serve<reg::ListGlobalSpeakersRequest, reg::ListGlobalSpeakersResponse>(
+                call, out,
+                [&](const reg::ListGlobalSpeakersRequest &, reg::ListGlobalSpeakersResponse *resp) {
+                    QByteArray body;
+                    const grpc::Status status =
+                        campp->get(QStringLiteral("/speakers"), &body, ms);
+                    if (!status.ok())
+                        return status;
+                    const QJsonObject object = QJsonDocument::fromJson(body).object();
+                    // Tombstones included on purpose - see the .proto.  A
+                    // listing that hid the inactive and deleted rows would
+                    // make reactivating somebody impossible and would hide who
+                    // removed them.
+                    for (const QJsonValue &value :
+                         object.value(QStringLiteral("speakers")).toArray()) {
+                        const QJsonObject item = value.toObject();
+                        reg::GlobalSpeakerEntry entry;
+                        entry.spkId = item.value(QStringLiteral("spk_id")).toString();
+                        entry.spkName = item.value(QStringLiteral("spk_name")).toString();
+                        entry.status = item.value(QStringLiteral("status")).toString();
+                        entry.sampleCount =
+                            quint32(qMax(0, item.value(QStringLiteral("sample_count")).toInt()));
+                        entry.usableSampleCount = quint32(
+                            qMax(0, item.value(QStringLiteral("usable_sample_count")).toInt()));
+                        entry.createdAt = item.value(QStringLiteral("created_at")).toString();
+                        entry.lastUpdated = item.value(QStringLiteral("last_updated")).toString();
+                        entry.reviewedBy = item.value(QStringLiteral("reviewed_by")).toString();
+                        entry.reviewReason =
+                            item.value(QStringLiteral("review_reason")).toString();
+                        resp->speakers.append(entry);
+                    }
+                    return status;
+                });
+        });
+
+    // Three verbs, one shape.  Registered from a table rather than written out
+    // three times: they differ only in which word the enrol service is asked
+    // for, and three near-identical 60-line lambdas is how one of them ends up
+    // quietly sending a different payload than the other two.
+    struct GlobalAction
+    {
+        const char *path;
+        const char *verb;
+        bool needsReason;
+    };
+    static const GlobalAction kGlobalActions[] = {
+        {rpcpath::DeactivateGlobalSpeaker, "deactivate", true},
+        {rpcpath::ActivateGlobalSpeaker, "activate", false},
+        {rpcpath::DeleteGlobalSpeaker, "delete", true},
+    };
+
+    for (const GlobalAction &action : kGlobalActions) {
+        const QString verb = QString::fromLatin1(action.verb);
+        const bool needsReason = action.needsReason;
+        m_server->registerMethod(
+            QString::fromLatin1(action.path),
+            [campp, deadline, verb, needsReason](const grpc::ServerCall &call, QByteArray *out) {
+                const int ms = deadline(call);
+                return serve<reg::GlobalSpeakerActionRequest, reg::GlobalSpeakerActionResponse>(
+                    call, out,
+                    [&](const reg::GlobalSpeakerActionRequest &req,
+                        reg::GlobalSpeakerActionResponse *resp) {
+                        if (req.spkId.trimmed().isEmpty()) {
+                            grpc::Status bad;
+                            bad.code = grpc::InvalidArgument;
+                            bad.message = QStringLiteral("thiếu spk_id");
+                            return bad;
+                        }
+                        if (req.editorId.trimmed().isEmpty()) {
+                            grpc::Status bad;
+                            bad.code = grpc::InvalidArgument;
+                            bad.message = QStringLiteral(
+                                "thiếu editor_id - mỗi thay đổi trên DB giọng chung đều được "
+                                "ghi nhật ký kèm người thao tác");
+                            return bad;
+                        }
+                        // Refused here as well as on the far side.  A voice
+                        // removed from the shared database with no stated
+                        // reason is unreviewable six months later, and by then
+                        // the person who did it does not remember either.
+                        if (needsReason && req.reason.trimmed().isEmpty()) {
+                            grpc::Status bad;
+                            bad.code = grpc::InvalidArgument;
+                            bad.message = QStringLiteral(
+                                "thiếu lý do - thao tác này gỡ một giọng khỏi DB chung và "
+                                "phải nói rõ vì sao");
+                            return bad;
+                        }
+
+                        QJsonObject payload;
+                        payload.insert(QStringLiteral("spk_id"), req.spkId.trimmed());
+                        payload.insert(QStringLiteral("editor_id"), req.editorId.trimmed());
+                        payload.insert(QStringLiteral("reason"), req.reason.trimmed());
+                        QList<QPair<QByteArray, QByteArray>> headers;
+                        headers.append({QByteArrayLiteral("Content-Type"),
+                                        QByteArrayLiteral("application/json")});
+
+                        QByteArray body;
+                        const grpc::Status status = campp->post(
+                            QStringLiteral("/speakers/") + verb,
+                            QJsonDocument(payload).toJson(QJsonDocument::Compact), headers, &body,
+                            ms);
+                        if (!status.ok()) {
+                            resp->ok = false;
+                            resp->spkId = req.spkId.trimmed();
+                            resp->error = status.message;
+                            return grpc::Status();
+                        }
+                        const QJsonObject object = QJsonDocument::fromJson(body).object();
+                        // `changed` is the field worth reading: deactivating
+                        // somebody already inactive succeeds and changes
+                        // nothing, which is not the same as having done it.
+                        resp->ok = !object.contains(QStringLiteral("error"))
+                            || object.value(QStringLiteral("error")).toString().isEmpty();
+                        resp->error = object.value(QStringLiteral("error")).toString();
+                        resp->changed = object.value(QStringLiteral("changed")).toBool();
+                        resp->spkId = object.value(QStringLiteral("spk_id")).toString();
+                        if (resp->spkId.isEmpty())
+                            resp->spkId = req.spkId.trimmed();
+                        resp->spkName = object.value(QStringLiteral("spk_name")).toString();
+                        resp->status = object.value(QStringLiteral("status")).toString();
+                        resp->samplesRetired =
+                            quint32(qMax(0, object.value(QStringLiteral("samples_retired")).toInt()));
+                        resp->deleteEventsReleased = quint32(
+                            qMax(0, object.value(QStringLiteral("delete_events_released")).toInt()));
+                        resp->deleteDispatch =
+                            object.value(QStringLiteral("delete_dispatch")).toString();
+                        resp->message = object.value(QStringLiteral("message")).toString();
+                        LOG_INFO(applog::cat::Session)
+                            << "global speaker" << verb << resp->spkId << "by"
+                            << req.editorId.trimmed() << "- changed=" << resp->changed
+                            << "status=" << resp->status;
+                        return status;
+                    });
+            });
+    }
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetSpeakerRegistryStatus),

@@ -26,6 +26,12 @@ double nowSeconds()
 // range turns one RPC into a whole meeting over the wire.
 const double kMaxRangeSec = 60.0;
 
+// How many trace events a session keeps.  At the rate the tier emits them -
+// one decode and one merge per correction window - this is roughly the last
+// twenty minutes of a meeting, and every trace question anybody has ever asked
+// has been about the thing that just happened.
+const int kTraceKeepPerSession = 4000;
+
 // A session id is used as a file name, so it has to be one.  Ids are minted by
 // this server as hex, but a recovered journal or a hand-written test can carry
 // anything, and a '/' in there would write outside the audio directory.
@@ -220,6 +226,24 @@ bool SessionStore::migrate(QString *error)
         " evidence_staged_at REAL NOT NULL DEFAULT 0,"
         " evidence_source_name TEXT NOT NULL DEFAULT '',"
         " PRIMARY KEY (session_id, session_speaker_id))",
+
+        // What get_pipeline_trace answers with.  Its own table and not the
+        // audit one: audit records decisions a person made and is kept
+        // forever, while this records what the tier did on one chunk, is
+        // written several times a second, and is trimmed behind the caller's
+        // back.  Mixing the two would make the operator's own history
+        // unreadable within a minute of recording.
+        "CREATE TABLE IF NOT EXISTS pipeline_trace ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " session_id TEXT NOT NULL,"
+        " seq INTEGER NOT NULL DEFAULT 0,"
+        " ts REAL NOT NULL DEFAULT 0,"
+        " stage TEXT NOT NULL DEFAULT '',"
+        " event TEXT NOT NULL DEFAULT '',"
+        " audio_start_sec REAL NOT NULL DEFAULT 0,"
+        " audio_end_sec REAL NOT NULL DEFAULT 0,"
+        " payload_json TEXT NOT NULL DEFAULT '')",
+        "CREATE INDEX IF NOT EXISTS trace_by_session ON pipeline_trace(session_id, seq)",
     };
 
     QSqlQuery query(m_db);
@@ -545,6 +569,94 @@ QList<asr::AuditEvent> SessionStore::auditHistory(const QString &sessionId, int 
         item.event = query.value(1).toString();
         item.payloadJson = query.value(2).toString();
         out.prepend(item);
+    }
+    return out;
+}
+
+// ---- the pipeline trace ----------------------------------------------------
+
+void SessionStore::appendTrace(const QString &sessionId,
+                               const QList<asr::PipelineTraceEvent> &events)
+{
+    if (!m_enabled || events.isEmpty())
+        return;
+    QMutexLocker lock(&m_mutex);
+    m_db.transaction();
+    for (const asr::PipelineTraceEvent &event : events) {
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral(
+            "INSERT INTO pipeline_trace (session_id, seq, ts, stage, event, audio_start_sec,"
+            " audio_end_sec, payload_json) VALUES (?,?,?,?,?,?,?,?)"));
+        bindText(query, sessionId);
+        query.addBindValue(qulonglong(event.seq));
+        query.addBindValue(event.ts);
+        bindText(query, event.stage);
+        bindText(query, event.event);
+        query.addBindValue(event.audioStartSec);
+        query.addBindValue(event.audioEndSec);
+        bindText(query, event.payloadJson);
+        query.exec();
+    }
+    m_db.commit();
+
+    // Trimmed here rather than on a timer: this is the only writer, so it is
+    // the only place that knows the table has grown.  A three-hour meeting
+    // produces tens of thousands of these and nobody reads past the last few
+    // hundred - what a trace is for is "what did the tier decide just now".
+    QSqlQuery trim(m_db);
+    trim.prepare(QStringLiteral(
+        "DELETE FROM pipeline_trace WHERE session_id = ? AND id NOT IN"
+        " (SELECT id FROM pipeline_trace WHERE session_id = ? ORDER BY id DESC LIMIT ?)"));
+    bindText(trim, sessionId);
+    bindText(trim, sessionId);
+    trim.addBindValue(kTraceKeepPerSession);
+    trim.exec();
+}
+
+QList<asr::PipelineTraceEvent> SessionStore::traceHistory(const QString &sessionId,
+                                                          quint64 afterSeq, int limit,
+                                                          const QList<QString> &stages,
+                                                          bool *hasMore)
+{
+    QList<asr::PipelineTraceEvent> out;
+    if (hasMore)
+        *hasMore = false;
+    if (!m_enabled)
+        return out;
+    const int wanted = limit > 0 ? qMin(limit, 2000) : 200;
+    QMutexLocker lock(&m_mutex);
+    QSqlQuery query(m_db);
+    // Oldest first from `after_seq`, which is what makes the request a cursor:
+    // a client polls with the nextSeq it was last given and gets only what has
+    // happened since.  One row past the limit is read so has_more is an
+    // observation rather than a guess.
+    query.prepare(QStringLiteral(
+        "SELECT seq, ts, stage, event, audio_start_sec, audio_end_sec, payload_json"
+        " FROM pipeline_trace WHERE session_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?"));
+    bindText(query, sessionId);
+    query.addBindValue(qulonglong(afterSeq));
+    query.addBindValue(wanted + 1);
+    if (!query.exec())
+        return out;
+    while (query.next()) {
+        asr::PipelineTraceEvent item;
+        item.seq = query.value(0).toULongLong();
+        item.ts = query.value(1).toDouble();
+        item.stage = query.value(2).toString();
+        item.event = query.value(3).toString();
+        item.audioStartSec = query.value(4).toDouble();
+        item.audioEndSec = query.value(5).toDouble();
+        item.payloadJson = query.value(6).toString();
+        // Filtering here and not in SQL: the stage list is caller-supplied and
+        // an empty one means "every stage", which is the common case.
+        if (!stages.isEmpty() && !stages.contains(item.stage))
+            continue;
+        if (out.size() >= wanted) {
+            if (hasMore)
+                *hasMore = true;
+            break;
+        }
+        out.append(item);
     }
     return out;
 }

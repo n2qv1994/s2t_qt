@@ -159,6 +159,16 @@ private:
     // Returns false when the session must end; *fatal then holds the status
     // that push() will hand the client.
     bool forward(BackendSession &session, const Packet &packet, grpc::Status *fatal);
+    // Moves whatever trace the tier has produced into the session store.
+    // Batched rather than written per packet: at 160 ms a packet that would be
+    // six SQLite transactions a second for a diagnostic nobody is reading yet.
+    // `flush` writes what is there no matter how little - the stop path.
+    void drainTrace(BackendSession &session, bool flush);
+    // At stop: the tier's own speaker clustering into session_speakers, and
+    // the evidence behind each voice from the transcript that was just built.
+    // Both belong here and not in the backend - the backend cannot see the
+    // transcript, and the store cannot see the tier.
+    void publishSpeakerRegistry(BackendSession &session);
     void recordForwardMs(double ms);
     void noteError(const grpc::Status &status);
 
@@ -183,6 +193,10 @@ private:
     QWaitCondition m_opened;
     grpc::Status m_openStatus;
     bool m_openDone = false;
+    // Trace events waiting to be written.  Forwarder thread only, like the
+    // backend session itself, so it needs no lock of its own.
+    QList<asr::PipelineTraceEvent> m_pendingTrace;
+    quint64 m_traceSeq = 0;
 
     // ---- what the client has been told -------------------------------------
     quint64 m_lastAcceptedSeq = 0;

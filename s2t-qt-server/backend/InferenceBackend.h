@@ -25,6 +25,7 @@
 
 #include "grpc/GrpcChannel.h"
 #include "proto/AsrSession.h"
+#include "proto/SpeakerRegistry.h"
 
 #include <QString>
 
@@ -99,6 +100,24 @@ public:
     // Drops the transport so the next push dials again.  Called after a
     // transport failure instead of waiting out HTTP/2's own backoff.
     virtual void reset() = 0;
+
+    // The tier's own view of who spoke in this meeting, as it stood at the
+    // last flush.  Empty is the normal answer for a tier that does not cluster
+    // speakers of its own, which is why this is not pure virtual: Riva has no
+    // equivalent and should not have to pretend otherwise.
+    //
+    // Deliberately NOT part of asr::PushAudioResponse.  That struct mirrors
+    // asr_session.proto field for field and an invented field number there
+    // would be a wire-level lie to any other client of this server; this is an
+    // internal hand-off between the backend and the session store, so it
+    // travels beside the response rather than inside it.
+    virtual QList<reg::SessionSpeakerEntry> speakerRegistry() const { return {}; }
+
+    // Pipeline trace events collected since the last call, oldest first, and
+    // cleared by reading.  Same reasoning as speakerRegistry(): diagnostics
+    // that the buffer stores and serves, not something the wire contract with
+    // the tier carries.
+    virtual QList<asr::PipelineTraceEvent> takeTrace() { return {}; }
 };
 
 class InferenceBackend

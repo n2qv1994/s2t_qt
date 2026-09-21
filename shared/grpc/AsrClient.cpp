@@ -111,6 +111,37 @@ grpc::Status AsrClient::getSpeakerRegistryStatus(const reg::GetSpeakerRegistrySt
     return call(rpcpath::GetSpeakerRegistryStatus, req, out, timeoutMs);
 }
 
+grpc::Status AsrClient::previewEnrollment(const reg::PreviewEnrollmentRequest &req,
+                                          reg::PreviewEnrollmentResponse *out, int timeoutMs)
+{
+    return call(rpcpath::PreviewEnrollment, req, out, timeoutMs);
+}
+
+grpc::Status AsrClient::listGlobalSpeakers(reg::ListGlobalSpeakersResponse *out, int timeoutMs)
+{
+    const reg::ListGlobalSpeakersRequest req;
+    return call(rpcpath::ListGlobalSpeakers, req, out, timeoutMs);
+}
+
+grpc::Status AsrClient::deactivateGlobalSpeaker(const reg::GlobalSpeakerActionRequest &req,
+                                                reg::GlobalSpeakerActionResponse *out,
+                                                int timeoutMs)
+{
+    return call(rpcpath::DeactivateGlobalSpeaker, req, out, timeoutMs);
+}
+
+grpc::Status AsrClient::activateGlobalSpeaker(const reg::GlobalSpeakerActionRequest &req,
+                                              reg::GlobalSpeakerActionResponse *out, int timeoutMs)
+{
+    return call(rpcpath::ActivateGlobalSpeaker, req, out, timeoutMs);
+}
+
+grpc::Status AsrClient::deleteGlobalSpeaker(const reg::GlobalSpeakerActionRequest &req,
+                                            reg::GlobalSpeakerActionResponse *out, int timeoutMs)
+{
+    return call(rpcpath::DeleteGlobalSpeaker, req, out, timeoutMs);
+}
+
 grpc::Status AsrClient::bufferPing(const buf::PingRequest &req, buf::PingResponse *out,
                                    int timeoutMs)
 {

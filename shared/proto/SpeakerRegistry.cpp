@@ -387,4 +387,183 @@ QByteArray GetSpeakerRegistryStatusResponse::serialize() const
     return out.take();
 }
 
+// ---------------------------------------------------------------------------
+// The global registry's lifecycle - both directions together.
+//
+// Field numbers are read off ui_client/speaker_registry.proto on the RHEL host
+// (md5 53132ffbd35bdadc23c895983aa043a3), not off the copy that used to sit on
+// the Windows box: that one is an older 5-RPC revision and following it would
+// have produced a codec that agrees with nothing.
+// ---------------------------------------------------------------------------
+
+QByteArray PreviewEnrollmentRequest::serialize() const
+{
+    Writer out;
+    out.putString(1, displayName);
+    out.putBytes(2, wav);
+    out.putBool(3, allowBelowPolicy);
+    return out.take();
+}
+
+void PreviewEnrollmentRequest::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: displayName = r.readString(); break;
+        case 2: wav = r.readBytes(); break;
+        case 3: allowBelowPolicy = r.readBool(); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
+QByteArray PreviewEnrollmentResponse::serialize() const
+{
+    Writer out;
+    out.putBool(1, ok);
+    out.putString(2, error);
+    out.putString(3, speakerId);
+    out.putDouble(4, rawSeconds);
+    out.putDouble(5, speechSecondsAfterVad);
+    out.putBool(6, policyCompliant);
+    out.putString(7, warning);
+    out.putBytes(8, trimmedWav);
+    return out.take();
+}
+
+void PreviewEnrollmentResponse::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: ok = r.readBool(); break;
+        case 2: error = r.readString(); break;
+        case 3: speakerId = r.readString(); break;
+        case 4: rawSeconds = r.readDouble(); break;
+        case 5: speechSecondsAfterVad = r.readDouble(); break;
+        case 6: policyCompliant = r.readBool(); break;
+        case 7: warning = r.readString(); break;
+        case 8: trimmedWav = r.readBytes(); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
+QByteArray GlobalSpeakerEntry::serialize() const
+{
+    Writer out;
+    out.putString(1, spkId);
+    out.putString(2, spkName);
+    out.putString(3, status);
+    out.putUInt32(4, sampleCount);
+    out.putUInt32(5, usableSampleCount);
+    out.putString(6, createdAt);
+    out.putString(7, lastUpdated);
+    out.putString(8, reviewedBy);
+    out.putString(9, reviewReason);
+    return out.take();
+}
+
+void GlobalSpeakerEntry::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: spkId = r.readString(); break;
+        case 2: spkName = r.readString(); break;
+        case 3: status = r.readString(); break;
+        case 4: sampleCount = r.readUInt32(); break;
+        case 5: usableSampleCount = r.readUInt32(); break;
+        case 6: createdAt = r.readString(); break;
+        case 7: lastUpdated = r.readString(); break;
+        case 8: reviewedBy = r.readString(); break;
+        case 9: reviewReason = r.readString(); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
+QByteArray ListGlobalSpeakersResponse::serialize() const
+{
+    Writer out;
+    out.putRepeatedMessage(1, speakers);
+    return out.take();
+}
+
+void ListGlobalSpeakersResponse::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: r.appendMessage(&speakers); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
+QByteArray GlobalSpeakerActionRequest::serialize() const
+{
+    Writer out;
+    out.putString(1, spkId);
+    out.putString(2, editorId);
+    out.putString(3, reason);
+    return out.take();
+}
+
+void GlobalSpeakerActionRequest::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: spkId = r.readString(); break;
+        case 2: editorId = r.readString(); break;
+        case 3: reason = r.readString(); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
+QByteArray GlobalSpeakerActionResponse::serialize() const
+{
+    Writer out;
+    out.putBool(1, ok);
+    out.putString(2, error);
+    out.putBool(3, changed);
+    out.putString(4, spkId);
+    out.putString(5, spkName);
+    out.putString(6, status);
+    out.putUInt32(7, samplesRetired);
+    out.putUInt32(8, deleteEventsReleased);
+    out.putString(9, deleteDispatch);
+    out.putString(10, message);
+    return out.take();
+}
+
+void GlobalSpeakerActionResponse::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: ok = r.readBool(); break;
+        case 2: error = r.readString(); break;
+        case 3: changed = r.readBool(); break;
+        case 4: spkId = r.readString(); break;
+        case 5: spkName = r.readString(); break;
+        case 6: status = r.readString(); break;
+        case 7: samplesRetired = r.readUInt32(); break;
+        case 8: deleteEventsReleased = r.readUInt32(); break;
+        case 9: deleteDispatch = r.readString(); break;
+        case 10: message = r.readString(); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
 } // namespace reg

@@ -18,6 +18,10 @@ Tài liệu này dành cho người vận hành.
 | [luong-hoat-dong.md](luong-hoat-dong.md) | người bảo trì mã nguồn |
 | [danh-sach-api.md](danh-sach-api.md) | người tích hợp một client bên ngoài |
 
+> **Ảnh trong tài liệu này là ảnh chụp máy thật**, lấy trên máy RHEL đang chạy
+> với Server buffer và tầng suy luận thật, ngày 2026-09-04 — không phải bản vẽ
+> mô phỏng. Chụp lại cả bộ bằng một lệnh: xem `tools/doc_shots.cpp`.
+
 ---
 
 ## 1. Chuẩn bị trước khi dùng
@@ -25,6 +29,8 @@ Tài liệu này dành cho người vận hành.
 ### 1.1 Cấu hình lần đầu
 
 Mở **Công cụ → Cấu hình** (`Ctrl+,`) và điền:
+
+![Hộp thoại Cấu hình](images/10-cau-hinh.png)
 
 | Mục | Ý nghĩa |
 |---|---|
@@ -35,9 +41,9 @@ Mở **Công cụ → Cấu hình** (`Ctrl+,`) và điền:
 | **Tần số lấy mẫu / Số kênh** | Mặc định 48000 Hz, 1 kênh. Phải là định dạng thiết bị hỗ trợ. |
 | **Hàng đợi tối đa** | Số giây audio đã thu nhưng chưa được server xác nhận, được phép tồn đọng trên máy này. Mặc định 60 s. |
 | **xvF3800 host-control** | Đường dẫn tới `xvf_host.exe`, dùng cho nút bật/tắt lọc nhiễu phần cứng. |
-| **Bật pipeline trace** | Bật thì mỗi phiên mới lưu vết từng chặng xử lý, xem được ở cửa sổ **Pipeline trace** (`F8`). |
+| **Bật pipeline trace** | Không còn tác dụng: từ 2026-09-21 máy chủ thu vết cho mọi phiên, xem ở cửa sổ **Pipeline trace** (`F8`). Xem [mục 7](#7-cửa-sổ-pipeline-trace-và-nghiệm-thu). |
 | **Phát lại tệp theo tốc độ thật** | Bật: mô phỏng đúng nhịp cuộc họp (dùng để đo độ trễ). Tắt: xử lý lại một bản ghi càng nhanh càng tốt. |
-| **Chế độ nhật ký / Mức nhật ký** | Xem [mục 7](#7-nhật-ký-và-chẩn-đoán). |
+| **Chế độ nhật ký / Mức nhật ký** | Xem [mục 8](#8-nhật-ký-và-chẩn-đoán). |
 
 Cấu hình được lưu lại và tự nạp ở lần mở sau.
 
@@ -54,6 +60,13 @@ Cấu hình được lưu lại và tự nạp ở lần mở sau.
 > dừng lại và nói rõ.
 
 ### 1.2 Bố cục cửa sổ chính
+
+![Cửa sổ chính đang ghi một phiên](images/01-cua-so-chinh.png)
+
+*Ảnh chụp lúc đang chạy lại một tệp mẫu: dải thời gian ở giữa, mỗi người nói
+một hàng; cột phải là độ trễ văn bản và danh sách cần soát lại; thanh dưới có
+mã phiên và ô Người thao tác. Nếu cửa sổ hẹp hơn thanh công cụ, Qt dồn các nút
+cuối vào nút `»` ở góc phải — kéo rộng cửa sổ là chúng hiện lại.*
 
 Cửa sổ được chia theo **ai hỏi câu gì**, không theo loại widget:
 
@@ -109,7 +122,7 @@ khác nhau — cần hai cách xử lý khác nhau:
 |---|---|---|
 | **● ĐÃ KẾT NỐI AI** (xanh) | Server buffer trả lời, token được chấp nhận, và **nó** tới được tầng suy luận. | Không. |
 | **● ĐANG ĐỆM** (vàng) | Server buffer vẫn trả lời bình thường, nhưng nó chưa tới được tầng suy luận. | **Cứ ghi tiếp.** Audio vẫn được nhận và xếp hàng trên server; chữ sẽ hiện ra khi tầng suy luận trở lại. Báo cho người quản trị. |
-| **● MẤT KẾT NỐI** (đỏ) | Không tới được Server buffer, hoặc token sai. | Xem [mục 8](#8-xử-lý-sự-cố). Ghi tiếp cũng chỉ dồn hàng đợi trên máy này, và hàng đợi đó có giới hạn. |
+| **● MẤT KẾT NỐI** (đỏ) | Không tới được Server buffer, hoặc token sai. | Xem [mục 9](#9-xử-lý-sự-cố). Ghi tiếp cũng chỉ dồn hàng đợi trên máy này, và hàng đợi đó có giới hạn. |
 
 Đèn xanh nghĩa là server *trả lời được một RPC thật*, không chỉ là mở được TCP.
 
@@ -132,6 +145,11 @@ tình trạng tầng suy luận.
    - **Chỉ những người được chọn** — tick tên trong danh sách bên dưới.
 4. Bấm **Bắt đầu ghi âm**.
 
+![Hộp thoại bắt đầu phiên](images/07-bat-dau-phien.png)
+
+*Danh sách bên dưới là toàn bộ giọng đã đăng ký trên hệ thống (ảnh chụp lúc có
+59 giọng). Nút **Tải lại DB** đọc lại danh sách mà không phải đóng hộp thoại.*
+
 > **Ba trạng thái, không phải hai.** "Không giới hạn" là so khớp toàn bộ DB.
 > "Chỉ những người được chọn" mà **không tick ai** là một chỉ thị khác hẳn:
 > *không gán tên đã đăng ký nào cả*. Nó không quay về nghĩa thứ nhất.
@@ -150,6 +168,17 @@ nằm treo trên server.
 | **Tới chữ mới nhất** | `Ctrl+J` | Nhảy tới từ mới nhất đã nhận được. |
 | **Chữ chạy** | `Ctrl+T` | Chuyển sang chế độ một dòng chữ chạy, chữ to. |
 | **Hiện từ yếu** | `Ctrl+W` | Mặc định các từ dưới ngưỡng tin cậy bị ẩn. Bật để xem tất cả. |
+
+![Chế độ chữ chạy](images/02-chu-chay.png)
+
+*Chế độ **Chữ chạy** (`Ctrl+T`): bỏ dải thời gian, chỉ còn văn bản cỡ lớn để
+chiếu lên màn hình chung. Cột phải vẫn giữ nguyên.*
+
+**Bấm vào một từ trên dải thời gian là sửa được ngay câu chứa từ đó** — không
+phải mở bảng Soát & sửa. Hộp thoại hiện câu đó tách theo từng token; token nào
+nằm sau **mốc chốt** thì xem được nhưng chưa sửa được, vì một lượt hiệu chỉnh
+sau vẫn có thể viết lại nó (server trả `edit_range_not_committed`). Việc sửa
+cần **tên người thao tác** như mọi chỗ khác.
 
 Lọc nhiễu phần cứng của mic (cần `xvf_host`) nằm ở menu **Micro** — nó được đặt
 một lần cho cả buổi chứ không phải thứ bật tắt liên tục, nên không chiếm chỗ
@@ -196,11 +225,68 @@ tệp. Nhận cả **video**: `.wav .m4a .mp3 .aac .flac .ogg .mp4 .mkv .mov .av
 Tệp đi qua **đúng pipeline** như microphone, nên đây là cách tái hiện một sự cố
 mà không cần dựng lại cuộc họp.
 
+Cả tệp được giải mã vào bộ nhớ **trước** khi phiên bắt đầu, nên cửa sổ đứng im
+vài giây với tệp dài — đo trên máy RHEL: một video họp 88 phút (736 MB) mất
+**3,2 giây** và chiếm 170 MB. Muốn *vừa xem hình vừa xem phụ đề* thì dùng cửa
+sổ ở [mục 4](#4-phụ-đề-trực-tiếp) chứ không phải mục này.
+
 ---
 
-## 4. Soát lại và sửa bản chép
+## 4. Phụ đề trực tiếp
+
+**Hiển thị → Phụ đề** (`F6`) mở một cửa sổ riêng: một bên là hình (hoặc micro),
+một bên là bản chép đang chạy theo đồng hồ phát.
+
+![Cửa sổ phụ đề trực tiếp đang phát một tệp mẫu](images/11-phu-de-truc-tiep.png)
+
+*Ảnh chụp màn hình thật trên máy RHEL, giây thứ 22 của một tệp mẫu: hình chạy
+bên trái với phụ đề đè lên, bản chép cuộn bên phải kèm tên người nói đã đăng
+ký. **Chữ trắng là phần đã chốt, chữ vàng là mép còn đang thay đổi** — phần
+vàng có thể được viết lại khi mô hình chốt tới đó.*
+
+Nguồn chỉ có tiếng (`.wav`, `.mp3`, hoặc micro) thì chỗ hình là một nền tối,
+phụ đề vẫn chạy đúng chỗ đó:
+
+![Nguồn chỉ có âm thanh](images/12-phu-de-chi-tieng.png)
+
+Hai nút để bắt đầu:
+
+| Nút | Làm gì |
+|---|---|
+| **Mở tệp âm thanh / video…** | Chọn `.wav .mp3 .m4a .aac .flac .ogg .mp4 .mkv .mov .avi`. Tệp có hình thì hiện hình; tệp chỉ có tiếng thì hiện nền tối, phụ đề vẫn ở nguyên chỗ đó. |
+| **Thu từ micro** | Cùng đường đi như **Ghi âm từ micro** ở cửa sổ chính, chỉ khác cách hiển thị. |
+
+**Điều làm cửa sổ này khác cửa sổ chính:** chữ được đặt theo **đồng hồ phát**,
+không phải theo thứ tự trả về. Mỗi từ server trả về đều có mốc bắt đầu và kết
+thúc, nên câu hỏi đúng là *"lúc này trong phim đang nói gì"* chứ không phải
+*"vừa nhận được gì"*. Nhờ vậy phụ đề không trôi đi khi pipeline nhanh hoặc chậm
+hơn thời gian thực.
+
+- **Audio luôn được đẩy theo tốc độ thật**, kể cả khi tuỳ chọn *Phát lại tệp
+  theo tốc độ thật* đang tắt. Vì vậy **tua tới trước thì chưa có phụ đề** —
+  phần đó chưa kịp gửi lên; tua lùi thì có đủ.
+- Tên người nói trong khung bản chép là tên đã **đăng ký giọng** (mục 6). Giọng
+  chưa đăng ký hiện là *Người 1*, *Người 2*…
+- Bấm **Dừng** để kết thúc phiên. Đóng cửa sổ không kết thúc phiên.
+- Cửa sổ đổi cỡ tự do và tách rời cửa sổ chính, để kéo sang màn hình thứ hai
+  hoặc máy chiếu (dùng nút phóng to của hệ điều hành để chiếm cả màn hình).
+
+Đây cũng là cách trình diễn hệ thống gọn nhất: một tệp có sẵn, một cửa sổ, và
+toàn bộ đường đi thật — client → Server buffer → tầng suy luận → chữ. Xem
+[phụ lục A](#phụ-lục-a--chạy-trên-máy-rhel-và-bộ-mẫu-demo) nếu đang demo trên
+máy RHEL.
+
+---
+
+## 5. Soát lại và sửa bản chép
 
 Bấm **Soát & sửa** (`F9`) để mở bảng soát lại ở đáy cửa sổ.
+
+![Bảng soát và sửa bản chép](images/03-soat-va-sua.png)
+
+*Dòng đầu của bảng cho biết đang xem phiên nào, `rev=` bao nhiêu, đã **chốt tới
+giây thứ mấy** và có mấy dòng. Chữ xám là phần chưa chốt — sửa chỗ đó sẽ bị từ
+chối, đợi vài giây là chốt tới.*
 
 > **Với cuộc họp dài, đây là nơi duy nhất xem được toàn văn.** Khung bản chép
 > đang chạy chỉ giữ **15 phút gần nhất** (và tối đa 180 dòng), để một cuộc họp
@@ -224,11 +310,22 @@ là kết quả tạm, chưa chốt. Đợi vài giây rồi sửa lại.
 
 Menu **Công cụ → Lịch sử hiệu chỉnh** (`F7`) xem toàn bộ nhật ký kiểm toán của phiên: ai sửa gì, lúc nào.
 
+![Lịch sử hiệu chỉnh](images/09-lich-su-hieu-chinh.png)
+
+*Không chỉ có các lần sửa: mốc bắt đầu và dừng phiên cũng nằm ở đây. Cột cuối
+là `editor_id` — dấu `-` nghĩa là việc đó do hệ thống làm, không phải người.*
+
 ---
 
-## 5. Đăng ký giọng nói
+## 6. Đăng ký giọng nói
 
 Menu **Phiên → Đăng ký giọng nói** (`F5`). Cần có tên người thao tác.
+
+![Hộp thoại đăng ký giọng nói](images/08-dang-ky-giong.png)
+
+*Đoạn văn mẫu do server cấp, không phải chữ cố định trong ứng dụng. Ô **Chế độ
+cấp bách** chấp nhận bản ghi ngắn hơn yêu cầu — giọng vẫn dùng được nhưng bị
+đánh dấu là nên đăng ký lại, nên chỉ dùng khi thật sự không thu lại được.*
 
 **Đăng ký giọng mới — thu trực tiếp:**
 1. Nhập tên hiển thị.
@@ -249,6 +346,11 @@ không cần chuẩn bị gì trước.
 > Sau khi gửi, hãy đọc dòng kết quả: `speech_seconds_after_vad` cho biết thực
 > sự có bao nhiêu giây là tiếng nói. Nếu nó nhỏ hơn nhiều so với độ dài tệp thì
 > mẫu có nhiều khoảng lặng — nên thu lại.
+>
+> **Đặt mục tiêu 30–40 giây tiếng nói**, không phải 20. Ngưỡng của server là 20
+> giây *sau khi trừ khoảng lặng*, nên một bản đọc 20 giây thường chỉ còn hơn 19
+> giây và rơi vào chế độ cấp bách. Đo trên máy thật: 30–59 giây đọc liên tục thì
+> qua sạch, không cảnh báo nào.
 
 > Nếu mạng rớt giữa lúc gửi, **bản ghi vẫn nằm trong cửa sổ** — đừng đóng. Có
 > mạng lại thì bấm **Gửi lại bản ghi**.
@@ -257,14 +359,66 @@ không cần chuẩn bị gì trước.
 > chủ chứ không phải của bạn: khoá `enroll/url` trong `/etc/s2t-qt-server.conf`
 > đang để trống. Báo người quản trị.
 
+**Nghe thử trước khi đăng ký.** Nút **Nghe thử (không ghi vào DB)** cắt mẫu
+đúng như lúc đăng ký thật rồi phát lại phần còn lại, nhưng **không ghi gì cả**
+— không thêm giọng, không sửa DB, không để lại dấu vết. Nó cho biết ngay hai
+điều:
+
+- còn bao nhiêu giây tiếng nói sau khi cắt khoảng lặng (con số ngưỡng 20 giây
+  tính trên số này, không phải trên độ dài tệp);
+- và quan trọng hơn: **nghe ra có đúng một người nói không.**
+
+Hãy dùng nó mỗi lần, nhất là khi nạp từ tệp quay họp. Đăng ký là thao tác
+không hoàn tác được từ ứng dụng, còn hai người trong một mẫu thì không báo lỗi
+gì — nó chỉ lặng lẽ gọi sai tên ở các cuộc họp sau.
+
+### Dọn DB giọng chung
+
+Tab **DB giọng chung** liệt kê mọi giọng trong DB dùng chung, kể cả các giọng
+đã ngưng dùng hoặc đã xoá. Đây chính là danh sách mà hệ thống đem ra so khớp
+với từng cuộc họp, nên một giọng rác trong đó là một cái tên sai chờ sẵn.
+
+Chọn một dòng, nhập **lý do**, rồi:
+
+| Nút | Làm gì | Lấy lại được không |
+|---|---|---|
+| **Ngưng dùng** | Giọng thôi được đem ra so khớp, vẫn còn trong DB | Được — bấm **Dùng lại** |
+| **Dùng lại** | Đưa một giọng đã ngưng trở lại | — |
+| **Xoá vĩnh viễn…** | Gỡ hẳn khỏi DB | **Không, từ ứng dụng thì không** |
+
+> **Gần như lúc nào cũng nên dùng "Ngưng dùng" thay vì xoá.** Kết quả nhìn
+> thấy được là như nhau — giọng không còn được gán cho ai nữa — nhưng một cái
+> thì bấm một nút là quay lại được, cái kia thì phải nhờ người quản trị khôi
+> phục thủ công trên máy chủ. Vì vậy **Xoá vĩnh viễn** bắt gõ lại đúng `spk_id`
+> để xác nhận.
+>
+> Lý do là bắt buộc với ngưng dùng và xoá, và nó được ghi nhật ký kèm tên người
+> thao tác — sáu tháng sau đó là thứ duy nhất trả lời được câu "ai gỡ giọng này
+> và vì sao".
+>
+> Nếu kết quả báo *"Không có gì thay đổi"* thì giọng vốn đã ở trạng thái đó rồi;
+> đấy không phải lỗi.
+
 **Gán giọng cho một phiên:** ở phần *Người nói trong phiên*, mỗi speaker phát hiện
 được trong phiên có thể để nguyên, gán vào một người đã có trong DB, hoặc tạo
 mới. Bấm **Lưu lựa chọn**. Từng speaker được báo kết quả riêng — một cái lỗi
 không kéo theo các cái còn lại.
 
+> **Phải dừng phiên trước đã.** Danh sách người nói của phiên và các đoạn audio
+> làm bằng chứng cho từng người chỉ được chốt ở lúc `stop_session` — tầng suy
+> luận chỉ xuất kết quả phân cụm giọng ở đúng nhịp cuối cùng. Một cuộc họp còn
+> đang ghi thì phần này trống, và đó không phải lỗi.
+>
+> Bằng chứng được chọn tự động: các đoạn dài nhất mà **chỉ một mình** người đó
+> nói, cộng lại tối đa 45 giây, bỏ qua những tiếng đế dưới một giây. Không cần
+> và không nên đổi tên tay trước để "mồi" cho nó.
+>
+> Trước 2026-09-21 thao tác publish luôn báo *"giọng này chưa có bằng chứng nào
+> được ghim"* dù làm đúng; nếu còn gặp câu đó thì máy chủ chưa được cập nhật.
+
 ---
 
-## 6. Cửa sổ Pipeline trace và Nghiệm thu
+## 7. Cửa sổ Pipeline trace và Nghiệm thu
 
 **Pipeline trace** (`F8`) — xem từng chặng pipeline đã nhận gì và làm gì với nó, theo số thứ tự
 sự kiện. Hai chế độ tách bạch: *realtime* chỉ giữ các thẻ mới nhất (không phình
@@ -272,24 +426,60 @@ theo thời gian), *lịch sử* lật ngược về quá khứ theo trang. Nghe
 thô của từng sự kiện và ghép nhiều span để nghe liền. Cần bật **pipeline trace**
 lúc tạo phiên.
 
+![Cửa sổ Pipeline trace](images/04-pipeline-trace.png)
+
+> **Từ 2026-09-21 cửa sổ này có dữ liệu thật.** Ảnh trên chụp trước thay đổi
+> đó, nên nó còn hiện dòng *"trace chưa bật cho phiên này"*.
+>
+> Không cần bật gì ở Cấu hình nữa: vết được thu cho **mọi** phiên, miễn là máy
+> chủ có kho phiên (`[session] dir`). Nếu máy chủ chạy không kho thì cửa sổ vẫn
+> trống và đó là đúng — không có chỗ để ghi.
+>
+> Ba loại thẻ sẽ thấy:
+>
+> - `correction_asr` — cửa sổ audio mà mô hình ASR đã nghe để sửa lại một đoạn
+> - `itn` — lượt thêm dấu câu: vào gì, ra gì
+> - `streaming_window` — cùng câu hỏi nhưng cho phần chữ đang chạy ở mép
+>
+> Khi báo "câu này sai dấu", **kèm theo số thứ tự sự kiện `correction_asr`
+> quanh thời điểm đó** thì bên pipeline lần ra được ngay cửa sổ nào đã quyết
+> định sai. Không có nó thì chỉ còn cách dựng lại cả phiên bằng tay.
+>
+> Mỗi phiên giữ 4000 sự kiện gần nhất; một cuộc họp dài sẽ rụng dần phần đầu.
+
 **Nghiệm thu pipeline** (`F10`) — bằng chứng để nghiệm thu hệ thống:
 
-- **Mô hình đang dùng** — kiến trúc và version model phía server.
+![Cửa sổ Nghiệm thu pipeline](images/05-nghiem-thu.png)
+
+- **Mô hình đang dùng** — kiến trúc và version model phía server. Bảng bên phải
+  **đọc thẳng từ Triton lúc bấm**, không phải chữ viết sẵn: ảnh trên là 11/11
+  model `READY`, gồm `asr_diar_session`, `asr_vi`, `asr_vi_long`, `bilstm_punc`,
+  `campp_embed`, `diar_full_onnx`…
 - **Thiết bị & hàng đợi** — lịch sử chuyển trạng thái mic của phiên hiện tại và
   biểu đồ độ trễ: RTT, thời gian chờ AI, phần mạng + gRPC, hàng đợi hai phía.
+- **Log thời gian xử lý theo nhịp** — mỗi dòng là một gói audio (~160 ms): RTT,
+  thời gian AI, phần mạng + gRPC, và độ dài hàng đợi hai phía *tại đúng lúc đó*.
+  Nhiều dòng liên tiếp mà hàng đợi tăng dần = đường ống không theo kịp thời gian
+  thực.
 - **Bằng chứng lọc nhiễu** — ghi ~7 giây đối chứng tắt/bật lọc nhiễu để nghe so
   sánh. Phải dừng phiên mic trước.
 - **VAD / Segment**, **CAM++ verify**, **Người nói trong phiên** — tra theo `session_id`.
 
 ---
 
-## 7. Nhật ký và chẩn đoán
+## 8. Nhật ký và chẩn đoán
 
 Menu **Công cụ → Nhật ký & chẩn đoán** (`F12`) mở cửa sổ *Nhật ký & Chẩn đoán*.
 
-### 7.1 Tab Nhật ký
+### 8.1 Tab Nhật ký
 
 Xem trực tiếp mọi việc ứng dụng đang làm.
+
+![Tab Nhật ký](images/06-nhat-ky-chan-doan.png)
+
+*Mỗi dòng gRPC ghi rõ phương thức, kết quả, thời gian và số byte hai chiều —
+đủ để trả lời "chậm ở đâu" mà không cần bắt gói mạng. Góc dưới bên phải đếm số
+dòng, số cảnh báo và số lỗi đang có trong bộ đệm.*
 
 - **Chế độ** — `Debug` in ra console (chỉ thấy nếu mở ứng dụng từ cửa sổ lệnh);
   `Develop` ghi ra tệp, luôn đọc lại được. Đổi là áp dụng ngay và được ghi nhớ.
@@ -309,8 +499,9 @@ Xem trực tiếp mọi việc ứng dụng đang làm.
 - **Lưu ra tệp...** — lưu đúng phần đang hiện theo bộ lọc, tiện gửi đi.
 - **Mở thư mục log** — mở thư mục chứa tệp log.
 
-Tệp log nằm ở `%APPDATA%\s2t\s2t_qt\logs\s2t_qt.log`, tự xoay vòng khi đầy 8 MB
-và giữ 2 đời cũ. Mỗi dòng được ghi xuống đĩa ngay, nên vẫn còn sau khi sập
+Tệp log nằm ở `%APPDATA%\s2t\s2t_qt\logs\s2t_qt.log` (Windows) hoặc
+`~/.local/share/s2t/s2t_qt/logs/s2t_qt.log` (Linux), tự xoay vòng khi đầy 8 MB
+và giữ 2 đời cũ. Nút **Mở thư mục log** mở đúng thư mục đó, không phải đoán. Mỗi dòng được ghi xuống đĩa ngay, nên vẫn còn sau khi sập
 nguồn.
 
 Định dạng một dòng:
@@ -320,7 +511,7 @@ nguồn.
    thời gian          mức  thành phần  luồng      vị trí trong mã   nội dung
 ```
 
-### 7.2 Tab Chẩn đoán
+### 8.2 Tab Chẩn đoán
 
 | Nút | Làm gì | Cần mạng |
 |---|---|---|
@@ -341,7 +532,7 @@ Mỗi lúc chỉ chạy được một phép chẩn đoán; các nút còn lại
 xong. Nếu máy chủ không phản hồi, phép đang chạy vẫn phải chờ hết deadline của
 nó — **Probe** khoảng 12 giây, **Test mạng đầy đủ** có thể lâu hơn nhiều.
 
-### 7.3 Chạy từ dòng lệnh
+### 8.3 Chạy từ dòng lệnh
 
 Các chế độ không cần giao diện:
 
@@ -365,7 +556,7 @@ ngay lúc đó.
 
 ---
 
-## 8. Xử lý sự cố
+## 9. Xử lý sự cố
 
 ### "Microphone bị ngắt khi đang ghi"
 
@@ -457,22 +648,38 @@ Nếu lúc đó còn một phép chẩn đoán đang chạy và máy chủ khôn
 chờ nó tối đa 20 giây rồi mới thoát — cố ý, để không cắt ngang giữa chừng. Không
 cần làm gì, cứ đợi.
 
+### Cửa sổ phụ đề chạy hình nhưng không có chữ trên hình
+
+Bản trước 2026-09-04 có lỗi này trên Linux: bề mặt video che mất lớp phụ đề.
+Đã sửa — nếu vẫn gặp thì bản đang chạy là bản cũ, xem lại ngày build.
+
+Nếu **cả** cột bản chép bên phải cũng trống thì không phải chuyện hiển thị:
+kiểm tra đèn kết nối và xem [mục "Mất kết nối"](#mất-kết-nối-tới-server-buffer)
+ngay trên.
+
 ### Ứng dụng báo cần màn hình đồ hoạ (trên Linux)
 
 Phiên ssh không có `DISPLAY`/`WAYLAND_DISPLAY`. Dùng `ssh -X`, hoặc chạy trên
-console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 7.3.
+console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 8.3.
 
 ---
 
-## 9. Những điều nên biết
+## 10. Những điều nên biết
 
+- **Bản chép có dấu câu và viết hoa đầu câu** — từ 2026-09-21. Trước đó màn
+  hình chỉ hiện chuỗi từ trần: mô-đun dấu câu vẫn chạy, nhưng kết quả của nó
+  không được đọc tới. Nếu bản chép trên máy bạn vẫn không có dấu, máy chủ chưa
+  được cập nhật.
+- **Dấu câu của một từ có thể đổi vài giây sau khi nó hiện ra**, và đó là đúng:
+  tầng suy luận quyết định dấu lần đầu khi chưa nghe hết phần phía sau, rồi
+  quyết lại khi đã có đủ ngữ cảnh hai bên. Lần sau luôn là lần đáng tin hơn.
 - **Audio lúc tạm dừng không bao giờ được gửi bù.** Bỏ ngay lúc thu, không phải
   lúc gửi.
 - **Phiên không tự kết thúc khi mất mạng hay mất mic.** Chỉ có nút **Dừng phiên**, lỗi
   không khắc phục được, hoặc đóng ứng dụng mới kết thúc phiên.
 - **Đóng ứng dụng khi đang ghi sẽ cắt phiên** mà không flush correction. Ứng
   dụng có hỏi lại trước khi làm.
-- **Tên người thao tác không được nhớ giữa các lần chạy** — xem mục 1.2.
+- **Tên người thao tác không được nhớ giữa các lần chạy** — xem mục 1.3.
 - **Mức bảo mật chỉ là nhãn**, không thay cho phân quyền phía server.
 - **Ứng dụng này không phải là server.** Nó không mở cổng nào và không có API
   để phần mềm khác gọi vào. Phần server là chương trình riêng — `s2t-qt-server`
@@ -489,11 +696,11 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 7.3
 - **Phiên có sống qua lần khởi động lại của Server buffer hay không là do cấu
   hình phía server** (`buffer/journal_dir`). Bật thì một lần khởi động lại gần
   như vô hình với người đang ghi; tắt thì mất cuộc họp đang mở. Thông báo lỗi
-  nói rõ đang ở trường hợp nào — xem mục 8.
+  nói rõ đang ở trường hợp nào — xem mục 9.
 
 ---
 
-## 10. Cho bộ phận tích hợp
+## 11. Cho bộ phận tích hợp
 
 Nếu đơn vị bạn cần đưa dịch vụ này vào một phần mềm khác (tổng đài, hệ thống
 lưu trữ cuộc họp, quy trình xử lý hàng loạt), thì thứ cần đọc là
@@ -515,3 +722,59 @@ Hai thông tin người vận hành cần cấp cho bộ phận tích hợp, l�
 Token là bí mật: gửi qua kênh nội bộ, đừng dán vào tài liệu dùng chung, và
 đừng để nó lọt vào log. Nếu nghi ngờ lộ, đề nghị quản trị cấp lại — đổi token
 không ảnh hưởng tới các phiên đã lưu.
+
+---
+
+## Phụ lục A — chạy trên máy RHEL và bộ mẫu demo
+
+Máy trạm Windows nhấp đúp là chạy. Trên máy RHEL của dự án thì Qt 6 **không**
+phải gói của hệ điều hành — nó nằm ở `~/Qt/6.11.2/gcc_64` và không có gì đặt nó
+vào `PATH`, nên chạy thẳng binary sẽ báo `libQt6Core.so.6: cannot open shared
+object file`. Script `run_s2t.sh` ở gốc cây nguồn có mặt để lo đúng chuyện đó.
+
+```bash
+cd ~/s2t-qt
+./run_s2t.sh            # server chạy nền + giao diện; đóng giao diện là dừng cả hai
+./run_s2t.sh client     # chỉ giao diện, khi server đã chạy sẵn
+./run_s2t.sh restart    # dừng server cũ, chạy server nền mới, không mở giao diện
+./run_s2t.sh stop       # dừng server đang giữ cổng
+./run_s2t.sh config     # ghi lại cấu hình client cho khớp server ở đây (có sao lưu)
+```
+
+Chạy trên **màn hình thật của máy đó** (phiên X11 `:1`, cũng là màn hình
+AnyDesk nhìn thấy). Đừng chạy giao diện qua `ssh` rồi cho vào nền: phiên ssh sẽ
+bị giữ cho tới khi ứng dụng thoát.
+
+> Chạy lại script là **đè lên**: thấy một `s2t-qt-server` đang giữ cổng 8800 thì
+> nó dừng cái cũ rồi chạy tiếp. Đặt `KILL_EXISTING=0` để trở lại nếp cũ, hoặc
+> `LISTEN=127.0.0.1:8801` để chạy song song thay vì chạy đè.
+
+### Bộ mẫu để trình diễn
+
+Thư mục `~/s2t-qt/sample/` trên máy RHEL giữ các tệp mẫu. Đo ngày 2026-09-04:
+
+| Tệp | Dài | Dùng để |
+|---|---|---|
+| `Mai Thanh.mp4` | 30,4 s | demo phụ đề ngắn, một người nói |
+| `Ngọc Trinh.mp4` | 32,6 s | demo phụ đề ngắn, một người nói |
+| `Thanh Tân.mp4` | 59,3 s | mẫu đủ dài để **đăng ký giọng** không rơi vào chế độ cấp bách |
+| `Converstation.mp4` | 88 phút 43 s (736 MB) | cuộc họp nhiều người, dùng để xem toàn văn |
+
+Ba giọng *Mai Thanh*, *Ngọc Trinh*, *Thanh Tân* đã được đăng ký sẵn trong
+database giọng, nên bản chép hiện đúng tên chứ không phải *Người 1*, *Người 2*.
+
+**Trình diễn nhanh (khuyến nghị):** `F6` → **Mở tệp âm thanh / video…** → chọn
+một trong ba tệp ngắn. Hình chạy, phụ đề chồng lên hình, bản chép cuộn bên
+phải — xem [mục 4](#4-phụ-đề-trực-tiếp).
+
+**Xem toàn văn cuộc họp dài:** `Ctrl+O` với `Converstation.mp4`, và **tắt** tuỳ
+chọn *Phát lại tệp theo tốc độ thật* trong Cấu hình — nếu để bật thì buổi trình
+diễn dài đúng 88 phút. Bản chép đầy đủ lấy ở bảng Soát & sửa (`F9`) hoặc bằng
+`tools/export_transcript.py`.
+
+> **`tools/deploy_rhel.sh` xoá sạch `~/s2t-qt/sample/`** — nó `rm -rf ~/s2t-qt`
+> rồi giải nén bản mới, mà `sample/` không nằm trong git. Sao lưu bộ mẫu trước
+> mỗi lần triển khai lại.
+
+Máy RHEL này **không có `ffmpeg`** trên `PATH`; các tệp `.mp4` đi qua FFmpeg đi
+kèm Qt Multimedia nên vẫn chạy bình thường, không phải cài thêm gì.

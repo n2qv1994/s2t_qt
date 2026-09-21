@@ -29,6 +29,11 @@ bool isUnassignedSlot(const QString &speaker)
 // long, which the client renders as a single unscrollable block.
 const double kTurnGapSec = 1.5;
 
+// Shortest stretch worth staging as evidence for a voice.  Below this it is an
+// interjection - "vâng", "dạ" - and CAM++ gets a worse embedding from a pile of
+// those than from one real sentence.
+const double kMinEvidenceSpanSec = 1.0;
+
 // Below this the client paints a word as low confidence.  It is reported to the
 // client as conf_threshold_pct so both sides agree on what "low" means.
 const quint32 kConfThresholdPct = 60;
@@ -41,6 +46,60 @@ const int kAmpTraceMax = 4096;
 bool isLowConfidence(float confidence)
 {
     return confidence > 0.0f && confidence < float(kConfThresholdPct) / 100.0f;
+}
+
+// Does this token close a sentence?
+//
+// The mark is not always the last character: a quoted or bracketed sentence
+// ends `rồi."` or `rồi.)`, so the closers are skipped before the mark is read.
+// QChar and not QLatin1Char for the ellipsis: QLatin1Char takes one char, so
+// U+2026 gets cut down to its low byte and the comparison silently becomes
+// "is this an ampersand".  The other three are ASCII and are safe either way.
+bool closesSentence(const QString &token)
+{
+    int i = token.size() - 1;
+    while (i >= 0) {
+        const QChar ch = token.at(i);
+        if (ch == QLatin1Char(']') || ch == QLatin1Char(')') || ch == QLatin1Char('}')
+            || ch == QLatin1Char('"') || ch == QLatin1Char('\'') || ch == QChar(u'”')
+            || ch == QChar(u'’')) {
+            --i;
+            continue;
+        }
+        break;
+    }
+    if (i < 0)
+        return false;
+    const QChar last = token.at(i);
+    return last == QLatin1Char('.') || last == QLatin1Char('?') || last == QLatin1Char('!')
+        || last == QChar(u'…');
+}
+
+// Upper-cases the first LETTER of a token, not its first character: a token can
+// open with a bracket or a quote, and `("hôm` must become `("Hôm`.
+//
+// Nothing is ever lowered.  A capital in the middle of a sentence is the
+// tier's CASE label deciding this is a proper noun, and flattening it would
+// undo a decision a model made on purpose.
+QString sentenceCased(const QString &token)
+{
+    for (int i = 0; i < token.size(); ++i) {
+        if (!token.at(i).isLetter())
+            continue;
+        QString out = token;
+        out[i] = token.at(i).toUpper();
+        return out;
+    }
+    return token;
+}
+
+bool hasLetter(const QString &token)
+{
+    for (const QChar &ch : token) {
+        if (ch.isLetter())
+            return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -249,12 +308,28 @@ void LiveTranscript::rebuildPhrases(asr::DisplayRow *row) const
     row->stableTokenCount = quint32(row->displayTokens.size());
 
     // One phrase per sentence, split on end punctuation.  The tier's
-    // punctuation model is what makes this meaningful; without punctuation the
-    // whole row is one phrase, which is the honest answer.
+    // punctuation model is what makes this meaningful, and since 2026-09-21 it
+    // actually reaches here: the words carry itn_part_text, mark included, so
+    // a row is now as many phrases as it has sentences instead of always one.
+    //
+    // Sentence case is applied in the same pass, and it has to be: the tier
+    // does NOT capitalise its word records.  _sentence_case_itn_parts
+    // (itn_merge.py:313) runs over the whole rendered text instead, so the
+    // first word after a full stop arrives as "tăng" and would stay that way
+    // if every layer only looked at one word at a time.  A row is the widest
+    // piece of text this side ever holds at once, and a row is one speaker
+    // turn, so a row opens a sentence.
     asr::Phrase phrase;
     float sum = 0.0f;
     int count = 0;
-    for (const asr::Word &word : row->displayTokens) {
+    bool sentenceStart = true;
+    for (asr::Word &word : row->displayTokens) {
+        if (sentenceStart)
+            word.w = sentenceCased(word.w);
+        // A token with no letter in it - a stray mark - neither takes the
+        // capital nor spends it.
+        if (hasLetter(word.w))
+            sentenceStart = false;
         if (phrase.words.isEmpty())
             phrase.startSec = word.startSec;
         phrase.words.append(word);
@@ -265,13 +340,9 @@ void LiveTranscript::rebuildPhrases(asr::DisplayRow *row) const
             phrase.text += QLatin1Char(' ');
         phrase.text += word.w;
 
-        const QChar last = word.w.isEmpty() ? QChar() : word.w.at(word.w.size() - 1);
-        // QChar chứ không phải QLatin1Char cho dấu ba chấm: QLatin1Char nhận một
-        // char, nên U+2026 bị cắt xuống byte thấp và phép so sánh hoá ra là hỏi
-        // "có phải dấu &".  Ba dấu kia là ASCII nên QLatin1Char vẫn đúng.
-        const bool endsSentence = last == QLatin1Char('.') || last == QLatin1Char('?')
-            || last == QLatin1Char('!') || last == QChar(u'…');
+        const bool endsSentence = closesSentence(word.w);
         if (endsSentence) {
+            sentenceStart = true;
             phrase.avgConf = count > 0 ? sum / float(count) : 0.0f;
             phrase.isLowConf = isLowConfidence(phrase.avgConf);
             row->phrases.append(phrase);
@@ -291,6 +362,83 @@ void LiveTranscript::rebuildPhrases(asr::DisplayRow *row) const
             row->mergedText += QLatin1Char(' ');
         row->mergedText += item.text;
     }
+}
+
+QList<QPair<double, double>> LiveTranscript::speakerSpans(const QString &speaker,
+                                                          double maxSec) const
+{
+    QList<QPair<double, double>> runs;
+    if (speaker.isEmpty())
+        return runs;
+
+    // Words, not rows.  A row is a turn as the display draws it and can hold a
+    // word the diarization gave to somebody else; the word carries the slot it
+    // was actually placed in.
+    //
+    // Every word is walked, not only this speaker's, and in time order -
+    // because a run has to BREAK where somebody else spoke.  Joining this
+    // speaker's words across a gap that another voice sits in would hand CAM++
+    // a span with two people in it, and a blended embedding is the worst
+    // outcome available here: it does not fail, it quietly mis-names people in
+    // every later meeting.
+    struct Placed
+    {
+        double startSec;
+        double endSec;
+        QString slot;
+    };
+    QList<Placed> words;
+    for (const asr::DisplayRow &row : m_rows) {
+        for (const asr::Word &word : row.displayTokens) {
+            if (word.endSec <= word.startSec)
+                continue;
+            words.append({word.startSec, word.endSec,
+                          word.speaker.isEmpty() ? row.speaker : word.speaker});
+        }
+    }
+    std::sort(words.begin(), words.end(),
+              [](const Placed &a, const Placed &b) { return a.startSec < b.startSec; });
+
+    bool open = false;
+    for (const Placed &word : words) {
+        if (word.slot != speaker) {
+            open = false; // somebody else: whatever run was building ends here
+            continue;
+        }
+        if (open && word.startSec - runs.last().second <= kTurnGapSec) {
+            runs.last().second = qMax(runs.last().second, word.endSec);
+            continue;
+        }
+        runs.append({word.startSec, word.endSec});
+        open = true;
+    }
+
+    // Longest first, so a cap keeps the cleanest evidence rather than whatever
+    // happened to be said first.  A one-word "vâng" is worth nothing to CAM++
+    // and would crowd out a real sentence.
+    std::sort(runs.begin(), runs.end(),
+              [](const QPair<double, double> &a, const QPair<double, double> &b) {
+                  return (a.second - a.first) > (b.second - b.first);
+              });
+
+    QList<QPair<double, double>> out;
+    double collected = 0.0;
+    for (const QPair<double, double> &run : runs) {
+        const double length = run.second - run.first;
+        if (length < kMinEvidenceSpanSec)
+            continue;
+        out.append(run);
+        collected += length;
+        if (maxSec > 0.0 && collected >= maxSec)
+            break;
+    }
+    // Back into time order: the publish path concatenates the PCM behind these
+    // and hands CAM++ one sample, which should read as the meeting did.
+    std::sort(out.begin(), out.end(),
+              [](const QPair<double, double> &a, const QPair<double, double> &b) {
+                  return a.first < b.first;
+              });
+    return out;
 }
 
 void LiveTranscript::recount()

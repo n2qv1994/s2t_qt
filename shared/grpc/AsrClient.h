@@ -59,6 +59,19 @@ public:
                                      reg::SaveSessionSpeakersResponse *out, int timeoutMs);
     grpc::Status getSpeakerRegistryStatus(const reg::GetSpeakerRegistryStatusRequest &req,
                                           reg::GetSpeakerRegistryStatusResponse *out, int timeoutMs);
+    // What an enrolment would keep, without keeping it.  The only way to check
+    // a recording before an operation that cannot be undone.
+    grpc::Status previewEnrollment(const reg::PreviewEnrollmentRequest &req,
+                                   reg::PreviewEnrollmentResponse *out, int timeoutMs);
+    grpc::Status listGlobalSpeakers(reg::ListGlobalSpeakersResponse *out, int timeoutMs);
+    // The three that change the shared database.  `activate` is the way back
+    // from `deactivate`; `delete` is not reversible from here.
+    grpc::Status deactivateGlobalSpeaker(const reg::GlobalSpeakerActionRequest &req,
+                                         reg::GlobalSpeakerActionResponse *out, int timeoutMs);
+    grpc::Status activateGlobalSpeaker(const reg::GlobalSpeakerActionRequest &req,
+                                       reg::GlobalSpeakerActionResponse *out, int timeoutMs);
+    grpc::Status deleteGlobalSpeaker(const reg::GlobalSpeakerActionRequest &req,
+                                     reg::GlobalSpeakerActionResponse *out, int timeoutMs);
 
     // ---- BufferAdminService -------------------------------------------------
     // Only s2t-qt-server answers these.  Pointed straight at the adapter they

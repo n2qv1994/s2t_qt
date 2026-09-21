@@ -38,6 +38,18 @@ constexpr const char *SaveSessionSpeakers =
     "/asr.ui.v1.SpeakerRegistryService/SaveSessionSpeakers";
 constexpr const char *GetSpeakerRegistryStatus =
     "/asr.ui.v1.SpeakerRegistryService/GetSpeakerRegistryStatus";
+// The global registry's own lifecycle.  These five were in the .proto and in
+// the reference adapter from the start and missing here until 2026-09-21,
+// which left no way at all to see what is in the shared speaker database, let
+// alone take anything back out of it.
+constexpr const char *PreviewEnrollment = "/asr.ui.v1.SpeakerRegistryService/PreviewEnrollment";
+constexpr const char *ListGlobalSpeakers = "/asr.ui.v1.SpeakerRegistryService/ListGlobalSpeakers";
+constexpr const char *DeactivateGlobalSpeaker =
+    "/asr.ui.v1.SpeakerRegistryService/DeactivateGlobalSpeaker";
+constexpr const char *ActivateGlobalSpeaker =
+    "/asr.ui.v1.SpeakerRegistryService/ActivateGlobalSpeaker";
+constexpr const char *DeleteGlobalSpeaker =
+    "/asr.ui.v1.SpeakerRegistryService/DeleteGlobalSpeaker";
 
 // ---- s2t.buffer.v1.BufferAdminService -------------------------------------
 // The Server buffer's own surface.  The adapter does not implement these, and

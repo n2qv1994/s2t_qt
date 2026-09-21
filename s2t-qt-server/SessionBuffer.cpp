@@ -26,6 +26,19 @@ const int kLatencyWindow = 256;
 // a recovered network is noticed inside one audio packet's worth of time.
 const int kRetryPauseMs = 500;
 
+// How many trace events pile up before they are written.  One SQLite
+// transaction per audio packet would be six a second for a diagnostic that is
+// read once a week; at this size it is roughly one write every ten seconds of
+// meeting, and the stop path flushes whatever is left.
+const int kTraceFlushEvents = 64;
+
+// The most evidence audio staged for one voice.  The publish path concatenates
+// the PCM behind these spans and posts it to /enroll_from_pcm, so an unbounded
+// answer would upload an hour of meeting for one speaker.  CAM++ wants 20 s of
+// speech after VAD and is measurably better with 30-40, so this leaves room
+// for what VAD strips without turning a publish into a file transfer.
+const double kEvidenceMaxSec = 45.0;
+
 double percentile(QList<double> values, double fraction)
 {
     if (values.isEmpty())
@@ -543,6 +556,61 @@ double SessionBuffer::finishedSecondsAgo() const
     return m_finished ? nowSeconds() - m_finishedAt : 0.0;
 }
 
+void SessionBuffer::drainTrace(BackendSession &session, bool flush)
+{
+    if (!m_settings.store)
+        return;
+    QList<asr::PipelineTraceEvent> events = session.takeTrace();
+    for (asr::PipelineTraceEvent &event : events) {
+        // The tier numbers its events per backend session; a session that is
+        // resumed after a restart opens a new one and would start again at 1.
+        // The cursor a client polls with has to keep rising across that, so the
+        // sequence belongs to the meeting, not to the connection.
+        event.seq = ++m_traceSeq;
+        m_pendingTrace.append(event);
+    }
+    if (m_pendingTrace.isEmpty())
+        return;
+    if (!flush && m_pendingTrace.size() < kTraceFlushEvents)
+        return;
+    m_settings.store->appendTrace(m_sessionId, m_pendingTrace);
+    m_pendingTrace.clear();
+}
+
+void SessionBuffer::publishSpeakerRegistry(BackendSession &session)
+{
+    if (!m_settings.store)
+        return;
+    const QList<reg::SessionSpeakerEntry> entries = session.speakerRegistry();
+    if (entries.isEmpty())
+        return;
+
+    // Identity first.  syncSpeakers() deliberately leaves verified_name alone
+    // where an operator has already renamed the voice by hand, so this cannot
+    // undo a correction somebody made during the meeting.
+    m_settings.store->syncSpeakers(m_sessionId, entries);
+
+    // Then the evidence, which is what SaveSessionSpeakers needs and what it
+    // never had: until 2026-09-21 stageEvidence() had exactly one call site
+    // and it was in the self-test, so publishing a voice to the shared
+    // database always failed with "chưa có bằng chứng nào được ghim" no matter
+    // what the operator did.
+    //
+    // The spans come from the transcript rather than from the tier: the tier
+    // exports which voices it told apart, and the transcript is where those
+    // same ids are attached to timestamps.  That makes the evidence a
+    // measurement of this meeting instead of a by-product of a rename.
+    QMutexLocker stateLock(&m_stateMutex);
+    for (const reg::SessionSpeakerEntry &entry : entries) {
+        const QList<QPair<double, double>> spans =
+            m_live.speakerSpans(entry.sessionSpeakerId, kEvidenceMaxSec);
+        if (spans.isEmpty())
+            continue;
+        m_settings.store->stageEvidence(m_sessionId, entry.sessionSpeakerId, spans,
+                                        entry.verifiedName);
+    }
+}
+
 bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc::Status *fatal)
 {
     asr::PushAudioRequest request;
@@ -617,6 +685,8 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
                     << "from seq=" << packet.seq;
                 m_lastError.clear();
             }
+            lock.unlock();
+            drainTrace(session, false);
             return true;
         }
 
@@ -746,6 +816,11 @@ void SessionBuffer::run()
             asr::PushAudioResponse tail;
             const grpc::Status status = m_backend->finish(&tail);
 
+            // Everything the tier collected, written before the meeting is
+            // marked over: campp_registry_json is exported ONLY on this final
+            // tick, so there is no second chance at it.
+            drainTrace(*m_backend, true);
+
             asr::StopSessionResponse response;
             {
                 QMutexLocker stateLock(&m_stateMutex);
@@ -761,6 +836,11 @@ void SessionBuffer::run()
                 response.result = tail;
                 response.state = snapshot.state;
             }
+
+            // After markDone(), because the evidence spans are read off the
+            // finished transcript - the last correction pass arrives in this
+            // same tail and moves word timings around.
+            publishSpeakerRegistry(*m_backend);
 
             // The archive is written here and only here for the transcript:
             // once per meeting, at the end, rather than on every packet.  A

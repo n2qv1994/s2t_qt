@@ -68,6 +68,8 @@ QString slotKeyFor(double startSec, double endSec)
     return QString::number(centre) + QLatin1Char('|') + QString::number(duration);
 }
 
+// How much punctuation a surface carries.  Used ONLY to tell "this text has
+// marks" from "this text has none" - never to rank one mark above another.
 int punctuationScore(const QString &text)
 {
     int score = 0;
@@ -78,13 +80,35 @@ int punctuationScore(const QString &text)
     return score;
 }
 
+// Which of two surfaces for the same word wins.
+//
+// This used to be "more punctuation wins", and that is wrong - the same wrong
+// the pipeline team fixed in realtime_ui.py on 2026-08-28.  The reason is
+// measurable and comes out of /api/pipeline_trace: every correction window
+// this tier produces has right_context_samples = 0.  A word sitting at the
+// tail of its own window is therefore always punctuated with no right context
+// at all, and when the next window re-covers it the word finally has context
+// on both sides.  So:
+//
+//   the LATER window's decision is the better decision, whatever mark it picked
+//
+// Under "more wins", `rào.` -> `rào,` never went through: a comma and a full
+// stop score the same, the tie lost, and the transcript stayed stuck on the
+// mark decided without any right context.
+//
+// The one thing still worth refusing is a candidate that has lost every mark
+// the text already had.  That is a raw or partial replay of the word, not a
+// decision about it.  itn_merge.py:1973-1986 and realtime_ui.py:797-799 carry
+// the same single exception.
 bool shouldUpgradeLockedText(const QString &previous, const QString &next)
 {
     if (next.isEmpty() || previous == next)
         return false;
     if (TranscriptModel::normalizeForSlot(previous) != TranscriptModel::normalizeForSlot(next))
         return false;
-    return punctuationScore(next) > punctuationScore(previous);
+    if (punctuationScore(next) == 0 && punctuationScore(previous) > 0)
+        return false;
+    return true;
 }
 
 double overlapRatio(const WordItem &a, const WordItem &b)
@@ -167,13 +191,22 @@ QList<WordItem> relabelFromSurface(const QList<WordItem> &words, const asr::Disp
         int score = 0;
         for (const QString &label : labels)
             score += punctuationScore(label);
-        score -= currentScore;
+        // Same single exception as shouldUpgradeLockedText(), and for the same
+        // reason: a surface with no marks at all, offered against text that
+        // has them, is a raw replay rather than a newer decision.  Everything
+        // else is allowed through, ties included - it used to require
+        // `score - currentScore > 0`, which is what made `rào.` -> `rào,`
+        // impossible.
+        if (score == 0 && currentScore > 0)
+            continue;
+        // Candidates are in order of authority - phrase text, then the row's
+        // merged text, then the interim edge - so `>` keeps the first of equals.
         if (bestLabels.isEmpty() || score > bestScore) {
             bestLabels = labels;
             bestScore = score;
         }
     }
-    if (bestLabels.isEmpty() || bestScore <= 0)
+    if (bestLabels.isEmpty())
         return words;
 
     QList<WordItem> out = words;
@@ -223,7 +256,14 @@ QString TranscriptModel::normalizeForSlot(const QString &text)
         const ushort code = ch.unicode();
         if (code >= 0x0300 && code <= 0x036f)
             continue; // combining diacritic
+        // The ellipsis and the typographic quotes are here because the tier's
+        // own surface uses them: a word that gains a "…" between two passes is
+        // still the same word, and a slot key that disagreed about that would
+        // split it into two.
         if (QStringLiteral(".,;:!?'\"`~()[]{}<>").contains(ch))
+            continue;
+        if (ch == QChar(u'…') || ch == QChar(u'”') || ch == QChar(u'’') || ch == QChar(u'“')
+            || ch == QChar(u'‘'))
             continue;
         out.append(ch);
     }

@@ -24,6 +24,22 @@
 
 #include <QString>
 
+// The two JSON tensors whose shape is a contract with asr_diar_session rather
+// than an implementation detail of this file.  Named and declared here so the
+// self-test can hold them to that contract without a live Triton: getting
+// either one wrong is silent - the transcript simply reads worse, or a feature
+// simply never fires - which is exactly the kind of bug a test has to catch.
+namespace triton {
+
+// itn_merged_words_json -> display words, punctuation and all.  See the .cpp
+// for why "w" is not the field to read.
+QList<asr::Word> mergedWordsFromJson(const QString &json);
+
+// campp_registry_json -> this meeting's speakers, as the tier clustered them.
+QList<reg::SessionSpeakerEntry> speakerRegistryFromJson(const QString &json);
+
+} // namespace triton
+
 class TritonBackend : public InferenceBackend
 {
 public:

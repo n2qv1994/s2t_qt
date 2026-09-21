@@ -176,6 +176,120 @@ void testHpack()
           QStringLiteral("out-of-range dynamic index is rejected"));
 }
 
+// ---------------------------------------------------------------------------
+// Punctuation retention
+// ---------------------------------------------------------------------------
+//
+// The rule these four cases hold the model to, and why it is not the obvious
+// one: every correction window the tier produces has right_context_samples = 0,
+// so a word is always punctuated the first time with nothing to its right and
+// re-punctuated later with context on both sides.  The later decision is the
+// better one whatever mark it chose.  Ranking marks by weight - which is what
+// this used to do - made `rào.` -> `rào,` a tie and the tie lost, freezing the
+// transcript on the mark decided in the dark.  Ported from the pipeline team's
+// own tests/test_correction_snapshot_retention.py:106-165.
+
+asr::StateResponse oneWordState(const QString &text, quint64 revision)
+{
+    asr::StateResponse response;
+    response.sessionId = QStringLiteral("sess-punc");
+    response.transcriptRevision = revision;
+    response.state.confThresholdPct = 60;
+
+    asr::Word word;
+    word.w = text;
+    word.c = 0.95f;
+    word.startSec = 1.0;
+    word.endSec = 1.4;
+
+    asr::DisplayRow row;
+    row.rowId = QStringLiteral("r1");
+    row.speaker = QStringLiteral("0");
+    row.startSec = word.startSec;
+    row.endSec = word.endSec;
+    row.displayTokens = {word};
+    row.stableTokenCount = 1;
+    asr::Phrase phrase;
+    phrase.text = text;
+    phrase.avgConf = word.c;
+    phrase.startSec = word.startSec;
+    phrase.endSec = word.endSec;
+    phrase.words = {word};
+    row.phrases = {phrase};
+    row.mergedText = text;
+    response.state.rows = {row};
+    return response;
+}
+
+QString shownWord(const TranscriptModel &model)
+{
+    for (const Lane &lane : model.lanes()) {
+        for (const WordItem &word : lane.words)
+            return word.text;
+    }
+    return QString();
+}
+
+void testPunctuationRetention()
+{
+    // 1. A later window changing "." to "," must go through, even though the
+    //    two marks weigh the same.
+    {
+        TranscriptModel model;
+        model.resetForSession(QStringLiteral("sess-punc"));
+        model.applyLiveState(oneWordState(QString::fromUtf8("rào."), 1));
+        model.applyLiveState(oneWordState(QString::fromUtf8("rào,"), 1));
+        check(shownWord(model) == QString::fromUtf8("rào,"),
+              QStringLiteral("rào. -> rào, is accepted (tie on weight, later window wins): %1")
+                  .arg(shownWord(model)));
+    }
+
+    // 2. The same in the other direction - the rule is about which window
+    //    decided, not about which mark it picked.
+    {
+        TranscriptModel model;
+        model.resetForSession(QStringLiteral("sess-punc"));
+        model.applyLiveState(oneWordState(QString::fromUtf8("rào,"), 1));
+        model.applyLiveState(oneWordState(QString::fromUtf8("rào."), 1));
+        check(shownWord(model) == QString::fromUtf8("rào."),
+              QStringLiteral("rào, -> rào. is accepted too: %1").arg(shownWord(model)));
+    }
+
+    // 3. The one exception: a candidate that has lost every mark is a raw
+    //    replay, not a decision, and must not win.
+    {
+        TranscriptModel model;
+        model.resetForSession(QStringLiteral("sess-punc"));
+        model.applyLiveState(oneWordState(QString::fromUtf8("rào."), 1));
+        model.applyLiveState(oneWordState(QString::fromUtf8("rào"), 1));
+        check(shownWord(model) == QString::fromUtf8("rào."),
+              QStringLiteral("a bare replay does not strip a mark that was already there: %1")
+                  .arg(shownWord(model)));
+    }
+
+    // 4. A word whose text really changed still comes through when the server
+    //    says the transcript moved on - that is an edit or a re-decode, and
+    //    refusing it would freeze an operator's own correction off the screen.
+    {
+        TranscriptModel model;
+        model.resetForSession(QStringLiteral("sess-punc"));
+        model.applyLiveState(oneWordState(QString::fromUtf8("rào."), 1));
+        model.applyLiveState(oneWordState(QString::fromUtf8("hàng rào."), 2));
+        check(shownWord(model) == QString::fromUtf8("hàng rào."),
+              QStringLiteral("a new revision replaces the word outright: %1").arg(shownWord(model)));
+    }
+
+    // normalizeForSlot has to ignore the marks, or the same word before and
+    // after punctuation would be two different slots and none of the above
+    // would ever be compared at all.
+    check(TranscriptModel::normalizeForSlot(QString::fromUtf8("rào."))
+              == TranscriptModel::normalizeForSlot(QString::fromUtf8("rào,")),
+          QStringLiteral("a slot key ignores punctuation"));
+    check(TranscriptModel::normalizeForSlot(QString::fromUtf8("rồi…"))
+              == TranscriptModel::normalizeForSlot(QString::fromUtf8("rồi")),
+          QStringLiteral("including the ellipsis the tier's own surface uses"));
+}
+
 } // namespace
 
 void captureReportInto(QString *sink)
@@ -191,6 +305,7 @@ int runCodecTests()
     g_failures = 0;
     testProtoRoundTrip();
     testHpack();
+    testPunctuationRetention();
     out() << (g_failures == 0 ? "ALL PASS" : QStringLiteral("%1 FAILURE(S)").arg(g_failures))
           << Qt::endl;
     out().flush();

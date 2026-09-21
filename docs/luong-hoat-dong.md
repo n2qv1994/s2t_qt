@@ -27,7 +27,7 @@ trong luồng tổng thể:
 │                           │◄──│                        │◄──│  ── hoặc ──      │
 └───────────────────────────┘   └────────────────────────┘   │ Riva :50051      │
         gRPC :8800              InferenceBackend là ranh giới └──────────────────┘
-   3 service, 20 RPC, 1 token
+   3 service, 25 RPC, 1 token
 ```
 
 **Ranh giới cũ đã biến mất.** Cho tới 2026-08-25, bốn RPC do bộ đệm trả lời và
@@ -51,9 +51,10 @@ triển khai — người dùng cho biết nó vốn chỉ là mã mẫu để h
   `campp_native/enroll_service.py` trên `:8790`. Nó không phải tầng suy luận,
   và không thể là: `rebuild_db` cần quyền `docker exec` mà container Triton cố
   tình không có. Xem `s2t-qt-server/CampPlusClient.h`.
-- `get_pipeline_trace` là RPC duy nhất còn là stub, và nó trả `enabled = false`
-  — đúng cách hợp đồng vốn đã dành để nói "bản triển khai này không thu thập
-  trace", nên client không phải xử lý lỗi.
+- `get_pipeline_trace` cũng được trả lời từ `SessionStore`, từ 2026-09-21:
+  máy chủ thu `correction_trace_json` theo từng chunk, tách thành sự kiện và
+  ghi vào bảng `pipeline_trace`. `enabled` giờ báo *kho phiên có bật không*
+  chứ không còn là `false` cứng. Xem §5.10 của `danh-sach-api.md`.
 
 Khi `database/dir` hoặc `enroll/url` để trống, những RPC phụ thuộc chúng trả
 `FAILED_PRECONDITION` kèm một câu điều hành viên hiểu được, chứ **không** trả
@@ -321,8 +322,25 @@ Khác luồng microphone ở hai điểm, còn lại dùng chung mã:
 startFile(path)
    ├─ audio::ensurePcmWav()   .m4a / .wav lạ → ffmpeg → WAV PCM tạm
    ├─ wav::readWav()          nạp toàn bộ vào bộ nhớ, xoá tệp tạm ngay
+   ├─ audio::decodeMedia()    ← chỉ khi trên còn hỏng: FFmpeg đi kèm Qt
    └─ beginSession(new SessionWorker)   ← thẳng luôn, không có capture
 ```
+
+**Hai bộ giải mã, và thứ tự giữa chúng là có lý do.** `Transcode` gọi một
+`ffmpeg` ngoài: cũ hơn, đã chạy lâu, và không tốn gì khi tệp vốn đã là WAV PCM.
+`MediaDecode` dùng đúng bộ giải mã của `QMediaPlayer` (`QAudioDecoder`) nên
+không cần cài gì trên máy trạm — chính máy RHEL đã triển khai **không có
+`ffmpeg` trên `PATH`**, và trước 2026-09-02 người vận hành ở đó mở `.mp4` của
+chính cuộc họp mình thì chỉ nhận được *"không tìm thấy ffmpeg"*, trong khi cửa
+sổ phụ đề ngay bên cạnh phát được đúng tệp ấy.
+
+Cả hai đều đưa về **16 kHz mono**. Không phải sở thích: `asr_diar_session` nhận
+một tensor float không kèm nhịp lấy mẫu và mặc định coi mọi thứ là 16 kHz, nên
+đưa 48 kHz vào thì bản chép trôi chảy mà sai hết, chứ không báo lỗi.
+
+Cả tệp được nạp vào bộ nhớ trước khi phiên bắt đầu, và đó là một lần đứng hình
+thấy được với tệp dài — đo trên RHEL: video 88 phút (736 MB) mất 3,2 giây và
+chiếm 170 MB PCM.
 
 Không có `AudioQueue` (worker nhận `nullptr`). Nếu bật *pacedToSourceClock*,
 vòng lặp tự ngủ để bám theo đồng hồ của nguồn; tắt thì đẩy nhanh hết mức
@@ -331,6 +349,80 @@ pipeline nhận.
 Worker lấy sample rate và số kênh **từ chính tệp**, không lấy từ cấu hình
 microphone: `push_audio` khai báo với server đúng cái đang gửi, sai chỗ này sẽ
 làm hỏng mọi mốc thời gian mà pipeline suy ra từ số mẫu.
+
+---
+
+## 4b. Luồng phụ đề trực tiếp
+
+`ui/SubtitleWindow` là cùng một đường đi, khác đúng một chỗ: **chữ được đặt theo
+đồng hồ phát, không theo thứ tự nhận về.**
+
+```
+loadFile(path)
+   ├─ audio::decodeMedia()          giải mã trước, phát sau
+   ├─ SessionController::startPcm(..., paced = true)   → pipeline như thường
+   └─ QMediaPlayer::play()          hình + tiếng cho người xem
+                                     │
+onPlayerPosition(ms) ──► renderAt(sec) ──► chọn từ trong m_words theo mốc thời gian
+```
+
+- **Giải mã trước, phát sau.** Nếu audio không đọc được thì không có gì để chép,
+  và cho hình chạy tiếp là trình diễn một tính năng phụ đề mà không có phụ đề.
+- **`paced = true` luôn luôn**, kể cả khi tuỳ chọn *phát lại theo tốc độ thật*
+  đang tắt. Gửi nhanh hơn thời gian thực thì chỉ tổ có bản chép trước cả khung
+  hình cần tới nó — vô hại — nhưng gửi đúng nhịp còn giữ cho cửa sổ trượt của
+  pipeline đúng như lúc họp thật.
+- **`rebuildWords()` dựng lại toàn bộ danh sách từ sau mỗi lần model đổi**, rồi
+  sắp theo `startSec`. Danh sách nhỏ, và sắp lại rẻ hơn nhiều so với việc suy
+  luận xem lần hiệu chỉnh vừa rồi đã viết lại những dòng nào.
+- **Hai phần chữ vẽ khác nhau**: phần đã chốt và phần mép còn đang đổi. Vẽ mép
+  như thể nó là kết quả cuối là cách một buổi trình diễn trông như vừa mắc lỗi
+  rồi tự sửa.
+- **`SubtitleStage` tự vẽ cả khung hình lẫn phụ đề, trong một `paintEvent`.**
+  Nó cầm một `QVideoSink` và `QMediaPlayer` được trỏ vào đó bằng
+  `setVideoSink()`, chứ không có `QVideoWidget` nào. Xem hộp ngay dưới: đó
+  chính là bản sửa lỗi, không phải một cách viết gọn hơn.
+- **Chỉ có một `QTextLayout` cho phụ đề, tô hai màu bằng `FormatRange`.** Cách
+  cũ vẽ cả câu màu vàng rồi vẽ đè phần đã chốt màu trắng lên, với giả định
+  "tiền tố xuống dòng giống hệt cả câu". Nó không giống, vì khối chữ căn đáy:
+  tiền tố ít dòng hơn bị ghim xuống **đáy**, nên chữ trắng rơi đúng vào dòng
+  cuối màu vàng và phụ đề đọc ra như hai câu in chồng lên nhau. Một layout thì
+  hai phần không thể bất đồng về chỗ ngắt dòng.
+- `loadFile()` là `public` có chủ ý: hộp thoại chọn tệp là thứ một chương trình
+  kiểm thử không đi qua được, và cách duy nhất để kiểm một widget là điều khiển
+  nó (`tools/subtitle_driver.cpp`, `tools/doc_shots.cpp`).
+
+**Vì sao không còn `QVideoWidget` ở đây — và vì sao lỗi ấy sống sót qua một
+lần kiểm thử.**
+
+Trước 2026-09-04 khung hình là một `QVideoWidget` với `SubtitleOverlay` làm
+widget con vẽ đè lên. Trên phiên X11 của máy RHEL, `QVideoWidget` vẽ vào **bề
+mặt riêng của nó**, và bề mặt ấy được xếp *trên* widget con — người xem thấy
+hình, không thấy phụ đề.
+
+Điều khiến lỗi sống được lâu là chính mẹo kiểm thử ở [mục 13](#13-bản-đồ-mã-nguồn):
+`QWidget::grab()` **vẽ lại cây widget**, nên nó không biết gì về việc cửa sổ
+thật xếp lớp ra sao. Hai ảnh chụp **cùng một giây** của cùng một lần phát nói
+ngược nhau: ảnh `grab()` có caption to rõ, ảnh `gnome-screenshot -w` của đúng
+cửa sổ đó không có chữ nào. Đó là cách phát hiện, và cũng là quy tắc rút ra:
+
+> **Bất cứ thứ gì vẽ đè lên video phải được kiểm bằng ảnh chụp màn hình thật.**
+> `grab()` một mình không chứng minh được điều gì về nó.
+
+Bản sửa bỏ hẳn bề mặt thứ hai thay vì tìm cách xếp lớp cho đúng: `SubtitleStage`
+nhận khung hình từ `QVideoSink` rồi tự vẽ — `QVideoFrame::paint()` trước, phụ đề
+sau, cùng một `QPainter`. Không còn gì để xếp lên trên nữa. Hệ quả phụ đáng
+giá: `grab()` giờ **cũng** thấy khung hình, nên hai cách chụp đồng ý với nhau và
+phép kiểm đã bỏ lọt lỗi này lần sau sẽ thấy.
+
+Kéo theo đó, `s2t-qt-client.pro` không còn cần `multimediawidgets`.
+
+Cái giá: khung hình được vẽ bằng CPU chứ không qua đường tăng tốc của
+`QVideoWidget`. Đo trên máy RHEL với tệp mẫu 1080p, phát đúng thời gian thực,
+không có dấu hiệu tụt khung và độ trễ văn bản vẫn dưới ngưỡng — chấp nhận được
+cho một cửa sổ trình diễn. Nếu sau này cần chiếu 4K thì đây là chỗ phải xem
+lại, và cách đúng khi ấy là `QGraphicsVideoItem` (chữ và hình chung một cảnh),
+**không** phải quay lại widget con vẽ đè.
 
 ---
 
@@ -766,7 +858,7 @@ Vài lựa chọn đáng nhớ, đối xứng với danh sách trên:
 - **`grpc-timeout` của client được đọc ra và chuyển tiếp nguyên.** Một người
   gọi đã bỏ cuộc thì không nên còn được chờ ở phía trên.
 
-Danh sách đầy đủ 20 RPC, số hiệu từng trường của mọi thông điệp, mã lỗi, chính
+Danh sách đầy đủ 25 RPC, số hiệu từng trường của mọi thông điệp, mã lỗi, chính
 sách thử lại và một tệp `.proto` tái dựng nằm ở
 [danh-sach-api.md](danh-sach-api.md). Khi sửa bất cứ thứ gì trong
 `shared/proto/` hay `shared/grpc/`, tài liệu đó phải được cập nhật cùng lúc —
@@ -812,6 +904,80 @@ nhích, và bảng soát lại tự tải lại — không có chuyện ghi đè
 | Giới hạn, có tên | khoá có mặt, có phần tử | Chỉ những tên đó tới được bộ xác thực |
 
 Một mảng rỗng tường minh **không** quay về nghĩa thứ nhất.
+
+---
+
+## 10b. Dấu câu: một từ có hai mặt chữ
+
+Mỗi bản ghi trong `itn_merged_words_json` mang **hai** mặt chữ của cùng một từ,
+và chúng không giống nhau:
+
+| Trường | Là gì |
+|---|---|
+| `w` | từ ASR **thô** — không dấu câu, không viết hoa |
+| `itn_part_text` | mặt chữ mô hình dấu câu/ITN quyết định, **đã kèm dấu của chính từ đó** |
+| `itn_source_part_idx` | chỉ số "part" nguồn — nhiều từ có thể chung một part |
+| `itn_punc_final` | nhãn dấu câu (`O`/`COMMA`/`PERIOD`/…) |
+
+**Đến 2026-09-21 máy chủ đọc `w`,** nên toàn bộ đầu ra của `bilstm_punc` —
+một mô hình Triton riêng, có chi phí suy luận đo được bằng `itn_ms` — chạy mỗi
+phiên rồi bị vứt đi. Bản chép lên màn hình là một chuỗi từ trần, và vì
+`rebuildPhrases()` tách câu theo `.?!…` nên nó không bao giờ tách được: mỗi
+hàng đúng một phrase.
+
+Luật dựng lại mặt chữ, đã đối chiếu **khớp từng byte** với
+`itn_correction_text` trên audio thật:
+
+1. **Hiển thị `itn_part_text`**, không phải `w`.
+2. **Không nối thêm `itn_punc_final`.** Dấu đã nằm trong `itn_part_text` rồi;
+   nối thêm ra dấu đôi — đo được: `khu vực..`.
+3. **Các từ liên tiếp cùng `itn_source_part_idx` chỉ phát một lần.** Ở chế độ
+   đang chạy (`ITN_OUTPUT_MODE=bilstm_punc_only`) quan hệ là 1 từ ↔ 1 part nên
+   đây là no-op; ở `phobert_norm_bilstm_punc` thì
+   `"hai nghìn không hai sáu"` → một part `"2026"`, và phát theo từng từ sẽ
+   nhân bản nó. Từ mở đầu run giữ part text, và khoảng thời gian của nó nới
+   rộng ra hết các từ trong run.
+4. **Viết hoa đầu câu là một lượt quét, không phải thuộc tính của từ.** Tầng
+   suy luận chạy `_sentence_case_itn_parts` trên *toàn văn* đã render
+   (`itn_merge.py:313`), nên từ ngay sau dấu chấm về đến đây vẫn là chữ
+   thường. Lượt đó được áp trong `LiveTranscript::rebuildPhrases()`: hàng là
+   mảnh văn bản rộng nhất phía này cầm một lúc, và một hàng là một lượt nói,
+   nên một hàng mở một câu.
+   - Viết hoa **ký tự chữ cái đầu tiên**, không phải ký tự đầu tiên — token có
+     thể mở bằng ngoặc hay nháy.
+   - **Không hạ chữ hoa ở giữa câu**: đó có thể là nhãn `CASE` cho tên riêng.
+   - Dấu `.?!…` kèm theo tuỳ ý `] ) } " ' ” ’` thì mở câu mới.
+
+Chỗ áp luật là `triton::mergedWordsFromJson()`
+(`s2t-qt-server/backend/TritonBackend.cpp`), nên mọi tầng phía trên —
+`rebuildPhrases`, `relabelFromSurface`, `CanonicalTranscript`, trình soạn,
+phụ đề — tự động đúng. Cái giá: `asr::Word::w` **không còn là từ thô**, nên
+chỗ nào khớp theo mặt chữ phải đi qua `TranscriptModel::normalizeForSlot()`
+(hàm này bỏ dấu câu, dấu ba chấm và nháy cong, rồi hạ chữ thường).
+
+### Cửa sổ sau luôn đúng hơn
+
+Cùng một từ được tầng suy luận quyết định dấu câu **nhiều lần**, và bản sau
+luôn đáng tin hơn bản trước — bất kể nó chọn dấu gì. Lý do đo được qua
+`/api/pipeline_trace`: **`right_context_samples = 0` ở mọi cửa sổ
+correction**. Một từ nằm ở đuôi cửa sổ của chính nó luôn được quyết định dấu
+trong tình trạng không có ngữ cảnh phải; khi nó xuất hiện lại ở đầu cửa sổ kế
+tiếp thì nó mới có ngữ cảnh cả hai phía.
+
+Vì vậy quy tắc **không** phải là "dấu nhiều/nặng hơn thì thắng". Luật đó từng
+nằm ở `punctuationScore()` trong `s2t-qt-client/core/TranscriptModel.cpp` và
+nó sai: Triton quyết định đúng rằng `rào.` phải thành `rào,`, nhưng `.` và `,`
+**hoà điểm** nên tầng hiển thị vứt bản sửa mới và bản chép kẹt ở dấu cũ. Đây
+đúng là lỗi bên pipeline đã sửa trong `realtime_ui.py` ngày 2026-08-28.
+
+Luật đúng, và ngoại lệ **duy nhất**:
+
+> Bản mới thắng. Trừ khi bản mới **không có dấu nào** còn bản cũ thì có — đó
+> là một lần phát lại thô/một phần, không phải một quyết định.
+
+Bốn trường hợp này nằm trong `--selftest` của client
+(`testPunctuationRetention`), port từ
+`tests/test_correction_snapshot_retention.py:106-165` bên pipeline.
 
 ---
 
@@ -985,10 +1151,10 @@ tiếng Việt một lần, kể cả những hộp thoại chưa viết.
 | `s2t-qt-server/` | `main`, `ServerConfig`, `RpcLane`, `SessionJournal` (hàng đợi trên đĩa cho việc khôi phục), `SessionStore` (bản lưu cuộc họp: SQLite + một tệp `.s16le` mỗi họp), `CampPlusClient` (HTTP/1.1 tới dịch vụ đăng ký giọng), `LiveTranscript` (bản chép dựng tại chỗ), `SessionBuffer`, `BufferHub`, `BufferService`, `ServerSelfTest` |
 | `s2t-qt-server/backend/` | `InferenceBackend` (ranh giới), `TritonBackend` (KServe v2), `RivaBackend` (`nvidia.riva.asr`) |
 | `s2t-qt-client/core/` | `SessionController` (mặt tiền), `SessionWorker`, `StatePoller`, `RpcExecutor`, `AudioQueue`, `TranscriptModel`, `AppConfig`, `SelfTest` |
-| `s2t-qt-client/audio/` | `AudioCapture`, `MicDenoise` (điều khiển xvf3800), `WavIo`, `Transcode` (ffmpeg) |
+| `s2t-qt-client/audio/` | `AudioCapture`, `MicDenoise` (điều khiển xvf3800), `WavIo`, `Transcode` (ffmpeg ngoài), `MediaDecode` (FFmpeg đi kèm Qt — không cần cài gì trên máy trạm) |
 | `s2t-qt-client/ui/` | `Theme` (mã màu, kiểu chữ, biểu tượng, style sheet toàn ứng dụng), `StatusPanel` (cột phải của cửa sổ chính), `TimelineView`, `Dialogs`, `ReviewPanel`, `EnrollDialog`, `TraceWindow`, `EvidenceWindow`, `DiagnosticsWindow`, `SubtitleWindow`, `LogControls` (combo chế độ/mức log dùng chung) |
-| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp`, `s2t-qt-server.service`, `s2t-qt-server.conf.sample`, `interop_check.py` (grpc thật gọi vào server này), `restart_check.py` (SIGKILL giữa cuộc họp), `export_transcript.py` (lấy toàn văn một cuộc họp qua `get_review_state` và xuất `.docx`) |
-| `docs/` | `huong-dan-su-dung.md` (vận hành), `luong-hoat-dong.md` (tài liệu này), `danh-sach-api.md` (hợp đồng gRPC cho client bên ngoài), `slide.pdf` (mô tả kiến trúc gốc) |
+| `tools/` | `mock_adapter.js` (peer HTTP/2 độc lập cho `--selftest-net`), `build_rhel9.sh`, `deploy_rhel.sh` (đẩy mã nguồn + build + `--selftest` lên máy RHEL), `run_valgrind.sh`, `valgrind.supp`, `s2t-qt-server.service`, `s2t-qt-server.conf.sample`, `interop_check.py` (grpc thật gọi vào server này), `restart_check.py` (SIGKILL giữa cuộc họp), `export_transcript.py` (lấy toàn văn một cuộc họp qua `get_review_state` và xuất `.docx`), `subtitle_driver.cpp` và `doc_shots.cpp` (driver dùng một lần: link vào một cây build sẵn có, điều khiển giao diện thật rồi `grab()` — cái sau chụp cả bộ ảnh cho `docs/images/`) |
+| `docs/` | `huong-dan-su-dung.md` (vận hành), `luong-hoat-dong.md` (tài liệu này), `danh-sach-api.md` (hợp đồng gRPC cho client bên ngoài), `slide.pdf` (mô tả kiến trúc gốc), `images/` (ảnh chụp máy thật cho tài liệu vận hành) |
 
 `shared/` được nạp bằng `include(shared/shared.pri)` hoặc
 `include(shared/server.pri)` vào từng `.pro` chứ không build thành thư viện
@@ -1041,6 +1207,13 @@ s2t-qt-client --probe 192.168.1.47:8800 --token T    # chẩn đoán tại hiệ
 Ba chế độ của client đều gọi được từ tab **Chẩn đoán** trong cửa sổ *Nhật ký &
 Chẩn đoán*, cùng nút **Đọc trạng thái đệm** hiển thị `get_buffer_status`.
 
+Từ 2026-09-21 `--selftest` của server có thêm nhóm **"dấu câu, viết hoa và
+bằng chứng giọng"**: nó giữ `triton::mergedWordsFromJson()` đúng hợp đồng JSON
+của tầng suy luận (§10b) mà không cần Triton sống, kiểm lượt viết hoa và tách
+câu của `rebuildPhrases()`, và kiểm `speakerSpans()` — kể cả ca một giọng khác
+chen vào giữa. Bên client, `--selftest` có bốn ca giữ dấu câu port từ
+`tests/test_correction_snapshot_retention.py`.
+
 `s2t-qt-server --selftest` là bài đáng giá nhất: nó dựng một tầng suy luận giả,
 đặt `BufferHub` và `BufferService` **thật** trước nó, rồi lấy một client thật
 lái cả hai — nên nó kiểm được những thứ chỉ riêng bộ đệm mới có thể làm sai:
@@ -1064,6 +1237,35 @@ python3 tools/restart_check.py ./s2t-qt-server [--durability fsync]
   `--selftest` chỉ tháo đối tượng, nên nó không chứng minh được điều quan trọng
   nhất: rằng bản ghi đã nằm ngoài tiến trình trước khi client được ACK.
   `SIGKILL` không chạy destructor và không flush gì cả.
+
+**Một widget thì không được kiểm bằng build sạch.** Cách rẻ nhất còn lại là
+liên kết một `main()` dùng một lần với **mọi object của một cây build sẵn có,
+trừ `main.o`** — khi đó có `MainWindow`, `SessionController`, `SubtitleWindow`…
+thật — rồi điều khiển bằng đúng các `QAction` mà menu gọi và `grab()` từng cửa
+sổ:
+
+```bash
+export PKG_CONFIG_PATH=$HOME/Qt/6.11.2/gcc_64/lib/pkgconfig
+g++ -fPIC -std=c++17 tools/doc_shots.cpp \
+    $(ls build-rhel/s2t-qt-client/*.o | grep -v '/main\.o$') \
+    -I s2t-qt-client -I shared \
+    $(pkg-config --cflags --libs Qt6Widgets Qt6Multimedia Qt6Network) \
+    -o /tmp/doc_shots
+DISPLAY=:1 timeout 240 /tmp/doc_shots docs/images sample/mau.mp4
+```
+
+Ba điều bắt buộc, và cả ba đều đã từng làm hỏng một lần chạy:
+
+- **Chạy trên phiên X11 thật (`DISPLAY=:1`), không `-platform offscreen`.**
+  Plugin offscreen không tìm được thư mục phông, nên chữ trong ảnh thành ô
+  vuông — đúng thứ lẽ ra phải kiểm.
+- **Hộp thoại modal chặn trong `exec()`**, nên phải hẹn giờ chụp *trước* khi
+  gọi hành động mở nó, chụp `QApplication::activeModalWidget()` rồi `reject()`.
+- **Đừng chạy nền qua `ssh`**: một GUI được `nohup … &` vẫn giữ kênh ssh cho
+  tới khi nó thoát. Chạy tiền cảnh với `timeout`.
+
+Bài này tìm ra được những lỗi mà build sạch và `--selftest` không thấy: chữ bị
+cắt vì cỡ cứng, phông tiếng Việt đo khác trên RHEL, và tuần tự khi tắt.
 
 ---
 
@@ -1235,3 +1437,47 @@ python3 tools/restart_check.py ./s2t-qt-server [--durability fsync]
     quyết được". Dựng nó thành một làn riêng sẽ đẻ ra người nói ma "Người 0" ở
     client, vì `DisplayRow.speaker` được client đọc bằng `toInt()`. Các từ đó
     chờ cửa sổ trượt gửi lại kèm làn thật.
+30. **Một từ hiển thị bằng `itn_part_text`, không bằng `w`.** Toàn bộ §10b là
+    về ràng buộc này. Đổi lại thành `w` "cho sạch" là vứt nguyên mô-đun dấu
+    câu, và triệu chứng không phải là lỗi mà là một bản chép trần — thứ không
+    dùng được cho biên bản họp.
+31. **Quyết định của cửa sổ sau luôn thắng, trừ khi nó trần hoàn toàn.** Xếp
+    hạng dấu câu theo "nặng/nhẹ" là sai, vì `right_context_samples = 0` ở mọi
+    cửa sổ. Hai cổng đã từng làm vậy nằm ở `shouldUpgradeLockedText()` và
+    `relabelFromSurface()` trong client; bốn ca kiểm thử giữ chúng đúng nằm
+    trong `--selftest`.
+32. **Bằng chứng để publish một giọng được dựng từ bản chép, không phải từ
+    thao tác đổi tên.** `SaveSessionSpeakers` với `GLOBAL_SHARED` đòi
+    `evidence_json` khác rỗng. Đến 2026-09-21 `stageEvidence()` chỉ có đúng
+    một call site và nó nằm trong self-test, nên publish **luôn** thất bại với
+    "chưa có bằng chứng nào được ghim" dù thao tác đúng. Giờ ở lúc
+    `stop_session`: `campp_registry_json` cho biết tầng suy luận tách ra những
+    giọng nào, `LiveTranscript::speakerSpans()` tìm các khoảng thời gian của
+    từng giọng trong bản chép, và `SessionBuffer::publishSpeakerRegistry()`
+    nối hai thứ đó lại.
+
+    Một khoảng **phải đứt ở chỗ người khác nói xen vào**, dù khoảng hở ngắn
+    hơn `kTurnGapSec`. Đưa cho CAM++ một đoạn có hai giọng sẽ ra một embedding
+    bị pha trộn — nó không báo lỗi, nó chỉ lặng lẽ gọi sai tên người ở những
+    cuộc họp sau. Cũng vì vậy mà một tiếng "vâng" dưới một giây không được
+    tính là bằng chứng, và tổng bằng chứng bị chặn ở 45 s: đường publish nối
+    PCM sau các khoảng đó rồi POST lên `/enroll_from_pcm`.
+33. **`campp_registry_json` chỉ được xuất ở tick `is_final`.** Mọi tick khác
+    gửi `[]`, và `[]` **không được** xoá cái mà tick cuối đã nói. Vì vậy
+    `publishSpeakerRegistry()` chạy sau `markDone()` — lượt correction cuối về
+    trong chính gói đuôi đó và nó xê dịch mốc thời gian của các từ.
+34. **Mỗi lần ghi vào DB giọng chung đều phải có người và có lý do.**
+    `EnrollSpeaker`, `SaveSessionSpeakers/GLOBAL_SHARED` và ba RPC vòng đời
+    (`Deactivate`/`Activate`/`DeleteGlobalSpeaker`) đều đòi `editor_id`, và hai
+    thao tác gỡ còn đòi `reason`. Kiểm ở máy chủ này **và** lại ở
+    `enroll_service.py` — nơi giữ thẩm quyền cuối cùng và ghi danh tính ấy tới
+    tận lệnh ghi DB. Bỏ một trong hai chỗ kiểm là biến một DB dùng chung thành
+    thứ không ai soát lại được.
+
+    `DeleteGlobalSpeaker` **không có đường về từ API**, nên giao diện bắt gõ
+    lại `spk_id` chứ không chỉ hỏi "có chắc không", và luôn chỉ sang
+    **Ngưng dùng** — thao tác cho ra cùng kết quả nhìn thấy được nhưng đảo
+    ngược được bằng một nút.
+35. **`changed` không phải là `ok`.** Ngưng dùng một giọng vốn đã ngưng thì
+    `ok = true, changed = false`: thành công, và không có gì đổi. Gộp hai
+    trường này lại là báo cáo đã làm một việc chưa từng xảy ra.

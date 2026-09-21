@@ -95,6 +95,20 @@ private:
     bool spliceWords(quint64 baseRevision, double startSec, double endSec,
                      const QList<asr::Word> &words, const QString &speaker, float speakerProb,
                      const QString &verifiedName);
+public:
+    // The stretches of audio this speaker is the one talking in, longest
+    // first, stopping once `maxSec` of speech has been collected.
+    //
+    // This is the evidence behind publishing a voice to the shared CAM++
+    // database, so it is deliberately built out of the words themselves: a
+    // span is only as wide as words assigned to that speaker make it, and a
+    // pause longer than a turn gap splits it rather than swallowing whoever
+    // spoke in between.  Handing CAM++ a span with two voices in it produces a
+    // blended embedding, which then mis-names people in later meetings and
+    // does so silently.
+    QList<QPair<double, double>> speakerSpans(const QString &speaker, double maxSec) const;
+
+private:
     void rebuildPhrases(asr::DisplayRow *row) const;
     void recount();
 

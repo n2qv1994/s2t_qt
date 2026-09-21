@@ -22,12 +22,11 @@ nhất* nói hợp đồng này: adapter Python `:8700` đã ra khỏi sơ đồ
 tầng suy luận bên dưới nói giao thức của riêng nó (KServe v2 hoặc
 `nvidia.riva.asr`) chứ không nói `asr.ui.v1`.
 
-**Cả 20 RPC đều dùng được, trừ một** — và nó không báo lỗi mà nói thẳng bằng
-đúng trường hợp đồng đã dành sẵn:
-
-| RPC | Trả về | Vì sao |
-|---|---|---|
-| `get_pipeline_trace` | OK, `enabled = false` | Bản triển khai này không thu thập trace từng chặng. `enabled` là cách hợp đồng vốn đã dành để nói điều đó, nên client không phải xử lý lỗi. |
+**Cả 25 RPC đều dùng được.** Từ 2026-09-21 `get_pipeline_trace` không còn là
+stub: máy chủ thu `correction_trace_json` từ tầng suy luận và phục vụ lại nó
+như `get_audit_history` vẫn làm (xem [5.10](#510-get_pipeline_trace)).
+`enabled` giờ trả lời đúng câu hỏi của nó — *kho phiên có bật không* — chứ
+không còn là một `false` cứng.
 
 **Hai nhóm RPC cần cấu hình mới chạy**, và khi thiếu cấu hình thì chúng nói rõ
 thay vì trả về rỗng như thể đó là câu trả lời thật:
@@ -171,6 +170,16 @@ server ở đây dùng chung một bản HPACK và một bộ mã proto3, nên c
 
 Nếu bạn sửa gì trong `shared/proto/` mà không sửa phụ lục A, script này sẽ báo
 ngay.
+
+Lần đối chiếu gần nhất với một hệ thống đang chạy — máy RHEL, backend Triton,
+ngày **2026-09-04**: server báo **20 phương thức RPC** đã đăng ký, đúng bằng số
+liệt kê ở tài liệu này; `get_model_status` trả về 11/11 model `READY`;
+`get_pipeline_trace` trả `OK` với `enabled = false` (xem [5.10](#510-get_pipeline_trace));
+và một phiên `push_audio` thật chạy trọn vòng đời start → push → stop với
+`rev` tăng đều.
+
+Từ **2026-09-21** `get_pipeline_trace` đã có dữ liệu thật; lần đối chiếu ở
+trên là trước thay đổi đó.
 
 ---
 ## 2. Mã lỗi và chính sách thử lại
@@ -666,9 +675,38 @@ PipelineTraceRequest → PipelineTraceResponse
 `PipelineTraceEvent`: `1 seq`, `2 ts (double)`, `3 stage`, `4 event`,
 `5 audio_start_sec`, `6 audio_end_sec`, `7 payload_json (string)`.
 
-Trace chỉ có nếu phiên được tạo với `"pipeline_trace": true` trong
-`config_json` — bật sau khi phiên đã chạy thì không có tác dụng hồi tố. Khi
-`enabled = false`, danh sách rỗng là đúng chứ không phải lỗi.
+**Từ 2026-09-21 RPC này trả dữ liệu thật.** Máy chủ yêu cầu tensor
+`correction_trace_json` ở mỗi chunk, tách nó thành sự kiện và ghi vào bảng
+`pipeline_trace` của kho phiên; `get_pipeline_trace` đọc lại từ đó, hệt cách
+`get_audit_history` đọc bảng `audit`.
+
+`enabled` = **kho phiên có bật không**. Không có kho (`[session] dir` trống)
+thì không có chỗ ghi, và `enabled = false` là câu trả lời đúng — client đã vẽ
+sẵn trường hợp đó.
+
+Ba `stage` được sinh ra, đặt tên đúng như bên pipeline vẫn đọc trong
+`/api/pipeline_trace` của họ:
+
+| `stage` | Từ đâu | Trả lời câu hỏi gì |
+|---|---|---|
+| `correction_asr` | khoá `decode` | Cửa sổ audio nào đã được mô hình ASR giải mã, và với bao nhiêu ngữ cảnh hai bên. `payload_json` chứa `left_context_samples` / `right_context_samples` — **đây là trường giải thích vì sao một dấu câu được quyết định như vậy** |
+| `itn` | khoá `merge` | Đầu vào và đầu ra của lượt dấu câu/ITN. Mốc thời gian lấy từ chính các từ nó sinh ra |
+| `streaming_window` | khoá `window` | Cùng câu hỏi nhưng cho mép trực tiếp, không phải cho một lượt correction |
+
+`payload_json` là nguyên văn object JSON tầng suy luận gửi lên, không cắt
+xén — đó mới là thứ đọc được khi truy một dấu câu sai.
+
+**Trace bị cắt bớt.** Mỗi phiên giữ 4000 sự kiện gần nhất; cũ hơn thì bị xoá
+khi có lượt ghi mới. Một cuộc họp ba giờ sinh ra hàng chục nghìn sự kiện và
+câu hỏi về trace luôn là về thứ vừa xảy ra. `after_seq` là **con trỏ**, không
+phải bộ lọc: truyền lại `next_seq` của lần trước để chỉ lấy phần mới.
+
+`seq` đánh số theo **cuộc họp**, không theo kết nối — một phiên sống lại sau
+khi máy chủ khởi động lại vẫn tiếp tục dãy số cũ, nên con trỏ của client không
+bị lùi về đầu.
+
+Khoá `"pipeline_trace": true` trong `config_json` không còn cần thiết và cũng
+không còn bị đọc: trace được thu cho mọi phiên.
 
 ### 5.11 `get_audit_history`
 
@@ -696,15 +734,41 @@ ModelStatusRequest (rỗng) → ModelStatusResponse
 **Response**: `1 models (repeated ModelStatusEntry)`, với `ModelStatusEntry` =
 `1 name`, `2 version`, `3 state`.
 
-Đọc thẳng từ Triton. Đây là RPC rẻ nhất và không cần phiên, nên nó là lựa chọn
-tốt cho health-check và cho việc kiểm tra token.
+Đọc thẳng từ tầng suy luận **lúc bạn gọi**, không phải từ một bảng ghi sẵn:
+với Triton là `repository_index` của KServe v2, với Riva là
+`GetRivaSpeechRecognitionConfig`. Danh sách vì thế khác nhau theo backend —
+đừng so khớp tên model cứng trong mã của bạn.
+
+Hai cột sau cũng đổi nghĩa theo backend, và đây là chỗ dễ hiểu nhầm nhất:
+
+| | Triton | Riva |
+|---|---|---|
+| `version` | số version của model repository | **mã ngôn ngữ** (`language_code`), hoặc `type` nếu thiếu — Riva không có version |
+| `state` | trạng thái thật: `READY`, `UNAVAILABLE`… | luôn `READY` — Riva không liệt kê model nó không phục vụ được |
+
+Đây là RPC rẻ nhất và không cần phiên, nên nó là lựa chọn tốt cho health-check
+và cho việc kiểm tra token.
 
 ---
 
-## 6. `SpeakerRegistryService` — 5 RPC
+## 6. `SpeakerRegistryService` — 10 RPC
 
 Cùng host, cùng cổng, cùng token với `ProductASRService`; một kênh phục vụ cả
 hai. Tên RPC ở đây viết **PascalCase**.
+
+Service này chạm vào **ba tầng** và chúng khác nhau về mức độ nguy hiểm:
+
+| Tầng | RPC | Ghi gì |
+|---|---|---|
+| DB giọng **chung** | `GetEnrollmentScript`, `EnrollSpeaker`, `GetSpeakerRegistryStatus`, `PreviewEnrollment`, `ListGlobalSpeakers`, `Deactivate`/`Activate`/`DeleteGlobalSpeaker` | `EnrollSpeaker` và ba RPC vòng đời **ghi vào DB dùng chung cho mọi cuộc họp** |
+| Registry **của một phiên** | `ListSessionSpeakers` | chỉ đọc |
+| Bằng chứng đã ghim | `SaveSessionSpeakers` | `GLOBAL_SHARED` đẩy sang tầng một |
+
+Năm RPC từ `PreviewEnrollment` trở xuống **có trong `.proto` từ đầu nhưng
+không được cài trong máy chủ này cho tới 2026-09-21**. Hệ quả là không có
+đường nào từ giao diện để nhìn vào DB giọng chung, càng không có đường lấy một
+giọng ra khỏi đó — trong khi DB thì được ghi vào bằng tay suốt nhiều tháng (62
+giọng trên máy đang chạy, gồm cả `5`, `A`, `a1`).
 
 ### 6.1 `GetEnrollmentScript`
 
@@ -855,6 +919,111 @@ GetSpeakerRegistryStatusRequest → GetSpeakerRegistryStatusResponse
 `kind` nhận `legacy` / `urgent` / `other`. Nó tồn tại vì trên một máy vừa di
 trú, **mọi** giọng đều dưới chuẩn; nếu không tách `legacy` ra thì một ca
 `urgent` thật sẽ chìm nghỉm giữa danh sách.
+
+### 6.6 `PreviewEnrollment`
+
+```
+/asr.ui.v1.SpeakerRegistryService/PreviewEnrollment
+PreviewEnrollmentRequest → PreviewEnrollmentResponse
+```
+
+**Request**: `1 display_name (string)`, `2 wav (bytes)`,
+`3 allow_below_policy (bool)`.
+
+**Response**
+
+| # | Trường | Kiểu | Ý nghĩa |
+|---|---|---|---|
+| 1 | `ok` | `bool` | |
+| 2 | `error` | `string` | Mẫu bị từ chối — là lời khuyên cho người thao tác, không phải lỗi máy chủ |
+| 3 | `speaker_id` | `string` | Id **sẽ** được dùng, chưa tạo |
+| 4 | `raw_seconds` | `double` | Độ dài tệp gửi lên |
+| 5 | `speech_seconds_after_vad` | `double` | **Con số quyết định** — ngưỡng 20 s tính trên nó |
+| 6 | `policy_compliant` | `bool` | |
+| 7 | `warning` | `string` | Chỉ khác rỗng khi `policy_compliant = false` |
+| 8 | `trimmed_wav` | `bytes` | WAV hoàn chỉnh: **đúng đoạn sẽ được đăng ký** |
+
+**Không ghi gì cả** — không dòng DB, không catalogue, không nhật ký — nên
+request này **không có `editor_id`** và cũng không cần: không có gì để quy
+trách nhiệm.
+
+Đây là câu trả lời cho việc đăng ký là thao tác một chiều. Kiểu hỏng đắt nhất
+— hai người trong một mẫu — tạo ra một embedding pha trộn và **không báo lỗi
+gì**; nó chỉ gọi sai tên người ở những cuộc họp sau. `trimmed_wav` là để nghe,
+không phải để nhìn con số: nghe ra hai giọng là cách duy nhất bắt được nó
+trước khi quá muộn.
+
+### 6.7 `ListGlobalSpeakers`
+
+```
+/asr.ui.v1.SpeakerRegistryService/ListGlobalSpeakers
+ListGlobalSpeakersRequest (rỗng) → ListGlobalSpeakersResponse
+```
+
+**Response**: `1 speakers (repeated GlobalSpeakerEntry)`.
+
+`GlobalSpeakerEntry`: `1 spk_id`, `2 spk_name`, `3 status`,
+`4 sample_count (uint32)`, `5 usable_sample_count (uint32)`,
+`6 created_at (string)`, `7 last_updated (string)`, `8 reviewed_by`,
+`9 review_reason`.
+
+`created_at` / `last_updated` là **chuỗi ISO-8601**, không phải `double` như
+các mốc thời gian khác trong hợp đồng này. Đó là điều `.proto` nói và là thứ
+dịch vụ đăng ký gửi ra.
+
+`status` nhận `approved` | `inactive` | `deleted` | `pending` | `rejected`.
+Danh sách **có kèm cả bia mộ** (`inactive`/`deleted`) và điều đó là cố ý: ẩn
+chúng đi thì không ai bật lại được một giọng đã ngưng, và không ai biết ai đã
+gỡ nó.
+
+### 6.8 `DeactivateGlobalSpeaker` / `ActivateGlobalSpeaker` / `DeleteGlobalSpeaker`
+
+```
+/asr.ui.v1.SpeakerRegistryService/DeactivateGlobalSpeaker
+/asr.ui.v1.SpeakerRegistryService/ActivateGlobalSpeaker
+/asr.ui.v1.SpeakerRegistryService/DeleteGlobalSpeaker
+GlobalSpeakerActionRequest → GlobalSpeakerActionResponse
+```
+
+Ba RPC, **một cặp message**: chúng chỉ khác nhau ở động từ gửi xuống dịch vụ
+đăng ký.
+
+**Request**: `1 spk_id`, `2 editor_id`, `3 reason`.
+
+| # | Trường | Kiểu | Ý nghĩa |
+|---|---|---|---|
+| 1 | `ok` | `bool` | |
+| 2 | `error` | `string` | |
+| 3 | `changed` | `bool` | **Đọc trường này** — xem dưới |
+| 4 | `spk_id` | `string` | |
+| 5 | `spk_name` | `string` | |
+| 6 | `status` | `string` | Trạng thái **sau** thao tác |
+| 7 | `samples_retired` | `uint32` | Số mẫu đã gỡ khỏi DB nhận dạng |
+| 8 | `delete_events_released` | `uint32` | |
+| 9 | `delete_dispatch` | `string` | |
+| 10 | `message` | `string` | |
+
+**`editor_id` là bắt buộc** và được kiểm hai lần: ở máy chủ này, rồi lại ở
+`enroll_service.py` — nơi giữ thẩm quyền cuối cùng cho mọi lần ghi vào DB
+chung và ghi nhật ký danh tính ấy tới tận lệnh ghi.
+
+**`reason` là bắt buộc với `deactivate` và `delete`**, tuỳ chọn với
+`activate`. Một giọng bị gỡ khỏi DB chung mà không nói lý do là thứ không ai
+soát lại được sau sáu tháng.
+
+**`changed = false` không phải lỗi.** Ngưng dùng một giọng vốn đã ngưng thì
+`ok = true`, `changed = false`: thao tác thành công và không có gì đổi. Gộp
+hai trường này lại là báo cáo đã làm một việc chưa từng xảy ra.
+
+> **`activate` là đường về của `deactivate`. `delete` thì không có đường về từ
+> API.** Muốn lấy lại một giọng đã xoá thì phải khôi phục thủ công trên máy
+> chủ: `speaker_db_campp_*.bin` cùng `.mapping.txt`, `enroll_raw/`,
+> `enrollment_audit.jsonl` và dòng `speaker` trong `campp_postgres`.
+> `enroll_speaker.py` có `_backup(DB_PATH)` trước khi ghi nên bản lùi vẫn tồn
+> tại — nhưng đó là việc của người quản trị, không phải của một nút bấm.
+>
+> Vì vậy giao diện hỏi hai kiểu khác nhau: `deactivate` xác nhận một lần,
+> `delete` bắt gõ lại đúng `spk_id`.
 
 ---
 
@@ -1685,6 +1854,16 @@ service SpeakerRegistryService {
       returns (SaveSessionSpeakersResponse);
   rpc GetSpeakerRegistryStatus(GetSpeakerRegistryStatusRequest)
       returns (GetSpeakerRegistryStatusResponse);
+  rpc PreviewEnrollment       (PreviewEnrollmentRequest)
+      returns (PreviewEnrollmentResponse);
+  rpc ListGlobalSpeakers      (ListGlobalSpeakersRequest)
+      returns (ListGlobalSpeakersResponse);
+  rpc DeactivateGlobalSpeaker (GlobalSpeakerActionRequest)
+      returns (GlobalSpeakerActionResponse);
+  rpc ActivateGlobalSpeaker   (GlobalSpeakerActionRequest)
+      returns (GlobalSpeakerActionResponse);
+  rpc DeleteGlobalSpeaker     (GlobalSpeakerActionRequest)
+      returns (GlobalSpeakerActionResponse);
 }
 
 enum SpeakerDestination {
@@ -1799,6 +1978,56 @@ message GetSpeakerRegistryStatusResponse {
   uint32                      session_failed_count   = 8;
   repeated string             global_speaker_names   = 9;
   repeated SpeakerBelowPolicy speakers_below_policy  = 10;
+}
+
+message PreviewEnrollmentRequest {
+  string display_name       = 1;
+  bytes  wav                = 2;
+  bool   allow_below_policy = 3;
+}
+message PreviewEnrollmentResponse {
+  bool   ok                       = 1;
+  string error                    = 2;
+  string speaker_id               = 3;
+  double raw_seconds              = 4;
+  double speech_seconds_after_vad = 5;
+  bool   policy_compliant         = 6;
+  string warning                  = 7;
+  bytes  trimmed_wav              = 8;
+}
+
+message GlobalSpeakerEntry {
+  string spk_id               = 1;
+  string spk_name             = 2;
+  string status               = 3;
+  uint32 sample_count         = 4;
+  uint32 usable_sample_count  = 5;
+  string created_at           = 6;
+  string last_updated         = 7;
+  string reviewed_by          = 8;
+  string review_reason        = 9;
+}
+message ListGlobalSpeakersRequest {}
+message ListGlobalSpeakersResponse {
+  repeated GlobalSpeakerEntry speakers = 1;
+}
+
+message GlobalSpeakerActionRequest {
+  string spk_id    = 1;
+  string editor_id = 2;
+  string reason    = 3;
+}
+message GlobalSpeakerActionResponse {
+  bool   ok                     = 1;
+  string error                  = 2;
+  bool   changed                = 3;
+  string spk_id                 = 4;
+  string spk_name               = 5;
+  string status                 = 6;
+  uint32 samples_retired        = 7;
+  uint32 delete_events_released = 8;
+  string delete_dispatch        = 9;
+  string message                = 10;
 }
 ```
 

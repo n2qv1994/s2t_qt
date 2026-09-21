@@ -3,9 +3,10 @@
 #include "BufferHub.h"
 #include "BufferService.h"
 #include "CampPlusClient.h"
-#include "SessionStore.h"
+#include "LiveTranscript.h"
 #include "SessionStore.h"
 #include "ServerConfig.h"
+#include "backend/TritonBackend.h"
 #include "core/Logger.h"
 #include "grpc/AsrClient.h"
 #include "grpc/GrpcServer.h"
@@ -119,6 +120,116 @@ void testRequestRoundTrip()
     check(enrollReader.ok() && enrollBack.displayName == enroll.displayName
               && enrollBack.wav == enroll.wav && enrollBack.allowBelowPolicy,
           "EnrollSpeaker request survives");
+
+    // ---- the global registry's lifecycle -----------------------------------
+    //
+    // Field numbers here are an external contract: the reference adapter and
+    // any other client of this server encode the same messages independently,
+    // so a transposed number would not be a build error - it would be a voice
+    // deleted by id under somebody else's name.
+    reg::PreviewEnrollmentRequest preview;
+    preview.displayName = QStringLiteral("Nguyễn Thị Hương");
+    preview.wav = QByteArray(2048, '\x37');
+    preview.allowBelowPolicy = true;
+    reg::PreviewEnrollmentRequest previewBack;
+    const QByteArray previewBytes = preview.serialize();
+    pw::Reader previewReader(previewBytes);
+    previewBack.parse(previewReader);
+    check(previewReader.ok() && previewBack.displayName == preview.displayName
+              && previewBack.wav == preview.wav && previewBack.allowBelowPolicy,
+          "PreviewEnrollment request survives");
+
+    reg::PreviewEnrollmentResponse previewResp;
+    previewResp.ok = true;
+    previewResp.speakerId = QStringLiteral("spk_0063");
+    previewResp.rawSeconds = 32.5;
+    previewResp.speechSecondsAfterVad = 31.5;
+    previewResp.policyCompliant = true;
+    previewResp.warning = QStringLiteral("đủ dài");
+    previewResp.trimmedWav = QByteArray(4096, '\x11');
+    reg::PreviewEnrollmentResponse previewRespBack;
+    const QByteArray previewRespBytes = previewResp.serialize();
+    pw::Reader previewRespReader(previewRespBytes);
+    previewRespBack.parse(previewRespReader);
+    check(previewRespReader.ok() && previewRespBack.ok
+              && previewRespBack.speakerId == previewResp.speakerId
+              && nearly(previewRespBack.rawSeconds, 32.5)
+              && nearly(previewRespBack.speechSecondsAfterVad, 31.5)
+              && previewRespBack.policyCompliant
+              && previewRespBack.trimmedWav == previewResp.trimmedWav,
+          "PreviewEnrollment response survives, trimmed audio included");
+
+    reg::ListGlobalSpeakersResponse roster;
+    reg::GlobalSpeakerEntry entry;
+    entry.spkId = QStringLiteral("spk_0042");
+    entry.spkName = QStringLiteral("Lê Đức Thọ");
+    entry.status = QStringLiteral("inactive");
+    entry.sampleCount = 7;
+    entry.usableSampleCount = 5;
+    entry.createdAt = QStringLiteral("2026-08-19T07:39:01Z");
+    entry.lastUpdated = QStringLiteral("2026-09-21T10:00:00Z");
+    entry.reviewedBy = QStringLiteral("Huyên");
+    entry.reviewReason = QStringLiteral("mẫu thử nghiệm");
+    roster.speakers = {entry, entry};
+    reg::ListGlobalSpeakersResponse rosterBack;
+    const QByteArray rosterBytes = roster.serialize();
+    pw::Reader rosterReader(rosterBytes);
+    rosterBack.parse(rosterReader);
+    check(rosterReader.ok() && rosterBack.speakers.size() == 2,
+          "ListGlobalSpeakers response survives as a repeated message");
+    check(!rosterBack.speakers.isEmpty()
+              && rosterBack.speakers.first().spkName == entry.spkName
+              && rosterBack.speakers.first().status == entry.status
+              && rosterBack.speakers.first().usableSampleCount == 5
+              && rosterBack.speakers.first().createdAt == entry.createdAt
+              && rosterBack.speakers.first().reviewReason == entry.reviewReason,
+          "a global speaker entry survives, tombstone fields and all");
+
+    reg::GlobalSpeakerActionRequest action;
+    action.spkId = QStringLiteral("spk_0042");
+    action.editorId = QStringLiteral("Nguyễn Quốc Việt");
+    action.reason = QStringLiteral("thu nhầm hai người trong một mẫu");
+    reg::GlobalSpeakerActionRequest actionBack;
+    const QByteArray actionBytes = action.serialize();
+    pw::Reader actionReader(actionBytes);
+    actionBack.parse(actionReader);
+    check(actionReader.ok() && actionBack.spkId == action.spkId
+              && actionBack.editorId == action.editorId && actionBack.reason == action.reason,
+          "GlobalSpeakerAction request survives, editor and reason included");
+
+    reg::GlobalSpeakerActionResponse actionResp;
+    actionResp.ok = true;
+    actionResp.changed = true;
+    actionResp.spkId = QStringLiteral("spk_0042");
+    actionResp.spkName = QStringLiteral("Lê Đức Thọ");
+    actionResp.status = QStringLiteral("deleted");
+    actionResp.samplesRetired = 7;
+    actionResp.deleteEventsReleased = 2;
+    actionResp.deleteDispatch = QStringLiteral("queued");
+    actionResp.message = QStringLiteral("đã gỡ khỏi DB nhận dạng");
+    reg::GlobalSpeakerActionResponse actionRespBack;
+    const QByteArray actionRespBytes = actionResp.serialize();
+    pw::Reader actionRespReader(actionRespBytes);
+    actionRespBack.parse(actionRespReader);
+    check(actionRespReader.ok() && actionRespBack.ok && actionRespBack.changed
+              && actionRespBack.status == actionResp.status
+              && actionRespBack.samplesRetired == 7 && actionRespBack.deleteEventsReleased == 2
+              && actionRespBack.deleteDispatch == actionResp.deleteDispatch
+              && actionRespBack.message == actionResp.message,
+          "GlobalSpeakerAction response survives");
+
+    // `changed` is a separate question from `ok` and must not collapse into
+    // it: deactivating a speaker who is already inactive succeeds and does
+    // nothing, and the UI says so rather than claiming it acted.
+    reg::GlobalSpeakerActionResponse noop;
+    noop.ok = true;
+    noop.changed = false;
+    reg::GlobalSpeakerActionResponse noopBack;
+    const QByteArray noopBytes = noop.serialize();
+    pw::Reader noopReader(noopBytes);
+    noopBack.parse(noopReader);
+    check(noopReader.ok() && noopBack.ok && !noopBack.changed,
+          "a no-op action is told apart from a successful one");
 }
 
 void testResponseRoundTrip()
@@ -1495,6 +1606,44 @@ int store()
     }
     check(foundFinal, "the finished session lists as final, with its duration");
 
+    // ---- the pipeline trace ------------------------------------------------
+    {
+        QList<asr::PipelineTraceEvent> events;
+        for (int i = 1; i <= 5; ++i) {
+            asr::PipelineTraceEvent event;
+            event.seq = quint64(i);
+            event.ts = double(i);
+            event.stage = i % 2 == 0 ? QStringLiteral("itn") : QStringLiteral("correction_asr");
+            event.event = QStringLiteral("cut-%1").arg(i);
+            event.audioStartSec = double(i);
+            event.audioEndSec = double(i) + 0.5;
+            event.payloadJson = QStringLiteral("{\"right_context_samples\":0}");
+            events.append(event);
+        }
+        store.appendTrace(id, events);
+
+        bool hasMore = false;
+        const QList<asr::PipelineTraceEvent> all =
+            store.traceHistory(id, 0, 100, {}, &hasMore);
+        check(all.size() == 5, QStringLiteral("the trace reads back (%1)").arg(all.size()));
+        check(!all.isEmpty() && all.first().seq == 1 && all.last().seq == 5,
+              "oldest first, so a client reads it the way the meeting happened");
+        check(!all.isEmpty()
+                  && all.first().payloadJson == QStringLiteral("{\"right_context_samples\":0}"),
+              "and the payload survives verbatim - that is the field that explains a mark");
+
+        // afterSeq is a cursor, which is what makes polling cheap.
+        const QList<asr::PipelineTraceEvent> since = store.traceHistory(id, 3, 100, {}, &hasMore);
+        check(since.size() == 2, QStringLiteral("after_seq is a cursor (%1)").arg(since.size()));
+
+        const QList<asr::PipelineTraceEvent> itn =
+            store.traceHistory(id, 0, 100, {QStringLiteral("itn")}, &hasMore);
+        check(itn.size() == 2, QStringLiteral("stages filter (%1)").arg(itn.size()));
+
+        store.traceHistory(id, 0, 2, {}, &hasMore);
+        check(hasMore, "a truncated page says so rather than looking like the end");
+    }
+
     // A disabled store must be silent rather than fatal: a deployment that
     // wants no archive is a supported configuration.
     SessionStore off;
@@ -1507,6 +1656,220 @@ int store()
           "writes to a disabled store are no-ops, not crashes");
 
     return g_failures;
+}
+
+// ---------------------------------------------------------------------------
+// Punctuation, sentence case, and the evidence behind a voice
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// One word record shaped exactly like asr_diar_session emits them.  The
+// separation between `w` and `itn_part_text` is the whole point of it.
+QString wordRecord(const QString &raw, const QString &partText, int partIdx, double startSec,
+                   double endSec, double conf = 0.9)
+{
+    return QStringLiteral("{\"w\":\"%1\",\"c\":%2,\"start_sec\":%3,\"end_sec\":%4,"
+                          "\"itn_part_text\":\"%5\",\"itn_source_part_idx\":%6}")
+        .arg(raw)
+        .arg(conf, 0, 'f', 3)
+        .arg(startSec, 0, 'f', 3)
+        .arg(endSec, 0, 'f', 3)
+        .arg(partText)
+        .arg(partIdx);
+}
+
+asr::PushAudioResponse correctionOf(const QString &wordsJson)
+{
+    asr::PushAudioResponse response;
+    response.correction.mergedWords = triton::mergedWordsFromJson(wordsJson);
+    return response;
+}
+
+int punctuation()
+{
+    // ---- the surface a word is displayed with ------------------------------
+    //
+    // Measured shape, from 30 s of real Vietnamese through the tier on .47:
+    // `w` is bare, `itn_part_text` carries the mark, and the word after a full
+    // stop is NOT capitalised in its own record.
+    const QString json = QStringLiteral("[%1,%2,%3,%4]")
+                             .arg(wordRecord(QStringLiteral("hôm"), QStringLiteral("Hôm"), 0, 0.40,
+                                             0.48),
+                                  wordRecord(QStringLiteral("khu"), QStringLiteral("khu"), 1, 0.50,
+                                             0.60),
+                                  wordRecord(QStringLiteral("vực"), QStringLiteral("vực."), 2, 0.61,
+                                             0.80),
+                                  wordRecord(QStringLiteral("tăng"), QStringLiteral("tăng"), 3, 0.90,
+                                             1.10));
+
+    const QList<asr::Word> words = triton::mergedWordsFromJson(json);
+    check(words.size() == 4, QStringLiteral("four records, four words (%1)").arg(words.size()));
+    check(!words.isEmpty() && words.at(2).w == QStringLiteral("vực."),
+          "a word is displayed as itn_part_text, mark included - not as the raw `w`");
+    check(!words.isEmpty() && !words.at(2).w.endsWith(QStringLiteral("..")),
+          "and the mark is not appended a second time from itn_punc_final");
+
+    // A2/A4: consecutive records sharing a part emit that part once.
+    const QString merged = QStringLiteral("[%1,%2,%3]")
+                               .arg(wordRecord(QStringLiteral("hai"), QStringLiteral("2026"), 7,
+                                               1.00, 1.20),
+                                    wordRecord(QStringLiteral("nghìn"), QStringLiteral("2026"), 7,
+                                               1.20, 1.40),
+                                    wordRecord(QStringLiteral("sáu"), QStringLiteral("2026"), 7,
+                                               1.40, 1.60));
+    const QList<asr::Word> once = triton::mergedWordsFromJson(merged);
+    check(once.size() == 1, QStringLiteral("words sharing a part emit it once (%1)").arg(once.size()));
+    check(once.size() == 1 && nearly(once.first().startSec, 1.0)
+              && nearly(once.first().endSec, 1.6),
+          "and the one word spans all of them");
+
+    // ---- sentence case and phrase splitting --------------------------------
+    LiveTranscript live;
+    live.configure(QStringLiteral("Kiểm thử dấu câu"), 16000, 1, 0.0);
+    live.apply(correctionOf(json));
+    const asr::StateResponse state = live.snapshot(QStringLiteral("s"), 1);
+    check(!state.state.rows.isEmpty(), "the correction produced a row");
+    if (!state.state.rows.isEmpty()) {
+        const asr::DisplayRow &row = state.state.rows.first();
+        check(row.phrases.size() == 2,
+              QStringLiteral("a row with one full stop is two phrases, not one (%1)")
+                  .arg(row.phrases.size()));
+        check(row.mergedText == QStringLiteral("Hôm khu vực. Tăng"),
+              QStringLiteral("the word after a full stop is capitalised by this side (%1)")
+                  .arg(row.mergedText));
+        check(row.displayTokens.size() == 4
+                  && row.displayTokens.last().w == QStringLiteral("Tăng"),
+              "and the capital is on the token too, so the editor sees the same text");
+    }
+
+    // The ellipsis closes a sentence as much as a full stop does, and it is
+    // U+2026 - the bug that QLatin1Char('…') hides.
+    LiveTranscript dots;
+    dots.configure(QString(), 16000, 1, 0.0);
+    dots.apply(correctionOf(QStringLiteral("[%1,%2]")
+                                .arg(wordRecord(QStringLiteral("rồi"), QString::fromUtf8("rồi…"), 0,
+                                                0.10, 0.30),
+                                     wordRecord(QStringLiteral("thôi"), QStringLiteral("thôi"), 1,
+                                                0.40, 0.60))));
+    const asr::StateResponse dotState = dots.snapshot(QStringLiteral("s"), 1);
+    check(!dotState.state.rows.isEmpty() && dotState.state.rows.first().phrases.size() == 2,
+          "an ellipsis ends a sentence");
+    check(!dotState.state.rows.isEmpty()
+              && dotState.state.rows.first().mergedText.endsWith(QStringLiteral("Thôi")),
+          "and the next word takes the capital");
+
+    // A closing quote after the mark still ends the sentence.
+    LiveTranscript quoted;
+    quoted.configure(QString(), 16000, 1, 0.0);
+    quoted.apply(correctionOf(QStringLiteral("[%1,%2]")
+                                  .arg(wordRecord(QStringLiteral("rồi"),
+                                                  QString::fromUtf8("rồi.”"), 0, 0.10, 0.30),
+                                       wordRecord(QStringLiteral("anh"), QStringLiteral("anh"), 1,
+                                                  0.40, 0.60))));
+    const asr::StateResponse quotedState = quoted.snapshot(QStringLiteral("s"), 1);
+    check(!quotedState.state.rows.isEmpty() && quotedState.state.rows.first().phrases.size() == 2,
+          "a mark behind a closing quote still ends the sentence");
+
+    // ---- the evidence behind a voice ---------------------------------------
+    //
+    // F2: what SaveSessionSpeakers publishes.  Built from the transcript, so a
+    // voice that never spoke has nothing staged and a short interjection does
+    // not count as evidence.
+    LiveTranscript meeting;
+    meeting.configure(QString(), 16000, 1, 0.0);
+    {
+        asr::PushAudioResponse chunk;
+        asr::Word first;
+        first.w = QStringLiteral("một");
+        first.c = 0.9f;
+        first.startSec = 0.0;
+        first.endSec = 4.0;
+        chunk.asrWords = {first};
+        chunk.speaker = QStringLiteral("3");
+        meeting.apply(chunk);
+
+        asr::PushAudioResponse second;
+        asr::Word brief;
+        brief.w = QStringLiteral("vâng");
+        brief.c = 0.9f;
+        brief.startSec = 10.0;
+        brief.endSec = 10.3; // under kMinEvidenceSpanSec
+        second.asrWords = {brief};
+        second.speaker = QStringLiteral("4");
+        meeting.apply(second);
+    }
+    const QList<QPair<double, double>> spans = meeting.speakerSpans(QStringLiteral("3"), 45.0);
+    check(spans.size() == 1 && nearly(spans.first().first, 0.0) && nearly(spans.first().second, 4.0),
+          QStringLiteral("a speaker's evidence is the span their own words cover (%1)")
+              .arg(spans.size()));
+    check(meeting.speakerSpans(QStringLiteral("4"), 45.0).isEmpty(),
+          "a one-word interjection is not evidence - CAM++ would learn nothing from it");
+    check(meeting.speakerSpans(QStringLiteral("9"), 45.0).isEmpty(),
+          "a speaker who never spoke has no evidence");
+
+    // The trap this is really guarding: A, then B for a moment, then A again
+    // inside the turn gap.  Joining A's two stretches across B would stage a
+    // span with two voices in it, and CAM++ answers that with a blended
+    // embedding rather than with an error.
+    LiveTranscript interleaved;
+    interleaved.configure(QString(), 16000, 1, 0.0);
+    {
+        const auto say = [&interleaved](const QString &slot, double from, double to) {
+            asr::PushAudioResponse chunk;
+            asr::Word word;
+            word.w = QStringLiteral("x");
+            word.c = 0.9f;
+            word.startSec = from;
+            word.endSec = to;
+            word.speaker = slot;
+            chunk.asrWords = {word};
+            chunk.speaker = slot;
+            interleaved.apply(chunk);
+        };
+        say(QStringLiteral("1"), 0.0, 3.0);
+        say(QStringLiteral("2"), 3.5, 4.0);
+        say(QStringLiteral("1"), 4.5, 8.0); // 0.5 s after slot 2 - inside kTurnGapSec
+    }
+    const QList<QPair<double, double>> split = interleaved.speakerSpans(QStringLiteral("1"), 45.0);
+    check(split.size() == 2,
+          QStringLiteral("a span breaks where somebody else spoke, however short the gap (%1)")
+              .arg(split.size()));
+    for (const QPair<double, double> &span : split) {
+        check(!(span.first < 4.0 && span.second > 3.5),
+              "and no staged span covers the other speaker's audio");
+    }
+
+    // ---- campp_registry_json ------------------------------------------------
+    const QList<reg::SessionSpeakerEntry> registry = triton::speakerRegistryFromJson(
+        QStringLiteral("[{\"session_speaker_id\":\"3\",\"diar_slots\":[\"0\",\"2\"],"
+                       "\"verified_name\":\"Trần Văn A\",\"score\":0.81,\"windows\":12,"
+                       "\"created_at\":1.5,\"updated_at\":9.5}]"));
+    check(registry.size() == 1, "the session registry parses");
+    if (!registry.isEmpty()) {
+        const reg::SessionSpeakerEntry &entry = registry.first();
+        check(entry.sessionSpeakerId == QStringLiteral("3")
+                  && entry.verifiedName == QStringLiteral("Trần Văn A") && entry.windows == 12
+                  && entry.diarSlots.size() == 2,
+              "with the id the `speaker` tensor uses, so evidence can be found for it");
+    }
+    check(triton::speakerRegistryFromJson(QStringLiteral("[]")).isEmpty(),
+          "and an empty export - every tick but the last - parses as nothing");
+
+    return 0;
+}
+
+} // namespace
+
+int runTranscriptTests()
+{
+    g_failures = 0;
+    out() << "== s2t-qt-server: dấu câu, viết hoa và bằng chứng giọng ==\n";
+    punctuation();
+    out() << (g_failures == 0 ? "transcript: OK\n"
+                              : QStringLiteral("transcript: %1 lỗi\n").arg(g_failures));
+    out().flush();
+    return g_failures == 0 ? 0 : 1;
 }
 
 int runStoreTests()
@@ -1547,11 +1910,15 @@ int runLoopbackTests()
 int runAll()
 {
     const int codec = runCodecTests();
+    const int transcript = runTranscriptTests();
     const int storeCode = runStoreTests();
     const int loop = runLoopbackTests();
     const int chainCode = runBufferTests();
     const int restartCode = runRestartTests();
-    return codec != 0 || storeCode != 0 || loop != 0 || chainCode != 0 || restartCode != 0 ? 1 : 0;
+    return codec != 0 || transcript != 0 || storeCode != 0 || loop != 0 || chainCode != 0
+            || restartCode != 0
+        ? 1
+        : 0;
 }
 
 int runProbe(const QString &target, const QString &token)

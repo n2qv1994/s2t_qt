@@ -38,7 +38,13 @@ int runBufferTests();
 // crash - reads back as everything before the tear.
 int runRestartTests();
 
-// All four.
+// The tier's JSON contract and what the transcript makes of it: that a word is
+// displayed as itn_part_text and not as the raw `w`, that a row is sentence-
+// cased and split into sentences on this side, and that a voice's evidence
+// spans come out of the transcript rather than out of a rename.  No sockets.
+int runTranscriptTests();
+
+// All five.
 int runAll();
 
 int runProbe(const QString &target, const QString &token);

@@ -7,8 +7,11 @@
 #include "audio/WavIo.h"
 #include "core/Logger.h"
 
+#include <QAudioOutput>
+#include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -16,9 +19,12 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMediaPlayer>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -57,6 +63,22 @@ QString statusStyle(const QString &kind)
     }
     return QStringLiteral("background:%1; color:%2; border-radius:6px; padding:8px 10px;")
         .arg(theme::color(plate).name(), theme::color(ink).name());
+}
+
+// The global registry sends ISO-8601 in UTC ("2026-08-19T07:39:01Z"), unlike
+// every other timestamp in this contract, which is a double.  Rendered as
+// local date + minutes: the column answers "when was this last touched", and
+// the full string only gets elided at the T, which hides the time and keeps
+// none of the width it cost.  An unparseable value is shown as it arrived
+// rather than blanked - a date nobody can read still beats an empty cell.
+QString shortTimestamp(const QString &iso)
+{
+    if (iso.trimmed().isEmpty())
+        return QString();
+    const QDateTime parsed = QDateTime::fromString(iso, Qt::ISODate);
+    if (!parsed.isValid())
+        return iso;
+    return parsed.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"));
 }
 
 QString kindLabel(const QString &kind)
@@ -103,7 +125,16 @@ EnrollDialog::EnrollDialog(SessionController *controller, const QString &editorI
     auto *tabs = new QTabWidget(this);
     tabs->addTab(buildEnrollTab(), QStringLiteral("Đăng ký giọng"));
     tabs->addTab(buildSessionTab(), QStringLiteral("Người nói trong phiên"));
+    tabs->addTab(buildGlobalTab(), QStringLiteral("DB giọng chung"));
     layout->addWidget(tabs, 1);
+
+    // For the enrolment preview.  Built here rather than in the tab so the
+    // buffer outlives any one playback: setSourceDevice does not take
+    // ownership, and a device that goes away under the player is a crash.
+    m_player = new QMediaPlayer(this);
+    m_audioOutput = new QAudioOutput(this);
+    m_player->setAudioOutput(m_audioOutput);
+    m_audioBuffer = new QBuffer(this);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
     layout->addWidget(buttons);
@@ -183,12 +214,25 @@ QWidget *EnrollDialog::buildEnrollTab()
     m_fileButton = new QPushButton(QStringLiteral("Nạp từ tệp…"), page);
     m_retryButton = new QPushButton(QStringLiteral("Gửi lại bản ghi"), page);
     m_retryButton->setVisible(false);
+    // The answer to the one-way problem.  An enrolment cannot be undone
+    // through any API, and the failure that matters - two people in one
+    // recording - produces a blended voice that mis-names people in later
+    // meetings without ever reporting an error.  This asks the same question
+    // without committing: same VAD trim, nothing written, and the audio comes
+    // back so it can be listened to.
+    m_previewButton = new QPushButton(QStringLiteral("Nghe thử (không ghi vào DB)"), page);
     row->addWidget(m_recordButton);
     row->addWidget(m_fileButton);
+    row->addWidget(m_previewButton);
     row->addWidget(m_timerLabel);
     row->addWidget(m_retryButton);
     row->addStretch();
     layout->addLayout(row);
+
+    m_previewInfo = new QLabel(page);
+    m_previewInfo->setWordWrap(true);
+    m_previewInfo->setVisible(false);
+    layout->addWidget(m_previewInfo);
 
     m_status = new QLabel(page);
     m_status->setWordWrap(true);
@@ -210,6 +254,7 @@ QWidget *EnrollDialog::buildEnrollTab()
 
     connect(m_recordButton, &QPushButton::clicked, this, &EnrollDialog::toggleRecording);
     connect(m_fileButton, &QPushButton::clicked, this, &EnrollDialog::loadFromFile);
+    connect(m_previewButton, &QPushButton::clicked, this, &EnrollDialog::previewRecording);
     connect(m_retryButton, &QPushButton::clicked, this, [this]() {
         m_recorded = m_pendingWav;
         m_speakerName->setText(m_pendingName);
@@ -263,6 +308,259 @@ QWidget *EnrollDialog::buildSessionTab()
     connect(load, &QPushButton::clicked, this, &EnrollDialog::loadSessionSpeakers);
     connect(save, &QPushButton::clicked, this, &EnrollDialog::saveSelections);
     return page;
+}
+
+QWidget *EnrollDialog::buildGlobalTab()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+
+    auto *intro = new QLabel(
+        QStringLiteral(
+            "Mọi giọng trong DB chung, kể cả các giọng đã ngưng dùng hoặc đã xoá. Đây là "
+            "danh sách mà bộ xác thực đem ra so khớp với từng cuộc họp: một giọng rác trong "
+            "này là một cái tên sai chờ sẵn. Mỗi thay đổi đều ghi nhật ký kèm tên người thao "
+            "tác và lý do."),
+        page);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    auto *row = new QHBoxLayout();
+    auto *reload = new QPushButton(QStringLiteral("Tải lại"), page);
+    row->addWidget(reload);
+    row->addStretch(1);
+    layout->addLayout(row);
+
+    m_globalStatus = new QLabel(page);
+    m_globalStatus->setWordWrap(true);
+    layout->addWidget(m_globalStatus);
+
+    m_global = new QTableWidget(0, 7, page);
+    m_global->setHorizontalHeaderLabels(
+        {QStringLiteral("spk_id"), QStringLiteral("Tên"), QStringLiteral("Trạng thái"),
+         QStringLiteral("Mẫu"), QStringLiteral("Dùng được"), QStringLiteral("Cập nhật"),
+         QStringLiteral("Người duyệt / lý do")});
+    m_global->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_global->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
+    m_global->verticalHeader()->setVisible(false);
+    // Whole rows, one at a time: every action below works on exactly one
+    // speaker, and a multi-select here would invite a bulk delete.
+    m_global->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_global->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_global->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    layout->addWidget(m_global, 1);
+
+    auto *form = new QFormLayout();
+    m_globalReason = new QLineEdit(page);
+    m_globalReason->setMaxLength(200);
+    m_globalReason->setPlaceholderText(
+        QStringLiteral("Ví dụ: mẫu thử nghiệm, thu nhầm hai người"));
+    form->addRow(QStringLiteral("Lý do"), m_globalReason);
+    layout->addLayout(form);
+
+    auto *actions = new QHBoxLayout();
+    m_deactivateButton = new QPushButton(QStringLiteral("Ngưng dùng"), page);
+    m_activateButton = new QPushButton(QStringLiteral("Dùng lại"), page);
+    m_deleteButton = new QPushButton(QStringLiteral("Xoá vĩnh viễn…"), page);
+    // No dedicated "danger" button style exists in the theme, and inventing
+    // one here would drift from it.  Colouring the label is enough to stop
+    // this being the button somebody presses by muscle memory.
+    m_deleteButton->setStyleSheet(
+        QStringLiteral("color:%1;").arg(theme::color(theme::Role::Danger).name()));
+    actions->addWidget(m_deactivateButton);
+    actions->addWidget(m_activateButton);
+    actions->addStretch(1);
+    actions->addWidget(m_deleteButton);
+    layout->addLayout(actions);
+
+    auto *note = new QLabel(
+        QStringLiteral(
+            "<b>Ngưng dùng</b> là thao tác nên dùng: giọng thôi được đem ra so khớp nhưng vẫn "
+            "còn đó, và <b>Dùng lại</b> đưa nó trở lại. <b>Xoá vĩnh viễn</b> thì không có "
+            "đường về từ đây."),
+        page);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+
+    connect(reload, &QPushButton::clicked, this, &EnrollDialog::loadGlobalSpeakers);
+    connect(m_deactivateButton, &QPushButton::clicked, this,
+            [this]() { runGlobalAction(QStringLiteral("deactivate")); });
+    connect(m_activateButton, &QPushButton::clicked, this,
+            [this]() { runGlobalAction(QStringLiteral("activate")); });
+    connect(m_deleteButton, &QPushButton::clicked, this,
+            [this]() { runGlobalAction(QStringLiteral("delete")); });
+    return page;
+}
+
+QString EnrollDialog::selectedGlobalSpeaker(QString *name) const
+{
+    const int row = m_global->currentRow();
+    if (row < 0 || !m_global->item(row, 0))
+        return QString();
+    if (name && m_global->item(row, 1))
+        *name = m_global->item(row, 1)->text();
+    return m_global->item(row, 0)->text();
+}
+
+void EnrollDialog::loadGlobalSpeakers()
+{
+    m_globalStatus->setText(QStringLiteral("Đang tải..."));
+    m_controller->rpc()->call<reg::ListGlobalSpeakersResponse>(
+        this,
+        [](AsrClient &client, reg::ListGlobalSpeakersResponse &out) {
+            return client.listGlobalSpeakers(&out, 30000);
+        },
+        [this](const grpc::Status &status, const reg::ListGlobalSpeakersResponse &response) {
+            if (!status.ok()) {
+                m_globalStatus->setText(
+                    QStringLiteral("Không tải được: %1").arg(status.toString()));
+                return;
+            }
+            m_global->setRowCount(0);
+            int active = 0;
+            for (const reg::GlobalSpeakerEntry &entry : response.speakers) {
+                const int row = m_global->rowCount();
+                m_global->insertRow(row);
+                const auto cell = [this, row](int column, const QString &text) {
+                    m_global->setItem(row, column, new QTableWidgetItem(text));
+                };
+                cell(0, entry.spkId);
+                cell(1, entry.spkName);
+                cell(2, entry.status);
+                cell(3, QString::number(entry.sampleCount));
+                cell(4, QString::number(entry.usableSampleCount));
+                // "2026-08-19T07:39:01Z" is too wide for the column and gets
+                // elided at the T, which hides the time and keeps none of the
+                // width it cost.  Shown as local date + minutes instead - the
+                // question this column answers is "when was this last touched",
+                // and seconds never mattered to it.
+                cell(5, shortTimestamp(entry.lastUpdated));
+                cell(6, entry.reviewReason.isEmpty()
+                            ? entry.reviewedBy
+                            : QStringLiteral("%1 — %2").arg(entry.reviewedBy, entry.reviewReason));
+                if (entry.status == QLatin1String("approved")) {
+                    ++active;
+                } else if (m_global->item(row, 2)) {
+                    // A tombstone is listed but must not read like a live row.
+                    m_global->item(row, 2)->setForeground(theme::color(theme::Role::TextMuted));
+                }
+            }
+            m_globalStatus->setText(
+                QStringLiteral("%1 giọng, %2 đang dùng được cho nhận dạng.")
+                    .arg(response.speakers.size())
+                    .arg(active));
+            LOG_INFO(applog::cat::Ui) << "ListGlobalSpeakers:" << response.speakers.size()
+                                      << "entries," << active << "approved";
+        });
+}
+
+void EnrollDialog::runGlobalAction(const QString &verb)
+{
+    QString name;
+    const QString spkId = selectedGlobalSpeaker(&name);
+    if (spkId.isEmpty()) {
+        m_globalStatus->setText(QStringLiteral("Chưa chọn giọng nào trong bảng."));
+        return;
+    }
+    if (m_editorId.isEmpty()) {
+        m_globalStatus->setText(QStringLiteral(
+            "Tên người thao tác bị trống - nhập ở thanh dưới cửa sổ chính trước đã. "
+            "Mọi thay đổi trên DB chung đều phải có người chịu trách nhiệm."));
+        return;
+    }
+    const QString reason = m_globalReason->text().trimmed();
+    const bool destructive = verb != QLatin1String("activate");
+    if (destructive && reason.isEmpty()) {
+        m_globalStatus->setText(
+            QStringLiteral("Thao tác này cần một lý do - nhập vào ô Lý do rồi bấm lại."));
+        return;
+    }
+
+    // The confirmation is proportional to what the action costs.  Deactivate
+    // is reversible from the button next to it, so it asks once; delete is not
+    // reversible from here at all, so it makes the operator type the id.
+    if (verb == QLatin1String("delete")) {
+        bool typed = false;
+        const QString answer = QInputDialog::getText(
+            this, QStringLiteral("Xoá vĩnh viễn một giọng"),
+            QStringLiteral("Sắp xoá <b>%1</b> (%2) khỏi DB chung.<br><br>"
+                           "Thao tác này <b>không hoàn tác được</b> từ ứng dụng — muốn lấy lại "
+                           "thì phải khôi phục thủ công trên máy chủ.<br>"
+                           "Nếu chỉ muốn nó thôi được đem ra so khớp, hãy bấm "
+                           "<b>Ngưng dùng</b> thay vì xoá.<br><br>"
+                           "Gõ lại <b>%2</b> để xác nhận:")
+                .arg(name.toHtmlEscaped(), spkId.toHtmlEscaped()),
+            QLineEdit::Normal, QString(), &typed);
+        if (!typed || answer.trimmed() != spkId)
+            return;
+    } else if (verb == QLatin1String("deactivate")) {
+        const auto choice = QMessageBox::question(
+            this, QStringLiteral("Ngưng dùng một giọng"),
+            QStringLiteral("Ngưng dùng %1 (%2)?\n\nGiọng vẫn còn trong DB và có thể bật lại "
+                           "bằng \"Dùng lại\"; nó chỉ thôi được đem ra so khớp.")
+                .arg(name, spkId));
+        if (choice != QMessageBox::Yes)
+            return;
+    }
+
+    reg::GlobalSpeakerActionRequest request;
+    request.spkId = spkId;
+    request.editorId = m_editorId;
+    request.reason = reason;
+
+    m_deactivateButton->setEnabled(false);
+    m_activateButton->setEnabled(false);
+    m_deleteButton->setEnabled(false);
+    m_globalStatus->setText(QStringLiteral("Đang gửi..."));
+    LOG_INFO(applog::cat::Ui) << "global speaker" << verb << spkId << "by" << m_editorId
+                              << "reason=" << reason;
+
+    m_controller->rpc()->call<reg::GlobalSpeakerActionResponse>(
+        this,
+        [request, verb](AsrClient &client, reg::GlobalSpeakerActionResponse &out) {
+            // Deactivate and delete rebuild the CAM++ database afterwards, the
+            // same pass EnrollSpeaker pays for, so the deadline matches it.
+            if (verb == QLatin1String("deactivate"))
+                return client.deactivateGlobalSpeaker(request, &out, 120000);
+            if (verb == QLatin1String("delete"))
+                return client.deleteGlobalSpeaker(request, &out, 120000);
+            return client.activateGlobalSpeaker(request, &out, 120000);
+        },
+        [this, spkId](const grpc::Status &status,
+                      const reg::GlobalSpeakerActionResponse &response) {
+            m_deactivateButton->setEnabled(true);
+            m_activateButton->setEnabled(true);
+            m_deleteButton->setEnabled(true);
+            if (!status.ok()) {
+                m_globalStatus->setText(
+                    QStringLiteral("Không gửi được: %1").arg(status.toString()));
+                return;
+            }
+            if (!response.ok) {
+                m_globalStatus->setText(QStringLiteral("Máy chủ từ chối: %1").arg(response.error));
+                return;
+            }
+            // "changed" told apart from "ok" on purpose: deactivating a
+            // speaker who is already inactive succeeds and does nothing, and
+            // reporting that as done would be a small lie.
+            QString text = response.changed
+                ? QStringLiteral("Xong: %1 giờ ở trạng thái <b>%2</b>.")
+                      .arg(spkId, response.status)
+                : QStringLiteral("Không có gì thay đổi: %1 vốn đã ở trạng thái <b>%2</b>.")
+                      .arg(spkId, response.status);
+            if (response.samplesRetired > 0)
+                text += QStringLiteral(" %1 mẫu đã gỡ khỏi DB nhận dạng.")
+                            .arg(response.samplesRetired);
+            if (!response.message.isEmpty())
+                text += QStringLiteral("<br>%1").arg(response.message.toHtmlEscaped());
+            m_globalStatus->setText(text);
+            m_globalReason->clear();
+            // Re-read rather than patching the row in place: the far side
+            // decides the resulting status, and guessing it here is how a
+            // table starts disagreeing with the database.
+            loadGlobalSpeakers();
+            loadRoster();
+        });
 }
 
 void EnrollDialog::setStatus(const QString &kind, const QString &text)
@@ -399,6 +697,95 @@ void EnrollDialog::loadFromFile()
     m_pendingWav = m_recorded;
     m_pendingName = m_speakerName->text().trimmed();
     m_retryButton->setVisible(true);
+}
+
+void EnrollDialog::playWav(const QByteArray &wavBytes)
+{
+    if (wavBytes.isEmpty() || !m_player)
+        return;
+    // Same shape as ReviewPanel: the player is pointed at a QBuffer that
+    // outlives the call, because setSourceDevice does not take ownership and
+    // a local buffer would be gone by the time playback starts.
+    m_player->stop();
+    m_player->setSourceDevice(nullptr);
+    m_audioBuffer->close();
+    m_audioBuffer->setData(wavBytes);
+    m_audioBuffer->open(QIODevice::ReadOnly);
+    m_player->setSourceDevice(m_audioBuffer);
+    m_player->play();
+}
+
+void EnrollDialog::previewRecording()
+{
+    if (m_recorded.isEmpty()) {
+        setStatus(QStringLiteral("err"), QStringLiteral("Chưa có bản ghi nào để nghe thử."));
+        return;
+    }
+    // No editor id required and none sent: a preview writes nothing, so there
+    // is nothing to attribute.  That is also why this is safe to press on a
+    // workstation where nobody has filled the operator name in yet.
+    const QByteArray mono = wav::toMono16k(m_recorded, m_sampleRate, m_channels);
+
+    reg::PreviewEnrollmentRequest request;
+    request.displayName = m_speakerName->text().trimmed();
+    request.wav = wav::buildWav(mono, 16000, 1);
+    request.allowBelowPolicy = m_allowBelow->isChecked();
+
+    m_previewButton->setEnabled(false);
+    setStatus(QStringLiteral("busy"), QStringLiteral("Đang cắt thử bằng VAD..."));
+    LOG_INFO(applog::cat::Ui) << "sending PreviewEnrollment: wav=" << request.wav.size()
+                              << "bytes - read-only, nothing is written";
+
+    m_controller->rpc()->call<reg::PreviewEnrollmentResponse>(
+        this,
+        [request](AsrClient &client, reg::PreviewEnrollmentResponse &out) {
+            // VAD only, no rebuild_db pass, so this is seconds rather than
+            // minutes - but it still carries the audio back.
+            return client.previewEnrollment(request, &out, 60000);
+        },
+        [this](const grpc::Status &status, const reg::PreviewEnrollmentResponse &response) {
+            m_previewButton->setEnabled(true);
+            if (!status.ok()) {
+                setStatus(QStringLiteral("err"),
+                          QStringLiteral("Không nghe thử được: %1").arg(status.toString()));
+                return;
+            }
+            if (!response.ok) {
+                setStatus(QStringLiteral("err"),
+                          QStringLiteral("Bản ghi bị từ chối: %1").arg(response.error));
+                return;
+            }
+            setStatus(QString(), QString());
+            const double kept = response.rawSeconds > 0.0
+                ? response.speechSecondsAfterVad / response.rawSeconds
+                : 0.0;
+            QString text =
+                QStringLiteral("Thử xong, <b>chưa ghi gì vào DB</b>. Thô %1 s → còn <b>%2 s</b> "
+                               "tiếng nói (giữ %3).")
+                    .arg(response.rawSeconds, 0, 'f', 1)
+                    .arg(response.speechSecondsAfterVad, 0, 'f', 1)
+                    .arg(kept, 0, 'f', 2);
+            if (!response.policyCompliant) {
+                text += QStringLiteral(
+                            "<br><span style='color:%1;'><b>Dưới chuẩn:</b> %2</span> — đăng ký "
+                            "thật sẽ rơi vào chế độ cấp bách. Nên thu lại 30–40 giây.")
+                            .arg(theme::color(theme::Role::Danger).name(),
+                                 response.warning.isEmpty()
+                                     ? QStringLiteral("không đủ tiếng nói sau khi cắt")
+                                     : response.warning.toHtmlEscaped());
+            }
+            text += QStringLiteral(
+                "<br>Đang phát lại đúng đoạn sẽ được đăng ký — <b>nghe kỹ xem có đúng một "
+                "người nói không</b>. Hai giọng trong một mẫu tạo ra một giọng pha trộn, và "
+                "nó gọi sai tên người ở các cuộc họp sau mà không báo lỗi gì.");
+            m_previewInfo->setText(text);
+            m_previewInfo->setVisible(true);
+            playWav(response.trimmedWav);
+            LOG_INFO(applog::cat::Ui)
+                << "PreviewEnrollment ok: raw=" << response.rawSeconds
+                << "s kept=" << response.speechSecondsAfterVad
+                << "s policyCompliant=" << response.policyCompliant;
+        });
 }
 
 void EnrollDialog::submitRecording()

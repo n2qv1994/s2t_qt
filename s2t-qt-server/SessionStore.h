@@ -81,6 +81,18 @@ public:
     void appendAudit(const QString &sessionId, const QString &event, const QString &payloadJson);
     QList<asr::AuditEvent> auditHistory(const QString &sessionId, int limit);
 
+    // ---- the pipeline trace ------------------------------------------------
+    //
+    // Kept apart from the audit log on purpose: audit is what a person decided
+    // and is never trimmed, this is what the tier decided and is trimmed to the
+    // most recent kTraceKeepPerSession events on every write.
+    void appendTrace(const QString &sessionId, const QList<asr::PipelineTraceEvent> &events);
+    // `afterSeq` is a cursor, not a filter: a client polls with the nextSeq it
+    // was handed last time.  An empty `stages` means every stage.
+    QList<asr::PipelineTraceEvent> traceHistory(const QString &sessionId, quint64 afterSeq,
+                                                int limit, const QList<QString> &stages,
+                                                bool *hasMore);
+
     // ---- the per-session speaker registry ----------------------------------
     //
     // Identity and metadata are one concern; the publish decision is another.

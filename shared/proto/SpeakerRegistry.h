@@ -189,6 +189,119 @@ struct GetSpeakerRegistryStatusResponse
     QByteArray serialize() const;
 };
 
+// ---- the global registry's own lifecycle -----------------------------------
+//
+// Everything above this line either reads the global database or adds to it.
+// What follows is the other half: seeing what is in it, and taking something
+// back out.  It matters because the database is written to by hand over months
+// and nothing else can tidy it - as of 2026-09-21 the deployed one holds 62
+// speakers including `5`, `A`, `a1` and an SQL-injection probe string, every
+// one of them a live candidate the verifier can match a meeting against.
+//
+// These went missing when the Python adapter left the deployment picture: it
+// implements all ten RPCs, this server implemented five.  The five it did not
+// are exactly the ones that let an operator clean up.
+
+struct PreviewEnrollmentRequest
+{
+    QString displayName;
+    QByteArray wav;
+    bool allowBelowPolicy = false;
+    QByteArray serialize() const;
+    void parse(pw::Reader &reader);
+};
+
+// What EnrollSpeaker WOULD keep, without keeping it.  Nothing is written: no
+// database row, no catalogue entry, no audit line - so there is deliberately
+// no editor_id on the request, because there is nothing to attribute.
+//
+// This is the answer to the one-way problem.  An enrolment cannot be undone
+// through any API, so the only safe way to find out whether a recording is
+// good enough is to ask without committing: `trimmedWav` is the audio that
+// would actually be enrolled, and playing it is how an operator hears that
+// they recorded two people instead of one.
+struct PreviewEnrollmentResponse
+{
+    bool ok = false;
+    QString error;
+    QString speakerId;
+    double rawSeconds = 0.0;
+    double speechSecondsAfterVad = 0.0;
+    bool policyCompliant = false;
+    QString warning;
+    QByteArray trimmedWav;
+    void parse(pw::Reader &reader);
+    QByteArray serialize() const;
+};
+
+struct GlobalSpeakerEntry
+{
+    QString spkId;
+    QString spkName;
+    // "approved" | "inactive" | "deleted" | "pending" | "rejected".  The
+    // listing includes the tombstones on purpose: an operator has to be able
+    // to see who removed a speaker, and to put one back.
+    QString status;
+    quint32 sampleCount = 0;
+    quint32 usableSampleCount = 0;
+    // ISO-8601 strings, not doubles - that is what the .proto says and what
+    // the enrol service sends.
+    QString createdAt;
+    QString lastUpdated;
+    QString reviewedBy;
+    QString reviewReason;
+    void parse(pw::Reader &reader);
+    QByteArray serialize() const;
+};
+
+struct ListGlobalSpeakersRequest
+{
+    QByteArray serialize() const { return QByteArray(); }
+    void parse(pw::Reader &reader) { reader.skipRemaining(); }
+};
+
+struct ListGlobalSpeakersResponse
+{
+    QList<GlobalSpeakerEntry> speakers;
+    void parse(pw::Reader &reader);
+    QByteArray serialize() const;
+};
+
+// One request type for all three lifecycle actions - deactivate, activate and
+// delete - because the .proto says so and because they differ only in which
+// verb the enrol service is asked for.
+struct GlobalSpeakerActionRequest
+{
+    QString spkId;
+    // Required, and enforced twice: here, and again by the enrol service,
+    // which is the final authority on every global database write and audits
+    // this identity all the way to it.
+    QString editorId;
+    // Required for deactivate and delete, optional for activate.  A removal
+    // with no stated reason is unreviewable six months later.
+    QString reason;
+    QByteArray serialize() const;
+    void parse(pw::Reader &reader);
+};
+
+struct GlobalSpeakerActionResponse
+{
+    bool ok = false;
+    QString error;
+    // False when the action was a no-op - deactivating someone already
+    // inactive.  Not an error, and worth telling apart from one.
+    bool changed = false;
+    QString spkId;
+    QString spkName;
+    QString status;
+    quint32 samplesRetired = 0;
+    quint32 deleteEventsReleased = 0;
+    QString deleteDispatch;
+    QString message;
+    void parse(pw::Reader &reader);
+    QByteArray serialize() const;
+};
+
 } // namespace reg
 
 #endif // SPEAKERREGISTRY_H

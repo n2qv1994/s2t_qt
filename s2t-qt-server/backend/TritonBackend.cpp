@@ -5,6 +5,7 @@
 #include "grpc/UnaryCall.h"
 #include "proto/TritonInfer.h"
 
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -45,6 +46,16 @@ const char *const kWantedOutputs[] = {
     "itn_committed_text", "itn_tail_text", "itn_merged_words_json",
     "itn_updated_indices_json", "itn_commit_boundary_sec",
     "itn_num_committed", "itn_num_tail", "itn_ms", "itn_ms_merge",
+    // The session's CAM++ speaker clustering, exported once at is_final
+    // (campp_registry.py:_campp_registry_export).  It lives in the model
+    // process's RAM keyed by stream_id and is LRU-evicted, so this tensor is
+    // the only way to see it - and without it SaveSessionSpeakers has nothing
+    // to publish, which is how that whole feature sat dead until 2026-09-21.
+    "campp_registry_json",
+    // What get_pipeline_trace answers with.  Small per chunk - the correction
+    // window's own bookkeeping - and it is the first thing anybody reaches for
+    // when an operator reports a wrong mark.
+    "correction_trace_json",
 };
 
 QByteArray rawFloats(const QList<float> &values)
@@ -140,12 +151,34 @@ QList<asr::Word> wordsFrom(const trt::ModelInferResponse &response)
     return out;
 }
 
-QList<asr::Word> wordsFromJson(const QString &json)
+} // namespace
+
+namespace triton {
+
+// A word record in itn_merged_words_json carries TWO surfaces, and they are
+// not the same text:
+//
+//   "w"              the RAW ASR token - no punctuation, no capitals
+//   "itn_part_text"  what the punctuation/ITN pass decided it reads as,
+//                    including the mark that belongs to this word
+//
+// Reading "w" is what this did until 2026-09-21, and it threw the whole output
+// of bilstm_punc on the floor: the tier spends real inference time on it - it
+// is a Triton model of its own and itn_ms is measured per chunk - and the
+// transcript still reached the screen as a flat run of bare words.  It also
+// made sentence splitting impossible upstairs: rebuildPhrases() splits on
+// ".?!" and never saw one, so every row was one phrase.
+//
+// itn_merge.py:611-642 is where the two are set apart.  The reconstruction
+// below matches itn_correction_text byte for byte on real audio, sentence
+// case aside - that pass is whole-text and belongs to LiveTranscript.
+QList<asr::Word> mergedWordsFromJson(const QString &json)
 {
     QList<asr::Word> out;
     const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
     if (!document.isArray())
         return out;
+    int previousPart = -1;
     for (const QJsonValue &value : document.array()) {
         if (!value.isObject())
             continue;
@@ -158,10 +191,70 @@ QList<asr::Word> wordsFromJson(const QString &json)
         word.startSec = object.value(QStringLiteral("start_sec")).toDouble();
         word.endSec = object.value(QStringLiteral("end_sec")).toDouble();
         word.speaker = object.value(QStringLiteral("speaker")).toString();
+
+        const QString partText = object.value(QStringLiteral("itn_part_text")).toString();
+        const int part = object.value(QStringLiteral("itn_source_part_idx")).toInt(-1);
+
+        // Several words can normalise into ONE part: in
+        // phobert_norm_bilstm_punc mode "hai nghìn không hai sáu" becomes the
+        // single part "2026".  Emitting that part text once per word would
+        // repeat it, so a run of words sharing a part collapses into the word
+        // that opened it and only widens its span.  In the mode deployed today
+        // (ITN_OUTPUT_MODE=bilstm_punc_only) it is one word per part and this
+        // branch never runs - it is here so the display does not break on the
+        // day the mode changes.
+        if (part >= 0 && part == previousPart && !out.isEmpty()) {
+            asr::Word &head = out.last();
+            head.endSec = qMax(head.endSec, word.endSec);
+            head.c = qMin(head.c, word.c);
+            continue;
+        }
+        previousPart = part;
+
+        // The mark travels INSIDE itn_part_text.  Appending itn_punc_final on
+        // top of it is the obvious-looking mistake and it produces
+        // "khu vực.." - measured on real audio, not guessed.
+        if (!partText.isEmpty())
+            word.w = partText;
         out.append(word);
     }
     return out;
 }
+
+// campp_registry_json: the session's own CAM++ clustering, one entry per voice
+// the tier told apart in THIS meeting.  Shape comes straight from
+// _campp_registry_export() in campp_registry.py, and the ids in it are the same
+// ones the `speaker` tensor carries per chunk, which is what lets the evidence
+// for a voice be found in the transcript afterwards.
+QList<reg::SessionSpeakerEntry> speakerRegistryFromJson(const QString &json)
+{
+    QList<reg::SessionSpeakerEntry> out;
+    const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
+    if (!document.isArray())
+        return out;
+    for (const QJsonValue &value : document.array()) {
+        if (!value.isObject())
+            continue;
+        const QJsonObject object = value.toObject();
+        reg::SessionSpeakerEntry entry;
+        entry.sessionSpeakerId = object.value(QStringLiteral("session_speaker_id")).toString();
+        if (entry.sessionSpeakerId.isEmpty())
+            continue;
+        for (const QJsonValue &slot : object.value(QStringLiteral("diar_slots")).toArray())
+            entry.diarSlots.append(slot.toString());
+        entry.verifiedName = object.value(QStringLiteral("verified_name")).toString();
+        entry.score = object.value(QStringLiteral("score")).toDouble();
+        entry.windows = quint32(qMax(0, object.value(QStringLiteral("windows")).toInt()));
+        entry.createdAt = object.value(QStringLiteral("created_at")).toDouble();
+        entry.updatedAt = object.value(QStringLiteral("updated_at")).toDouble();
+        out.append(entry);
+    }
+    return out;
+}
+
+} // namespace triton
+
+namespace {
 
 QList<qint32> int32sFromJson(const QString &json)
 {
@@ -338,7 +431,7 @@ private:
         if (response.stringAt(QStringLiteral("itn_tail_text"), &text))
             out->correction.tailText = text;
         if (response.stringAt(QStringLiteral("itn_merged_words_json"), &text))
-            out->correction.mergedWords = wordsFromJson(text);
+            out->correction.mergedWords = triton::mergedWordsFromJson(text);
         if (response.stringAt(QStringLiteral("itn_updated_indices_json"), &text))
             out->correction.updatedIndices = int32sFromJson(text);
         if (response.floatAt(QStringLiteral("itn_commit_boundary_sec"), &value))
@@ -355,10 +448,107 @@ private:
         out->correction.text = out->itnCorrectionText;
         out->correction.fullText = out->itnFullText;
 
+        // The session's speaker clustering.  Exported by the model only on the
+        // is_final tick, so this is a replace and not a merge: what arrives is
+        // the whole answer for the meeting.  "[]" is what every other tick
+        // sends and must not wipe what the final one said.
+        if (response.stringAt(QStringLiteral("campp_registry_json"), &text)) {
+            const QList<reg::SessionSpeakerEntry> entries = triton::speakerRegistryFromJson(text);
+            if (!entries.isEmpty())
+                m_registry = entries;
+        }
+        if (response.stringAt(QStringLiteral("correction_trace_json"), &text))
+            collectTrace(text);
+
         // Triton counts nothing for us, so progress is our own sample count.
         const double perSecond = double(qMax(1u, m_config.sampleRate) * qMax(1u, m_config.channels));
         out->sourceSeenSec = double(m_samplesSent) / perSecond;
         out->speechSeenSec = out->sourceSeenSec;
+    }
+
+    // correction_trace_json is one object per tick with up to three parts, and
+    // each becomes an event only when the tier actually filled it in - on a
+    // quiet chunk they are empty dicts and there is nothing to record.
+    //
+    // The stage names are the ones the pipeline team already reads in
+    // /api/pipeline_trace, because a trace whose vocabulary differs from
+    // theirs is a trace nobody can answer a question with.
+    void collectTrace(const QString &json)
+    {
+        if (json.isEmpty())
+            return;
+        const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
+        if (!document.isObject())
+            return;
+        const QJsonObject root = document.object();
+
+        const auto add = [this](const QJsonObject &part, const QString &stage,
+                                const QString &eventKey, const QString &startKey,
+                                const QString &endKey) {
+            if (part.isEmpty())
+                return;
+            asr::PipelineTraceEvent event;
+            event.seq = ++m_traceSeq;
+            event.ts = double(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
+            event.stage = stage;
+            event.event = part.value(eventKey).toString();
+            if (event.event.isEmpty())
+                event.event = stage;
+            event.audioStartSec = part.value(startKey).toDouble(-1.0);
+            event.audioEndSec = part.value(endKey).toDouble(-1.0);
+            // The merge part carries no bounds of its own - it is a list of
+            // words - so they are read off the words it produced.  Without
+            // this an ITN event cannot be lined up against the audio, which is
+            // the whole reason anybody opens a trace.
+            if (event.audioStartSec < 0.0) {
+                const QJsonArray words = part.value(QStringLiteral("merged_words_after")).toArray();
+                for (const QJsonValue &item : words) {
+                    const QJsonObject word = item.toObject();
+                    const double from = word.value(QStringLiteral("start_sec")).toDouble(-1.0);
+                    const double to = word.value(QStringLiteral("end_sec")).toDouble(-1.0);
+                    if (from < 0.0 || to < from)
+                        continue;
+                    event.audioStartSec = event.audioStartSec < 0.0
+                        ? from
+                        : qMin(event.audioStartSec, from);
+                    event.audioEndSec = qMax(event.audioEndSec, to);
+                }
+            }
+            event.payloadJson =
+                QString::fromUtf8(QJsonDocument(part).toJson(QJsonDocument::Compact));
+            m_trace.append(event);
+        };
+
+        // correction_asr: which audio window the ASR model was actually handed,
+        // and what it decoded from it.  left/right_context_samples live in here
+        // and are the field that explains a punctuation decision.
+        add(root.value(QStringLiteral("decode")).toObject(), QStringLiteral("correction_asr"),
+            QStringLiteral("cut_trigger"), QStringLiteral("word_start_sec"),
+            QStringLiteral("word_end_sec"));
+        // itn: what the punctuation/ITN pass was given and what it gave back.
+        add(root.value(QStringLiteral("merge")).toObject(), QStringLiteral("itn"),
+            QStringLiteral("output_text"), QStringLiteral("start_sec"),
+            QStringLiteral("end_sec"));
+        // streaming_window: the live edge's own window, for the same question
+        // asked about interim text rather than about a correction.
+        add(root.value(QStringLiteral("window")).toObject(), QStringLiteral("streaming_window"),
+            QStringLiteral("window_samples"), QStringLiteral("window_start_sec"),
+            QStringLiteral("window_end_sec"));
+
+        // Bounded here as well as in the store: nothing guarantees the buffer
+        // drains this every chunk, and an unread trace must not grow with the
+        // meeting.
+        while (m_trace.size() > 4000)
+            m_trace.removeFirst();
+    }
+
+    QList<reg::SessionSpeakerEntry> speakerRegistry() const override { return m_registry; }
+
+    QList<asr::PipelineTraceEvent> takeTrace() override
+    {
+        QList<asr::PipelineTraceEvent> out;
+        out.swap(m_trace);
+        return out;
     }
 
     QString m_sessionId;
@@ -368,6 +558,9 @@ private:
     int m_timeoutMs = 30000;
     bool m_first = true;
     quint64 m_samplesSent = 0;
+    QList<reg::SessionSpeakerEntry> m_registry;
+    QList<asr::PipelineTraceEvent> m_trace;
+    quint64 m_traceSeq = 0;
     grpc::Channel m_channel;
 };
 

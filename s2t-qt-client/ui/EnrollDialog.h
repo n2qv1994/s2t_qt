@@ -19,10 +19,13 @@
 #include <QElapsedTimer>
 
 QT_BEGIN_NAMESPACE
+class QAudioOutput;
+class QBuffer;
 class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QMediaPlayer;
 class QPushButton;
 class QTableWidget;
 class QTextEdit;
@@ -43,15 +46,27 @@ private slots:
     void toggleRecording();
     void loadFromFile();
     void submitRecording();
+    void previewRecording();
     void loadScript();
     void loadRoster();
     void loadSessionSpeakers();
     void saveSelections();
+    void loadGlobalSpeakers();
 
 private:
     QWidget *buildEnrollTab();
     QWidget *buildSessionTab();
+    QWidget *buildGlobalTab();
     void setStatus(const QString &kind, const QString &text);
+    // Plays a complete WAV through the dialog's own player.  Used for the
+    // enrolment preview, which is the only way to HEAR what would be enrolled
+    // before doing something that cannot be undone.
+    void playWav(const QByteArray &wav);
+    // `verb` is "deactivate" | "activate" | "delete".  One function for all
+    // three: they differ in the confirmation they demand, not in what they do
+    // afterwards.
+    void runGlobalAction(const QString &verb);
+    QString selectedGlobalSpeaker(QString *name) const;
 
     SessionController *m_controller = nullptr;
     QString m_editorId;
@@ -72,6 +87,20 @@ private:
     QLabel *m_registryStatus = nullptr;
     QTableWidget *m_speakers = nullptr;
     QLabel *m_saveResults = nullptr;
+
+    // ---- the global database tab -------------------------------------------
+    QTableWidget *m_global = nullptr;
+    QLabel *m_globalStatus = nullptr;
+    QLineEdit *m_globalReason = nullptr;
+    QPushButton *m_deactivateButton = nullptr;
+    QPushButton *m_activateButton = nullptr;
+    QPushButton *m_deleteButton = nullptr;
+    QPushButton *m_previewButton = nullptr;
+    QLabel *m_previewInfo = nullptr;
+
+    QMediaPlayer *m_player = nullptr;
+    QAudioOutput *m_audioOutput = nullptr;
+    QBuffer *m_audioBuffer = nullptr;
 
     AudioCapture *m_capture = nullptr;
     QTimer *m_timer = nullptr;
