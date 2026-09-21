@@ -1,4 +1,8 @@
-QT += widgets network multimedia multimediawidgets
+# No multimediawidgets: the subtitle window takes frames from a QVideoSink and
+# paints them itself, so there is no QVideoWidget left to link against.  That
+# is not a size saving - it is the fix for the caption being invisible over the
+# picture; see ui/SubtitleWindow.h.
+QT += widgets network multimedia
 
 CONFIG += c++17
 CONFIG -= app_bundle

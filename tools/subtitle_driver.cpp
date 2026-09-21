@@ -12,7 +12,7 @@
 //   g++ -fPIC -std=c++17 tools/subtitle_driver.cpp \
 //       $(ls build-client/*.o | grep -v '/main\.o$') \
 //       -I s2t-qt-client -I shared -I build-client \
-//       $(pkg-config --cflags --libs Qt6Widgets Qt6MultimediaWidgets Qt6Network) \
+//       $(pkg-config --cflags --libs Qt6Widgets Qt6Multimedia Qt6Network) \
 //       -o /tmp/subtitle_driver
 //
 // Run it on the real X11 session (DISPLAY=:1), not offscreen: the offscreen

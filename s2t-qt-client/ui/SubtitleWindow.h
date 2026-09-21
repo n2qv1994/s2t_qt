@@ -23,6 +23,7 @@
 
 #include <QList>
 #include <QString>
+#include <QVideoFrame>
 #include <QWidget>
 
 class AppConfig;
@@ -35,30 +36,52 @@ class QMediaPlayer;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
-class QStackedWidget;
-class QVideoWidget;
+class QVideoSink;
 QT_END_NAMESPACE
 
-// The translucent caption drawn over the picture.  A widget of its own rather
-// than a styled QLabel because it has to size itself to the text and stay
-// pinned to the bottom of whatever it is covering.
-class SubtitleOverlay : public QWidget
+// The picture and the caption over it, in ONE widget.
+//
+// This was a QVideoWidget with a translucent child painted on top, and on the
+// deployed RHEL host that child was never seen: QVideoWidget renders into a
+// surface of its own which the X server stacks *above* ordinary child widgets,
+// so an operator watched the film with no subtitles on it.  What made the bug
+// survive a check was that QWidget::grab() re-renders the widget tree and knows
+// nothing about window stacking - it produced a picture with the caption
+// plainly on it, taken in the same second as a screenshot that had none.
+//
+// Taking frames from a QVideoSink and painting them here removes the second
+// surface entirely: frame first, caption second, one paintEvent, one widget.
+// Whatever a screenshot shows is now what grab() shows, so the check that
+// missed this can see it.
+class SubtitleStage : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit SubtitleOverlay(QWidget *parent = nullptr);
+    explicit SubtitleStage(QWidget *parent = nullptr);
+
+    // Where QMediaPlayer is told to send its frames.
+    QVideoSink *sink() const { return m_sink; }
+
+    // False paints the "this source has no picture" plate instead of frames,
+    // and drops any frame still held from the last file.
+    void setHasPicture(bool hasPicture);
 
     // `settled` is what the pipeline has committed, `moving` is the interim
     // edge.  They are drawn differently: the edge is the part that is still
     // allowed to change, and showing it as though it were final is how a demo
     // ends up looking like it made a mistake it later "corrected".
-    void setText(const QString &settled, const QString &moving);
+    void setCaption(const QString &settled, const QString &moving);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
+    void paintCaption(QPainter &painter);
+
+    QVideoSink *m_sink = nullptr;
+    QVideoFrame m_frame;
+    bool m_hasPicture = false;
     QString m_settled;
     QString m_moving;
 };
@@ -85,11 +108,6 @@ private slots:
     void onPlayerPosition(qint64 ms);
     void onSeek(int value);
 
-protected:
-    // The caption is a child of the video surface, so it has to be told when
-    // that surface changes size - a child does not resize with its parent.
-    bool eventFilter(QObject *watched, QEvent *event) override;
-
 private:
     enum class Mode { Idle, File, Microphone };
 
@@ -107,10 +125,7 @@ private:
 
     QMediaPlayer *m_player = nullptr;
     QAudioOutput *m_audio = nullptr;
-    QVideoWidget *m_video = nullptr;
-    QStackedWidget *m_stage = nullptr;
-    QLabel *m_audioOnly = nullptr;
-    SubtitleOverlay *m_overlay = nullptr;
+    SubtitleStage *m_stage = nullptr;
     QPlainTextEdit *m_transcript = nullptr;
     QSlider *m_seek = nullptr;
     QLabel *m_status = nullptr;

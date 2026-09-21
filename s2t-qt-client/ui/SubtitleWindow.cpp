@@ -19,9 +19,9 @@
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QSlider>
-#include <QStackedWidget>
+#include <QTextLayout>
 #include <QUrl>
-#include <QVideoWidget>
+#include <QVideoSink>
 
 #include <algorithm>
 
@@ -37,6 +37,11 @@ const double kCaptionTailSec = 0.6;
 // it is where the whole transcript belongs.
 const int kCaptionChars = 140;
 
+// Behind the picture, and behind the "no picture" plate.  Deliberately dark
+// whatever the desktop scheme is: a white rectangle where a film should be is
+// read as a fault, not as "this source has no picture".
+const QColor kStageBackground(0x10, 0x10, 0x14);
+
 QString formatClock(double seconds)
 {
     if (seconds < 0.0)
@@ -50,19 +55,36 @@ QString formatClock(double seconds)
 } // namespace
 
 // ---------------------------------------------------------------------------
-// SubtitleOverlay
+// SubtitleStage
 // ---------------------------------------------------------------------------
 
-SubtitleOverlay::SubtitleOverlay(QWidget *parent) : QWidget(parent)
+SubtitleStage::SubtitleStage(QWidget *parent) : QWidget(parent)
 {
-    // Transparent to the mouse: the picture underneath still gets clicks, and
-    // an operator dragging the window does not have to avoid the caption.
-    setAttribute(Qt::WA_TransparentForMouseEvents);
-    setAttribute(Qt::WA_NoSystemBackground);
-    setAttribute(Qt::WA_TranslucentBackground);
+    // Every pixel is painted here, so let Qt skip erasing the widget first.
+    setAttribute(Qt::WA_OpaquePaintEvent);
+    setMinimumSize(160, 90);
+
+    m_sink = new QVideoSink(this);
+    // The decoder emits from its own thread; an auto connection to a sink that
+    // lives here queues the frame onto the GUI thread, which is the only place
+    // it may be painted.
+    connect(m_sink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &frame) {
+        m_frame = frame;
+        update();
+    });
 }
 
-void SubtitleOverlay::setText(const QString &settled, const QString &moving)
+void SubtitleStage::setHasPicture(bool hasPicture)
+{
+    m_hasPicture = hasPicture;
+    // Drop the last frame of the previous file, or an audio-only source would
+    // play under a still of the one before it.
+    if (!hasPicture)
+        m_frame = QVideoFrame();
+    update();
+}
+
+void SubtitleStage::setCaption(const QString &settled, const QString &moving)
 {
     if (settled == m_settled && moving == m_moving)
         return;
@@ -71,12 +93,33 @@ void SubtitleOverlay::setText(const QString &settled, const QString &moving)
     update();
 }
 
-void SubtitleOverlay::paintEvent(QPaintEvent *)
+void SubtitleStage::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+    painter.fillRect(rect(), kStageBackground);
+
+    if (m_frame.isValid()) {
+        QVideoFrame::PaintOptions options;
+        options.backgroundColor = kStageBackground;
+        options.aspectRatioMode = Qt::KeepAspectRatio;
+        m_frame.paint(&painter, rect(), options);
+    } else if (!m_hasPicture) {
+        painter.setPen(QColor(0x8a, 0x8a, 0x95));
+        painter.drawText(rect(), Qt::AlignCenter,
+                         QStringLiteral("Nguồn chỉ có âm thanh."));
+    }
+
+    // Caption last, in the same painter as the picture.  That ordering is the
+    // whole fix: nothing can stack above it because there is nothing else.
+    paintCaption(painter);
+}
+
+void SubtitleStage::paintCaption(QPainter &painter)
 {
     if (m_settled.isEmpty() && m_moving.isEmpty())
         return;
 
-    QPainter painter(this);
+    painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
 
@@ -94,31 +137,62 @@ void SubtitleOverlay::paintEvent(QPaintEvent *)
         m_moving.isEmpty() ? m_settled
                            : (m_settled.isEmpty() ? m_moving : m_settled + QLatin1Char(' ') + m_moving);
 
-    const QFontMetrics metrics(font);
-    QRect text = metrics.boundingRect(area, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap,
-                                      whole);
-    text.moveBottom(area.bottom());
+    // One layout, two colours - not two drawText() passes over each other.
+    //
+    // The old code painted the whole string in the edge colour and then the
+    // settled prefix in white on top of it, on the theory that a prefix wraps
+    // the same way as the string it starts.  It does not, once the box is
+    // bottom-aligned: a prefix with fewer lines is pinned to the *bottom* of
+    // the box, so the white words landed across the yellow last line and the
+    // caption read as two sentences printed on top of one another.  Nobody saw
+    // it while the caption itself was invisible on the deployed host.
+    //
+    // QTextLayout wraps once and colours by character range, so the two parts
+    // cannot disagree about where a line breaks.
+    QTextLayout layout(whole, font);
+    QTextOption option(Qt::AlignHCenter);
+    option.setWrapMode(QTextOption::WordWrap);
+    layout.setTextOption(option);
+
+    // Default pen (white) is the settled part; only the moving edge is
+    // recoloured, and when there is nothing settled the whole string is edge.
+    const int edgeStart = m_settled.isEmpty() ? 0 : m_settled.size() + 1;
+    if (edgeStart < whole.size() && !m_moving.isEmpty()) {
+        QTextLayout::FormatRange edge;
+        edge.start = edgeStart;
+        edge.length = whole.size() - edgeStart;
+        edge.format.setForeground(QColor(255, 214, 120));
+        layout.setFormats({edge});
+    }
+
+    layout.beginLayout();
+    qreal used = 0.0;
+    qreal widest = 0.0;
+    for (;;) {
+        QTextLine line = layout.createLine();
+        if (!line.isValid())
+            break;
+        line.setLineWidth(area.width());
+        line.setPosition(QPointF(0.0, used));
+        used += line.height();
+        widest = qMax(widest, line.naturalTextWidth());
+    }
+    layout.endLayout();
+
+    const QPointF origin(area.x(), area.bottom() - used);
 
     // A plate behind the text, because a subtitle over a bright frame is
     // otherwise unreadable and outlining every glyph costs more than it buys.
-    QRect plate = text.adjusted(-14, -8, 14, 8);
+    const QRectF plate =
+        QRectF(area.x() + (area.width() - widest) / 2.0, origin.y(), widest, used)
+            .adjusted(-14, -8, 14, 8);
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 165));
     painter.drawRoundedRect(plate, 8, 8);
 
-    // The settled part and the moving edge are drawn in one pass with two
-    // colours by painting the whole string, then the settled prefix over it.
-    // Simpler than laying out two blocks and it wraps identically.
-    painter.setPen(QColor(255, 214, 120)); // the edge: still allowed to change
-    painter.drawText(text, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap, whole);
-    if (!m_settled.isEmpty() && !m_moving.isEmpty()) {
-        painter.setPen(Qt::white);
-        painter.drawText(text, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap,
-                         m_settled + QLatin1Char(' '));
-    } else if (m_moving.isEmpty()) {
-        painter.setPen(Qt::white);
-        painter.drawText(text, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap, whole);
-    }
+    painter.setPen(Qt::white);
+    layout.draw(&painter, origin);
+    painter.restore();
 }
 
 // ---------------------------------------------------------------------------
@@ -150,21 +224,10 @@ SubtitleWindow::SubtitleWindow(SessionController *controller, AppConfig *config,
     bar->addWidget(m_clock);
     root->addLayout(bar);
 
-    // ---- stage: picture, or a plate saying there is none --------------------
+    // ---- stage: the picture and the caption on it ---------------------------
     auto *split = new QHBoxLayout;
 
-    m_stage = new QStackedWidget(this);
-    m_video = new QVideoWidget(m_stage);
-    m_audioOnly = new QLabel(QStringLiteral("Nguồn chỉ có âm thanh —\nphụ đề hiện ở khung bên phải."),
-                             m_stage);
-    m_audioOnly->setAlignment(Qt::AlignCenter);
-    // Deliberately dark whatever the desktop scheme is: this plate stands in
-    // for the video surface, and a white rectangle where the picture should be
-    // is read as a fault rather than as "this source has no picture".
-    m_audioOnly->setStyleSheet(QStringLiteral("background:#101014; color:#8a8a95;"));
-    m_stage->addWidget(m_video);
-    m_stage->addWidget(m_audioOnly);
-    m_stage->setCurrentWidget(m_audioOnly);
+    m_stage = new SubtitleStage(this);
     split->addWidget(m_stage, 3);
 
     m_transcript = new QPlainTextEdit(this);
@@ -174,12 +237,6 @@ SubtitleWindow::SubtitleWindow(SessionController *controller, AppConfig *config,
     split->addWidget(m_transcript, 2);
     root->addLayout(split, 1);
 
-    // The caption is a child of the video surface so it moves and resizes with
-    // it; a sibling would need its geometry recomputed on every layout change.
-    m_overlay = new SubtitleOverlay(m_video);
-    m_overlay->setGeometry(m_video->rect());
-    m_video->installEventFilter(this);
-
     m_seek = new QSlider(Qt::Horizontal, this);
     m_seek->setRange(0, 0);
     root->addWidget(m_seek);
@@ -188,7 +245,7 @@ SubtitleWindow::SubtitleWindow(SessionController *controller, AppConfig *config,
     m_player = new QMediaPlayer(this);
     m_audio = new QAudioOutput(this);
     m_player->setAudioOutput(m_audio);
-    m_player->setVideoOutput(m_video);
+    m_player->setVideoSink(m_stage->sink());
 
     connect(m_fileButton, &QPushButton::clicked, this, &SubtitleWindow::openFile);
     connect(m_micButton, &QPushButton::clicked, this, &SubtitleWindow::startMicrophone);
@@ -213,13 +270,6 @@ SubtitleWindow::SubtitleWindow(SessionController *controller, AppConfig *config,
 }
 
 SubtitleWindow::~SubtitleWindow() = default;
-
-bool SubtitleWindow::eventFilter(QObject *watched, QEvent *event)
-{
-    if (watched == m_video && event->type() == QEvent::Resize)
-        m_overlay->setGeometry(m_video->rect());
-    return QWidget::eventFilter(watched, event);
-}
 
 void SubtitleWindow::setMode(Mode mode)
 {
@@ -282,12 +332,9 @@ void SubtitleWindow::loadFile(const QString &path)
     m_words.clear();
     m_movingText.clear();
     m_transcript->clear();
-    m_overlay->setText(QString(), QString());
-
+    m_stage->setCaption(QString(), QString());
     const bool video = audio::hasVideoTrack(path);
-    m_stage->setCurrentWidget(video ? static_cast<QWidget *>(m_video)
-                                    : static_cast<QWidget *>(m_audioOnly));
-    m_overlay->setVisible(video);
+    m_stage->setHasPicture(video);
 
     SessionMeta meta;
     meta.title = m_sourceName;
@@ -310,9 +357,8 @@ void SubtitleWindow::startMicrophone()
     m_words.clear();
     m_movingText.clear();
     m_transcript->clear();
-    m_overlay->setText(QString(), QString());
-    m_stage->setCurrentWidget(m_audioOnly);
-    m_overlay->setVisible(false);
+    m_stage->setCaption(QString(), QString());
+    m_stage->setHasPicture(false);
     m_durationSec = 0.0;
 
     SessionMeta meta;
@@ -439,5 +485,5 @@ void SubtitleWindow::renderAt(double atSec)
     const bool atLiveEdge =
         m_mode == Mode::Microphone
         || (!m_words.isEmpty() && atSec >= m_words.last().endSec - kCaptionTailSec);
-    m_overlay->setText(settled, atLiveEdge ? m_movingText : QString());
+    m_stage->setCaption(settled, atLiveEdge ? m_movingText : QString());
 }
