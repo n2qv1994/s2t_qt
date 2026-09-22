@@ -172,14 +172,19 @@ Nếu bạn sửa gì trong `shared/proto/` mà không sửa phụ lục A, scri
 ngay.
 
 Lần đối chiếu gần nhất với một hệ thống đang chạy — máy RHEL, backend Triton,
-ngày **2026-09-04**: server báo **20 phương thức RPC** đã đăng ký, đúng bằng số
-liệt kê ở tài liệu này; `get_model_status` trả về 11/11 model `READY`;
-`get_pipeline_trace` trả `OK` với `enabled = false` (xem [5.10](#510-get_pipeline_trace));
-và một phiên `push_audio` thật chạy trọn vòng đời start → push → stop với
-`rev` tăng đều.
+ngày **2026-09-22**: server báo **25 phương thức RPC** đã đăng ký, đúng bằng số
+liệt kê ở tài liệu này; `get_pipeline_trace` trả `enabled = true` với 200 sự
+kiện đủ cả ba `stage` (xem [5.10](#510-get_pipeline_trace)); `ListGlobalSpeakers`
+đọc được 62 giọng trong DB chung; và một phiên `push_audio` thật chạy trọn vòng
+đời start → push → stop — 375 gói 160 ms — với bản chép trả về đã có dấu câu và
+viết hoa đầu câu.
 
-Từ **2026-09-21** `get_pipeline_trace` đã có dữ liệu thật; lần đối chiếu ở
-trên là trước thay đổi đó.
+Lần đối chiếu trước đó, ngày **2026-09-04**, con số là **20 phương thức** — đúng
+bằng số tài liệu này liệt kê lúc ấy — và `get_pipeline_trace` còn trả
+`enabled = false`. Năm phương thức chênh lệch là vòng đời DB giọng chung
+([6.6](#66-previewenrollment)–[6.8](#68-deactivateglobalspeaker--activateglobalspeaker--deleteglobalspeaker)),
+thêm vào ngày 2026-09-21. `get_model_status` trả 11/11 model `READY` ở lần đối
+chiếu đó và chưa được đo lại kể từ đấy.
 
 ---
 ## 2. Mã lỗi và chính sách thử lại

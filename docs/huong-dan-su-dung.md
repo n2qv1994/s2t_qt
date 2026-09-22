@@ -423,8 +423,7 @@ không kéo theo các cái còn lại.
 **Pipeline trace** (`F8`) — xem từng chặng pipeline đã nhận gì và làm gì với nó, theo số thứ tự
 sự kiện. Hai chế độ tách bạch: *realtime* chỉ giữ các thẻ mới nhất (không phình
 theo thời gian), *lịch sử* lật ngược về quá khứ theo trang. Nghe lại được audio
-thô của từng sự kiện và ghép nhiều span để nghe liền. Cần bật **pipeline trace**
-lúc tạo phiên.
+thô của từng sự kiện và ghép nhiều span để nghe liền.
 
 ![Cửa sổ Pipeline trace](images/04-pipeline-trace.png)
 
