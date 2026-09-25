@@ -163,8 +163,15 @@ void start(const QString &program, const QString &version)
     }
 
     field(QStringLiteral("Chương trình"), QStringLiteral("%1 %2").arg(program, version));
-    field(QStringLiteral("Biên dịch lúc"),
-          QStringLiteral("%1 %2").arg(QString::fromLatin1(__DATE__), QString::fromLatin1(__TIME__)));
+    // The executable's own timestamp, not __DATE__/__TIME__: those are frozen
+    // into whichever object file holds them, and an incremental build that
+    // does not recompile this file kept reporting the morning's build for a
+    // binary linked that evening - on the one line a remote reader uses to
+    // ask "which build is the tester on?".
+    field(QStringLiteral("Tệp chạy được build lúc"),
+          QFileInfo(QCoreApplication::applicationFilePath())
+              .lastModified()
+              .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
     field(QStringLiteral("Qt"), QString::fromLatin1(qVersion()));
     field(QStringLiteral("Hệ điều hành"),
           QStringLiteral("%1 (nhân %2, %3)")

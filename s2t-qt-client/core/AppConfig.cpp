@@ -85,3 +85,33 @@ QString AppConfig::tokenFromFile(const QString &path, QString *error)
     LOG_INFO(applog::cat::Config) << "token read from file" << path;
     return QString::fromUtf8(file.readAll()).trimmed();
 }
+
+QList<QPair<QString, QString>> AppConfig::describe() const
+{
+    const auto orUnset = [](const QString &value, const QString &unset) {
+        return value.isEmpty() ? unset : value;
+    };
+    const auto yesNo = [](bool value) {
+        return value ? QStringLiteral("bật") : QStringLiteral("tắt");
+    };
+    return {
+        {QStringLiteral("Máy chủ"), orUnset(serverTarget, QStringLiteral("(CHƯA ĐẶT)"))},
+        {QStringLiteral("Token"),
+         apiToken.isEmpty() ? QStringLiteral("CHƯA ĐẶT - mọi lệnh sẽ bị từ chối")
+                            : QStringLiteral("đã đặt")},
+        {QStringLiteral("Micro (id đã lưu)"),
+         inputDeviceId.isEmpty() ? QStringLiteral("(mặc định hệ thống)")
+                                 : QString::fromUtf8(inputDeviceId)},
+        {QStringLiteral("Tên thiết bị bắt buộc chứa"),
+         orUnset(expectedDeviceName, QStringLiteral("(bất kỳ)"))},
+        {QStringLiteral("Định dạng thu"),
+         QStringLiteral("%1 Hz / %2 kênh").arg(sampleRate).arg(channels)},
+        {QStringLiteral("Bộ đệm tại máy"), QStringLiteral("%1 s").arg(bufferSec)},
+        {QStringLiteral("Ứng dụng điều khiển mic"),
+         orUnset(micControlApp, QStringLiteral("(không)"))},
+        {QStringLiteral("Pipeline trace"), yesNo(pipelineTrace)},
+        {QStringLiteral("Phát tệp theo thời gian thực"), yesNo(paceFileReplay)},
+        {QStringLiteral("Log (đã lưu)"),
+         QStringLiteral("%1 / %2").arg(applog::modeName(logMode), applog::levelName(logLevel))},
+    };
+}

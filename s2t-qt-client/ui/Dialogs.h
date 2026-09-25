@@ -144,6 +144,15 @@ private slots:
     void browseTokenFile();
     void browseControlApp();
     void updateLogHint();
+    // Re-reads the input devices the OS reports, keeping the current choice
+    // if it is still there.  A microphone plugged in after this dialog opened
+    // is otherwise invisible until the whole dialog is closed and reopened.
+    void refreshDevices();
+    // Says, in the dialog, which microphone the current settings would
+    // actually open - resolved by the same function the recorder uses, so the
+    // two cannot disagree.  Without it the first sign that the device choice
+    // is unusable is a failed session.
+    void updateDeviceHint();
 
 private:
     AppConfig *m_config = nullptr;
@@ -151,6 +160,11 @@ private:
     QLineEdit *m_token = nullptr;
     QComboBox *m_device = nullptr;
     QLineEdit *m_expectedName = nullptr;
+    QLabel *m_deviceHint = nullptr;
+    // True while refreshDevices() is repopulating the combo, so its own
+    // currentIndexChanged does not read as the operator picking a device and
+    // overwrite the name guard they typed.
+    bool m_fillingDevices = false;
     QSpinBox *m_sampleRate = nullptr;
     QSpinBox *m_channels = nullptr;
     QDoubleSpinBox *m_bufferSec = nullptr;

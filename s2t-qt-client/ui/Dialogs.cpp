@@ -5,6 +5,7 @@
 #include "LogControls.h"
 #include "audio/AudioCapture.h"
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 
 #include <QAudioDevice>
 #include <QCheckBox>
@@ -602,20 +603,52 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
     tokenRow->addWidget(tokenBrowse);
     form->addRow(QStringLiteral("Bearer token"), tokenRow);
 
+    // Picking a microphone is one decision, so it is one row: the list, and a
+    // button to re-read it.  The name guard below is the same decision seen
+    // from the other side, and the hint under both says what the pair of them
+    // actually resolves to.
+    auto *deviceRow = new QHBoxLayout();
     m_device = new QComboBox(this);
-    m_device->addItem(QStringLiteral("(mặc định hệ thống)"), QByteArray());
-    for (const QAudioDevice &device : QMediaDevices::audioInputs())
-        m_device->addItem(device.description(), device.id());
-    const int index = m_device->findData(config->inputDeviceId);
-    m_device->setCurrentIndex(index >= 0 ? index : 0);
-    form->addRow(QStringLiteral("Micro"), m_device);
+    m_device->setToolTip(QStringLiteral(
+        "Thiết bị sẽ được thu. Chọn đúng tên ở đây là đủ - ô bên dưới tự điền "
+        "theo."));
+    deviceRow->addWidget(m_device, 1);
+    auto *deviceRefresh = new QPushButton(QStringLiteral("Tải lại"), this);
+    deviceRefresh->setToolTip(
+        QStringLiteral("Đọc lại danh sách thiết bị, sau khi vừa cắm thêm microphone."));
+    deviceRow->addWidget(deviceRefresh);
+    form->addRow(QStringLiteral("Micro"), deviceRow);
 
     m_expectedName = new QLineEdit(config->expectedDeviceName, this);
-    m_expectedName->setPlaceholderText(QStringLiteral("Speaker"));
+    m_expectedName->setPlaceholderText(QStringLiteral("(để trống: nhận mọi thiết bị)"));
     m_expectedName->setToolTip(QStringLiteral(
         "Tên thiết bị phải chứa chuỗi này. Chống trường hợp hệ điều hành tái sử "
-        "dụng endpoint sau khi rút USB mic và thu nhầm thiết bị khác."));
+        "dụng endpoint sau khi rút USB mic và thu nhầm thiết bị khác.\n\n"
+        "Chọn thiết bị ở ô trên thì ô này tự điền theo; để trống là chấp nhận "
+        "bất kỳ thiết bị nào."));
     form->addRow(QStringLiteral("Tên thiết bị bắt buộc chứa"), m_expectedName);
+
+    m_deviceHint = new QLabel(this);
+    m_deviceHint->setWordWrap(true);
+    form->addRow(QString(), m_deviceHint);
+
+    refreshDevices();
+    connect(deviceRefresh, &QPushButton::clicked, this, &SettingsDialog::refreshDevices);
+    connect(m_device, &QComboBox::currentIndexChanged, this, [this](int) {
+        if (m_fillingDevices)
+            return;
+        // The operator has just named the device they want, so the guard is
+        // set from that device rather than left holding whatever it held
+        // before.  A guard that no longer matches the chosen microphone is
+        // the one failure this dialog exists to prevent: it refuses the
+        // session at record time with a message about a name the operator
+        // never typed on this screen.
+        m_expectedName->setText(m_device->currentData().toByteArray().isEmpty()
+                                    ? QString()
+                                    : m_device->currentText());
+        updateDeviceHint();
+    });
+    connect(m_expectedName, &QLineEdit::textChanged, this, &SettingsDialog::updateDeviceHint);
 
     m_sampleRate = new QSpinBox(this);
     m_sampleRate->setRange(8000, 192000);
@@ -696,6 +729,57 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
     theme::sizeToContent(this, QSize(620, 400));
 }
 
+void SettingsDialog::refreshDevices()
+{
+    // Keep what is selected now, by id, and put it back afterwards: a refresh
+    // must not quietly move the operator onto a different microphone.
+    const QByteArray wanted = m_device->count() > 0 ? m_device->currentData().toByteArray()
+                                                    : m_config->inputDeviceId;
+    m_fillingDevices = true;
+    m_device->clear();
+    m_device->addItem(QStringLiteral("(mặc định hệ thống)"), QByteArray());
+    for (const QAudioDevice &device : QMediaDevices::audioInputs())
+        m_device->addItem(device.description(), device.id());
+    const int index = m_device->findData(wanted);
+    if (index >= 0) {
+        m_device->setCurrentIndex(index);
+    } else if (!wanted.isEmpty()) {
+        // The configured device is not here any more - unplugged, or this is
+        // a different machine.  Say so in the list rather than silently
+        // falling back to the default input, which is how somebody ends up
+        // recording a meeting on the wrong microphone.
+        m_device->addItem(QStringLiteral("(thiết bị đã lưu, hiện không thấy)"), wanted);
+        m_device->setCurrentIndex(m_device->count() - 1);
+    } else {
+        m_device->setCurrentIndex(0);
+    }
+    m_fillingDevices = false;
+    updateDeviceHint();
+}
+
+void SettingsDialog::updateDeviceHint()
+{
+    // Resolved by the recorder's own function, never by a copy of its rules.
+    // The whole point of the hint is that it cannot be right here and wrong
+    // when the session starts.
+    AudioDeviceChoice choice;
+    choice.deviceId = m_device->currentData().toByteArray();
+    choice.expectedName = m_expectedName->text().trimmed();
+    QString resolved;
+    QString error;
+    const QByteArray id = AudioCapture::resolveDeviceId(choice, &resolved, &error);
+
+    if (id.isEmpty()) {
+        m_deviceHint->setText(QStringLiteral("⚠ %1 Ghi âm sẽ không bắt đầu được.").arg(error));
+        m_deviceHint->setStyleSheet(
+            QStringLiteral("color: %1;").arg(theme::color(theme::Role::Danger).name()));
+        return;
+    }
+    m_deviceHint->setText(QStringLiteral("Sẽ thu bằng: %1").arg(resolved));
+    m_deviceHint->setStyleSheet(
+        QStringLiteral("color: %1;").arg(theme::color(theme::Role::TextMuted).name()));
+}
+
 void SettingsDialog::updateLogHint()
 {
     const applog::Mode chosen = logcontrols::selectedMode(m_logMode);
@@ -742,6 +826,13 @@ void SettingsDialog::browseControlApp()
 
 void SettingsDialog::applyToConfig() const
 {
+    // Snapshot first, so the journal can say what THIS save changed.  The
+    // header only records the configuration a run started with; a tester who
+    // switches microphone or server halfway through is otherwise invisible,
+    // and every later step reads as if it ran on the old settings.
+    const auto before = m_config->describe();
+    const QString tokenBefore = m_config->apiToken;
+
     m_config->serverTarget = m_server->text().trimmed();
     m_config->apiToken = m_token->text().trimmed();
     m_config->inputDeviceId = m_device->currentData().toByteArray();
@@ -760,4 +851,20 @@ void SettingsDialog::applyToConfig() const
     applog::setLevel(m_config->logLevel);
     applog::setMode(m_config->logMode);
     m_config->save();
+
+    const auto after = m_config->describe();
+    QStringList changes;
+    for (int i = 0; i < after.size() && i < before.size(); ++i) {
+        if (after.at(i).second != before.at(i).second)
+            changes << QStringLiteral("%1: '%2' → '%3'")
+                           .arg(after.at(i).first, before.at(i).second, after.at(i).second);
+    }
+    // describe() only says set / not set, so a replaced token needs its own
+    // line - still without the value.
+    if (m_config->apiToken != tokenBefore && !tokenBefore.isEmpty() && !m_config->apiToken.isEmpty())
+        changes << QStringLiteral("Token: đã thay bằng token khác");
+    LOG_STEP("user.settings",
+             changes.isEmpty() ? QStringLiteral("NGƯỜI DÙNG lưu Cấu hình · không đổi gì")
+                               : QStringLiteral("NGƯỜI DÙNG lưu Cấu hình · ") +
+                                     changes.join(QStringLiteral(" · ")));
 }

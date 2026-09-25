@@ -108,8 +108,8 @@ Mở **Công cụ → Cấu hình** (`Ctrl+,`) và điền:
 |---|---|
 | **Máy chủ đệm (host:port)** | Địa chỉ của `s2t-qt-server`. Trên máy này là **`127.0.0.1:8800`** — server chạy ngay trên cùng máy. **Không phải** địa chỉ tầng suy luận (`:8011`) — xem ghi chú ngay dưới bảng. |
 | **Bearer token** | Token xác thực của Server buffer. Bấm **Từ tệp...** để đọc từ tệp thay vì gõ tay. Token của tầng suy luận là việc của server và không nằm ở đây. |
-| **Micro** | Thiết bị thu. `(mặc định hệ thống)` để hệ điều hành tự chọn. |
-| **Tên thiết bị bắt buộc chứa** | Chuỗi mà tên thiết bị phải chứa. **Mặc định là `Speaker` — trên máy RHEL này thường phải sửa lại**, xem ghi chú dưới bảng. |
+| **Micro** | Thiết bị thu. `(mặc định hệ thống)` để hệ điều hành tự chọn. Nút **Tải lại** đọc lại danh sách sau khi vừa cắm thêm mic. Dòng chữ ngay dưới hai ô này nói trước **sẽ thu bằng mic nào**, hoặc chữ đỏ nếu với lựa chọn hiện tại ghi âm sẽ không bắt đầu được. |
+| **Tên thiết bị bắt buộc chứa** | Chuỗi mà tên thiết bị phải chứa. **Tự điền theo mic vừa chọn ở ô trên**; để trống là nhận mọi thiết bị. Cài mới thì mặc định để trống. Máy đã từng lưu `Speaker` (giá trị mặc định cũ) thì vẫn giữ `Speaker` — xem ghi chú dưới bảng. |
 | **Tần số lấy mẫu / Số kênh** | Mặc định 48000 Hz, 1 kênh. Phải là định dạng thiết bị hỗ trợ. Server tự hạ về 16 kHz mono trước khi đưa vào AI, nên không cần chỉnh theo AI. |
 | **Hàng đợi tối đa** | Số giây audio đã thu nhưng chưa được server xác nhận, được phép tồn đọng ở phía giao diện. Mặc định 60 s. |
 | **xvF3800 host-control** | Đường dẫn tới `xvf_host`, dùng cho nút bật/tắt lọc nhiễu phần cứng. **Máy RHEL này không có công cụ đó** — để trống, và mục *Lọc nhiễu* trong menu **Micro** sẽ báo là không dùng được. |
@@ -128,8 +128,9 @@ Cấu hình được lưu lại và tự nạp ở lần mở sau.
 > ### "Tên thiết bị bắt buộc chứa" — chỗ dễ vướng nhất trên RHEL
 >
 > Ô này là một **bộ lọc theo tên**: ứng dụng chỉ mở microphone nào có tên
-> *chứa* chuỗi đó. Mặc định là `Speaker`, và trên máy RHEL này tên thiết bị
-> thường không có chữ đó, nên phiên không mở được, kèm đúng câu:
+> *chứa* chuỗi đó. Bản cũ mặc định là `Speaker`, và máy nào đã lưu cấu hình từ
+> bản cũ thì vẫn còn giữ giá trị đó. Trên máy RHEL này tên thiết bị không có
+> chữ `Speaker`, nên phiên không mở được, kèm đúng câu:
 >
 > ```
 > Không tìm thấy microphone có tên chứa "Speaker".
@@ -146,8 +147,13 @@ Cấu hình được lưu lại và tự nạp ở lần mở sau.
 >    Trên máy này, mic tích hợp hiện ra là `Built-in Audio Analog Stereo` —
 >    không chứa chữ `Speaker`, nên đúng là ca hỏng nói trên.
 >
-> 2. Điền một mẩu tên đủ đặc trưng vào ô đó (ví dụ `Built-in`, `USB`), **hoặc**
->    để trống ô này nếu máy chỉ có một mic.
+> 2. Cách nhanh nhất: mở **Cấu hình** rồi **chọn lại mic ở ô Micro**, ô tên sẽ
+>    tự điền theo và dòng chữ bên dưới báo *"Sẽ thu bằng: …"*. Hoặc tự điền một
+>    mẩu tên đủ đặc trưng (ví dụ `Built-in`, `USB`), hoặc để trống ô này nếu
+>    máy chỉ có một mic.
+>
+> Đầu nhật ký quy trình (mục 8) cũng có dòng **"Bấm Ghi âm sẽ thu bằng"**, nên
+> gặp ca này ở máy khác thì chỉ cần xem tệp là biết.
 >
 > **Để trống thì mất gì.** Ràng buộc tên có lý do của nó: khi rút USB mic,
 > PipeWire/PulseAudio có thể trao lại đúng chỗ đó cho một thiết bị khác (mic
@@ -599,8 +605,16 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 > === KẾT THÚC ===        vì sao dừng
 > ```
 >
+> Phần **MÔI TRƯỜNG** của giao diện có thêm hai khối: **CẤU HÌNH ĐANG CHẠY**
+> (token chỉ ghi *đã đặt* / *CHƯA ĐẶT*, không bao giờ ghi giá trị, nên gửi tệp
+> đi được) và **THIẾT BỊ THU ÂM** (mọi mic hệ điều hành báo, và dòng *"Bấm Ghi
+> âm sẽ thu bằng"*). Mỗi lần bấm lưu **Cấu hình** giữa chừng là một bước
+> `user.settings` ghi lại đúng những mục đã đổi.
+>
 > **Không có mục `=== KẾT THÚC ===` ở cuối nghĩa là tiến trình bị giết hoặc bị
-> sập** — đó cũng là một thông tin, nên đừng cắt bớt tệp trước khi gửi.
+> sập** — đó cũng là một thông tin, nên đừng cắt bớt tệp trước khi gửi. Bị tắt
+> có trật tự (đăng xuất, tắt máy, `kill`, `run_s2t.sh stop`) thì *có* mục
+> KẾT THÚC, với lý do *"bị tắt bằng tín hiệu SIGTERM"*: đó không phải sự cố.
 >
 > Bên cạnh nó còn `s2t_qt.log` — nhật ký kỹ thuật chi tiết (từng lệnh gRPC,
 > từng khung HTTP/2). Gửi kèm nếu đội phát triển hỏi tới; nó luôn được ghi, kể
@@ -991,4 +1005,5 @@ QT_QPA_PLATFORM=offscreen \
 
 Kiểm tra bản vừa chạy đúng là bản mong muốn: mở
 `~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log` mới nhất, phần
-**MÔI TRƯỜNG** ghi rõ ngày giờ biên dịch và toàn bộ cấu hình đang chạy.
+**MÔI TRƯỜNG** ghi rõ *"Tệp chạy được build lúc"* và toàn bộ cấu hình đang
+chạy.

@@ -71,6 +71,14 @@ if [[ -z $qmake ]]; then
     exit 2
 fi
 
+# A single half is built in its own subdirectory of $out - the same place the
+# subdirs build puts it - never in $out itself.  Building it in $out overwrote
+# the top-level subdirs Makefile, scattered the half's objects next to it, and
+# failed to link because $out/s2t-qt-client is already a directory.
+if [[ $what != "cả hai" ]]; then
+    out="$out/$what"
+fi
+
 echo "qmake : $qmake ($("$qmake" -query QT_VERSION))"
 echo "gcc   : $(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion)"
 echo "build : $what"

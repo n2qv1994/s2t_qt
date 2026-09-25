@@ -18,6 +18,8 @@
 #include "core/Logger.h"
 
 #include <QByteArray>
+#include <QList>
+#include <QPair>
 #include <QString>
 
 class AppConfig
@@ -38,7 +40,18 @@ public:
     QString apiToken;
 
     QByteArray inputDeviceId;
-    QString expectedDeviceName = QStringLiteral("Speaker");
+    // The name a device must contain before it will be opened.  EMPTY by
+    // default, which means "any input", and the settings dialog fills it in
+    // from whatever microphone the operator picks.
+    //
+    // It used to default to "Speaker" - the name of the xvf3800 board this
+    // started on - and that is a default that matches almost nothing else.
+    // On the RHEL machine the only microphone is "Built-in Audio Analog
+    // Stereo", so a fresh install refused to record at all, with a message
+    // naming a string the operator had never typed.  A guard is worth having
+    // (see AudioCapture.h) but it has to describe the device in front of the
+    // person, not the device this project was first written against.
+    QString expectedDeviceName;
     int sampleRate = 48000;
     int channels = 1;
     // How much un-ACKed capture may pile up on this machine before the
@@ -65,6 +78,14 @@ public:
     applog::Level logLevel = applog::Level::Debug;
 
     static QString tokenFromFile(const QString &path, QString *error);
+
+    // Every setting as (label, value) for a person to read - the run journal's
+    // header prints it, and the settings dialog diffs two of these to journal
+    // what an operator changed.  One list, so the two cannot drift apart.
+    //
+    // The token is reported as set / not set and never by value: the journal
+    // is the file a tester is told to send to somebody else.
+    QList<QPair<QString, QString>> describe() const;
 };
 
 #endif // APPCONFIG_H

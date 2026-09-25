@@ -11,9 +11,16 @@
 #include "ui/Theme.h"
 
 #include <QApplication>
+#include <QAudioDevice>
+#include <QMediaDevices>
 #include <QMetaType>
 #include <QStringList>
 #include <QTextStream>
+#include <QTimer>
+
+#ifdef Q_OS_UNIX
+#include <csignal>
+#endif
 
 // The GUI binary is linked for the windows subsystem, so it has no console of
 // its own and stdout goes nowhere.  applog::ensureConsole() borrows the
@@ -37,7 +44,71 @@ static bool displayAvailable()
     return !qEnvironmentVariableIsEmpty("DISPLAY")
         || !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY");
 }
+
+// Without this, SIGTERM - logging out, shutting down, `run_s2t.sh stop`, a
+// test harness - killed the client outright, and the run journal it left had
+// no closing section: exactly what a crash looks like.  A remote reader would
+// start hunting a crash that never happened.
+volatile std::sig_atomic_t g_signal = 0;
+
+extern "C" void onSignal(int number)
+{
+    g_signal = number;
+}
+
+static QString signalName(int number)
+{
+    switch (number) {
+    case SIGTERM: return QStringLiteral("SIGTERM");
+    case SIGINT: return QStringLiteral("SIGINT");
+    case SIGHUP: return QStringLiteral("SIGHUP");
+    default: return QString::number(number);
+    }
+}
 #endif
+
+// The part of the journal header only the client can write: what it is
+// configured to do, and what microphones the machine actually has.  Both were
+// the first two questions of every remote mic problem so far - the "Speaker"
+// name guard on a machine whose only input is "Built-in Audio Analog Stereo"
+// would have been one glance at this block.
+//
+// Read from its own AppConfig rather than MainWindow's so it is written before
+// the window exists, while the header is still one block.
+static void writeJournalHeader()
+{
+    AppConfig config;
+    config.load();
+    runjournal::section(QStringLiteral("CẤU HÌNH ĐANG CHẠY"));
+    for (const auto &entry : config.describe())
+        runjournal::field(entry.first, entry.second);
+
+    runjournal::section(QStringLiteral("THIẾT BỊ THU ÂM"));
+    const QList<QAudioDevice> inputs = QMediaDevices::audioInputs();
+    const QByteArray defaultId = QMediaDevices::defaultAudioInput().id();
+    if (inputs.isEmpty())
+        runjournal::field(QStringLiteral("(không có)"),
+                          QStringLiteral("hệ điều hành không báo thiết bị thu nào"));
+    for (int i = 0; i < inputs.size(); ++i) {
+        const QAudioDevice &device = inputs.at(i);
+        runjournal::field(QStringLiteral("Thiết bị %1").arg(i + 1),
+                          QStringLiteral("%1%2  [id %3]")
+                              .arg(device.description(),
+                                   device.id() == defaultId ? QStringLiteral(" (mặc định)")
+                                                            : QString(),
+                                   QString::fromUtf8(device.id())));
+    }
+    // Resolved by the recorder's own function, so this line says what a
+    // Record press would really open - or why it would refuse.
+    AudioDeviceChoice choice;
+    choice.deviceId = config.inputDeviceId;
+    choice.expectedName = config.expectedDeviceName;
+    QString resolved;
+    QString error;
+    const QByteArray id = AudioCapture::resolveDeviceId(choice, &resolved, &error);
+    runjournal::field(QStringLiteral("Bấm Ghi âm sẽ thu bằng"),
+                      id.isEmpty() ? QStringLiteral("KHÔNG MỞ ĐƯỢC - %1").arg(error) : resolved);
+}
 
 int main(int argc, char *argv[])
 {
@@ -155,6 +226,7 @@ int main(int argc, char *argv[])
     // above have all returned by now - and before the first window, so the
     // very first thing a tester does is already inside it.
     runjournal::start(QStringLiteral("s2t-qt-client"), QCoreApplication::applicationVersion());
+    writeJournalHeader();
 
     int code = 0;
     {
@@ -162,13 +234,38 @@ int main(int argc, char *argv[])
         window.show();
         LOG_INFO(applog::cat::App) << "main window shown - entering the event loop";
         LOG_STEP("app.ready", QStringLiteral("cửa sổ chính đã mở, sẵn sàng nhận thao tác"));
+#ifdef Q_OS_UNIX
+        // Same pattern as the server: the handler only sets a flag.  exit()
+        // rather than closing the window, because closeEvent may ask a
+        // question, and at logout nobody is there to answer it - the session
+        // manager would SIGKILL us in the middle of the dialog instead.
+        std::signal(SIGTERM, onSignal);
+        std::signal(SIGINT, onSignal);
+        std::signal(SIGHUP, onSignal);
+        QTimer signalPoll;
+        QObject::connect(&signalPoll, &QTimer::timeout, &app, []() {
+            if (!g_signal)
+                return;
+            LOG_INFO(applog::cat::App) << "signal" << int(g_signal) << "received - shutting down";
+            LOG_STEP("app.signal", QStringLiteral("nhận tín hiệu %1 từ hệ điều hành - thoát")
+                                       .arg(signalName(g_signal)));
+            QCoreApplication::exit(128 + g_signal);
+        });
+        signalPoll.start(200);
+#endif
         code = QApplication::exec();
         LOG_INFO(applog::cat::App) << "event loop finished with code" << code;
     }
     // After the window, so everything the controller logs while it stops the
     // worker, the poller and the RPC lanes is still inside the journal.
-    runjournal::finish(code == 0 ? QStringLiteral("người dùng đóng ứng dụng (mã 0)")
-                                 : QStringLiteral("thoát với mã %1").arg(code));
+    QString reason = code == 0 ? QStringLiteral("người dùng đóng ứng dụng (mã 0)")
+                               : QStringLiteral("thoát với mã %1").arg(code);
+#ifdef Q_OS_UNIX
+    if (g_signal)
+        reason = QStringLiteral("bị tắt bằng tín hiệu %1 (đăng xuất, tắt máy, hoặc lệnh kill)")
+                     .arg(signalName(g_signal));
+#endif
+    runjournal::finish(reason);
     applog::shutdown();
     return code;
 }
