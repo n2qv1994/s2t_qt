@@ -3,6 +3,8 @@
 #include "audio/AudioCapture.h"
 #include "audio/MicDenoise.h"
 #include "core/Logger.h"
+#include "core/RunJournal.h"
+#include "core/AppConfig.h"
 #include "core/SelfTest.h"
 #include "core/SessionTypes.h"
 #include "proto/AsrSession.h"
@@ -56,6 +58,12 @@ int main(int argc, char *argv[])
     // saying so.  The binary's name is cosmetic; this one is a data path.
     QCoreApplication::setApplicationName(QStringLiteral("s2t_qt"));
     QCoreApplication::setOrganizationName(QStringLiteral("s2t"));
+    // Set here and not left at the default empty string: it is what the run
+    // journal's header reports, and a journal that cannot say which build
+    // produced it answers the first question of a remote diagnosis with a
+    // blank.  Kept in step with S2T_SERVER_VERSION by hand - the two halves
+    // are released together.
+    QCoreApplication::setApplicationVersion(QStringLiteral(S2T_CLIENT_VERSION));
     // First thing after that, so a failure in any of the startup paths below
     // is already on the record.
     applog::initFromArguments(args);
@@ -143,14 +151,24 @@ int main(int argc, char *argv[])
     // before the logger is.  Otherwise shutdown() closes the sink and every
     // teardown line after it has to reopen the file it just closed, under a
     // "logger stopping" marker that is not yet true.
+    // Opened once the GUI is definitely going to exist - the headless modes
+    // above have all returned by now - and before the first window, so the
+    // very first thing a tester does is already inside it.
+    runjournal::start(QStringLiteral("s2t-qt-client"), QCoreApplication::applicationVersion());
+
     int code = 0;
     {
         MainWindow window;
         window.show();
         LOG_INFO(applog::cat::App) << "main window shown - entering the event loop";
+        LOG_STEP("app.ready", QStringLiteral("cửa sổ chính đã mở, sẵn sàng nhận thao tác"));
         code = QApplication::exec();
         LOG_INFO(applog::cat::App) << "event loop finished with code" << code;
     }
+    // After the window, so everything the controller logs while it stops the
+    // worker, the poller and the RPC lanes is still inside the journal.
+    runjournal::finish(code == 0 ? QStringLiteral("người dùng đóng ứng dụng (mã 0)")
+                                 : QStringLiteral("thoát với mã %1").arg(code));
     applog::shutdown();
     return code;
 }

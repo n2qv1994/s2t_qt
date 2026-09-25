@@ -4,6 +4,7 @@
 #include "backend/TritonBackend.h"
 
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -272,6 +273,9 @@ grpc::Status BufferHub::startSession(const asr::StartSessionRequest &request,
     if (!BackendSessionConfig::validateJson(request.configJson, &configError)) {
         LOG_WARN(applog::cat::Session)
             << "start_session from" << client << "refused -" << configError;
+        LOG_STEP("session.refused",
+                 QStringLiteral("client %1 · TỪ CHỐI mở phiên: %2 · cấu hình gửi lên: %3")
+                     .arg(client, configError, request.configJson));
         grpc::Status status;
         status.code = grpc::InvalidArgument;
         status.message = configError;
@@ -570,6 +574,11 @@ void BufferHub::reap()
         LOG_WARN(applog::cat::Session)
             << "recovered session" << ref->sessionId() << "was never claimed after"
             << m_config.orphanTimeoutSec << "seconds - closing it upstream";
+        LOG_STEP("session.orphan",
+                 QStringLiteral("phiên %1 dựng lại sau khởi động nhưng không client nào quay lại "
+                                "sau %2 s · tự đóng")
+                     .arg(ref->sessionId())
+                     .arg(m_config.orphanTimeoutSec));
         // Asked for, not waited for.  This runs on the thread that accepts
         // connections; the forwarder does the drain and the stop_session on its
         // own thread, and the next reap tick sees the session finished.

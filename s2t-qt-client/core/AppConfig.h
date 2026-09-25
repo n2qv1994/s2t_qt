@@ -8,6 +8,13 @@
 #ifndef APPCONFIG_H
 #define APPCONFIG_H
 
+// The client's released version, reported by --version, by the About box and
+// - the reason it has to exist at all - in the header of every run journal.
+// Kept in step by hand with S2T_SERVER_VERSION in s2t-qt-server/ServerConfig.h:
+// the two halves ship together and a mismatch between them is itself the sort
+// of thing a journal is read to find.
+#define S2T_CLIENT_VERSION "1.0"
+
 #include "core/Logger.h"
 
 #include <QByteArray>

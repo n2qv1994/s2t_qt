@@ -471,6 +471,36 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 
 ## 8. Nhật ký và chẩn đoán
 
+> ### Nếu chỉ cần gửi một tệp về cho đội phát triển: gửi **nhật ký quy trình**
+>
+> Mỗi lần chạy, ứng dụng tự tạo một tệp ghi lại **từng bước đã làm**, theo thứ
+> tự, kèm môi trường máy đang chạy. Không phải bật gì cả.
+>
+> - **Tên tệp**: `quy-trinh-s2t-qt-client-<ngày>-<giờ>-<pid>.log`
+>   (nửa máy chủ: `quy-trinh-s2t-qt-server-...`).
+> - **Chỗ để tệp**: mở **Công cụ → Nhật ký & chẩn đoán** (`F12`), dòng đầu tab
+>   *Nhật ký* ghi sẵn đường dẫn, và nút **Mở thư mục log** mở đúng thư mục đó.
+>   - Windows: `%LOCALAPPDATA%\s2t\s2t_qt\logs\`
+>   - Linux: `~/.local/share/s2t/s2t_qt/logs/`
+> - **Gửi tệp mới nhất** — mỗi lần mở ứng dụng là một tệp mới, nên tệp có giờ
+>   trùng với lúc xảy ra sự cố chính là tệp cần gửi. Ứng dụng giữ 40 tệp gần
+>   nhất rồi tự xoá dần.
+>
+> Tệp đó đọc được bằng Notepad và có ba phần:
+>
+> ```
+> === MÔI TRƯỜNG ===      máy nào, bản nào, cấu hình gì, mic nào
+> === CÁC BƯỚC ĐÃ CHẠY === từng thao tác và từng sự cố, kèm giờ
+> === KẾT THÚC ===        vì sao dừng
+> ```
+>
+> **Không có mục `=== KẾT THÚC ===` ở cuối nghĩa là tiến trình bị giết hoặc bị
+> sập** — đó cũng là một thông tin, nên đừng cắt bớt tệp trước khi gửi.
+>
+> Bên cạnh nó còn `s2t_qt.log` — nhật ký kỹ thuật chi tiết (từng lệnh gRPC,
+> từng khung HTTP/2). Gửi kèm nếu đội phát triển hỏi tới; nó luôn được ghi, kể
+> cả khi chế độ đang là `Debug`.
+
 Menu **Công cụ → Nhật ký & chẩn đoán** (`F12`) mở cửa sổ *Nhật ký & Chẩn đoán*.
 
 ### 8.1 Tab Nhật ký
@@ -483,8 +513,10 @@ Xem trực tiếp mọi việc ứng dụng đang làm.
 đủ để trả lời "chậm ở đâu" mà không cần bắt gói mạng. Góc dưới bên phải đếm số
 dòng, số cảnh báo và số lỗi đang có trong bộ đệm.*
 
-- **Chế độ** — `Debug` in ra console (chỉ thấy nếu mở ứng dụng từ cửa sổ lệnh);
-  `Develop` ghi ra tệp, luôn đọc lại được. Đổi là áp dụng ngay và được ghi nhớ.
+- **Chế độ** — quyết định có in kèm ra console hay không. **Tệp thì luôn được
+  ghi ở cả hai chế độ**: `Debug` in ra console (chỉ thấy nếu mở ứng dụng từ cửa
+  sổ lệnh) *và* ghi tệp; `Develop` chỉ ghi tệp. Trước 2026-09-25, `Debug`
+  không ghi tệp nào cả — nghĩa là mặc định không có gì để gửi về khi có sự cố.
 - **Mức ghi** — quyết định dòng nào được ghi:
 
   | Mức | Dùng khi |

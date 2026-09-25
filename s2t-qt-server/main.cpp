@@ -4,6 +4,7 @@
 #include "ServerConfig.h"
 #include "ServerSelfTest.h"
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 #include "grpc/GrpcServer.h"
 
 #include <QCoreApplication>
@@ -159,6 +160,21 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // The journal opens here, after the configuration is known and before
+    // anything can happen that somebody might later have to explain.  Every
+    // setting goes into its header: a run is only reproducible if the file
+    // says what it was run with, and "which config was that server on?" is the
+    // first question of every remote diagnosis.
+    runjournal::start(QStringLiteral("s2t-qt-server"), QStringLiteral(S2T_SERVER_VERSION));
+    runjournal::section(QStringLiteral("CẤU HÌNH ĐANG CHẠY"));
+    for (const QString &line : config.describe()) {
+        const int colon = line.indexOf(QLatin1Char(':'));
+        if (colon > 0)
+            runjournal::field(line.left(colon).trimmed(), line.mid(colon + 1).trimmed());
+        else
+            runjournal::field(QStringLiteral("(cấu hình)"), line);
+    }
+
     QHostAddress address;
     if (!address.setAddress(config.listenAddress)) {
         if (config.listenAddress == QLatin1String("*")
@@ -207,6 +223,11 @@ int main(int argc, char *argv[])
             QTextStream(stdout).flush();
             LOG_INFO(applog::cat::App) << "ready on" << config.listenAddress << ":"
                                        << server.port();
+            LOG_STEP("server.ready",
+                     QStringLiteral("đang lắng nghe %1:%2, khôi phục %3 phiên từ nhật ký")
+                         .arg(config.listenAddress)
+                         .arg(server.port())
+                         .arg(hub.recoveredCount()));
 
             std::signal(SIGINT, onSignal);
             std::signal(SIGTERM, onSignal);
@@ -215,6 +236,8 @@ int main(int argc, char *argv[])
             QObject::connect(&signalPoll, &QTimer::timeout, &app, [&app]() {
                 if (g_signalled) {
                     LOG_INFO(applog::cat::App) << "signal received - shutting down";
+                    LOG_STEP("server.signal",
+                             QStringLiteral("nhận tín hiệu dừng - bắt đầu tắt có trật tự"));
                     QTextStream(stdout) << "\nĐang tắt...\n";
                     QTextStream(stdout).flush();
                     app.quit();
@@ -233,6 +256,10 @@ int main(int argc, char *argv[])
         hub.shutdown();
         server.stop();
     }
+    // Before the logger, so the closing section is written while there is
+    // still somewhere for its own log copy to go.
+    runjournal::finish(code == 0 ? QStringLiteral("tắt bình thường (mã 0)")
+                                 : QStringLiteral("thoát với mã %1").arg(code));
     applog::shutdown();
     return code;
 }

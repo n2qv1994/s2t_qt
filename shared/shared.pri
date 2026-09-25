@@ -26,7 +26,8 @@ SOURCES += \
     $$PWD/grpc/GrpcChannel.cpp \
     $$PWD/grpc/AsrClient.cpp \
     $$PWD/audio/Pcm16k.cpp \
-    $$PWD/core/Logger.cpp
+    $$PWD/core/Logger.cpp \
+    $$PWD/core/RunJournal.cpp
 
 HEADERS += \
     $$PWD/proto/ProtoWire.h \
@@ -41,4 +42,5 @@ HEADERS += \
     $$PWD/grpc/AsrClient.h \
     $$PWD/grpc/Methods.h \
     $$PWD/audio/Pcm16k.h \
-    $$PWD/core/Logger.h
+    $$PWD/core/Logger.h \
+    $$PWD/core/RunJournal.h

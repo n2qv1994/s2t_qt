@@ -176,7 +176,10 @@ bool openFileLocked()
                 QStringLiteral("[log] cannot open the log file %1 (%2); falling back to console")
                     .arg(s.filePath, s.file.errorString()));
         }
-        s.mode = Mode::Debug;
+        // The mode is NOT changed here.  It used to be forced to Debug, which
+        // was a quiet lie once the file became the always-on sink: the caller
+        // reads the mode to decide whether a console copy is still needed, and
+        // flipping it under them dropped the line entirely.
         return false;
     }
     s.fileBytes = s.file.size();
@@ -199,9 +202,20 @@ void emitLine(Level level, const char *category, const QString &line)
         if (s.recent.size() > kRecentMax + kRecentTrimBlock)
             s.recent.remove(0, kRecentTrimBlock);
 
-        if (s.mode == Mode::Debug || !openFileLocked()) {
+        // The file is written in BOTH modes, and the mode now only decides
+        // whether the console gets a copy as well.
+        //
+        // It used to be one or the other, with Debug - the default - meaning
+        // "console only".  That made the common case the one with no file at
+        // all: somebody testing on a machine we cannot reach double-clicks the
+        // program, hits a problem, and there is nothing to send back because
+        // the log went to a console nobody was watching.  A log that has to be
+        // switched on is a log nobody has when it turns out to be needed.
+        const bool wantConsole = (s.mode == Mode::Debug);
+        const bool haveFile = openFileLocked();
+        if (wantConsole || !haveFile)
             writeConsole(line);
-        } else {
+        if (haveFile) {
             const QByteArray bytes = line.toUtf8() + '\n';
             s.file.write(bytes);
             // Flushed per line: the reason to keep a file at all is to still

@@ -1,6 +1,7 @@
 #include "BufferService.h"
 
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 
 #include <QJsonArray>
 #include <QSet>
@@ -264,6 +265,10 @@ void BufferService::registerMethods()
                     resp->sessionId = req.sessionId;
                     resp->bytesRemoved = bytes;
                     resp->deletedAt = nowSeconds();
+                    LOG_STEP("session.delete",
+                             QStringLiteral("phiên %1 bị xoá vĩnh viễn bởi %2 · gỡ %3 byte audio")
+                                 .arg(req.sessionId, req.editorId.trimmed())
+                                 .arg(bytes));
                     return grpc::Status();
                 });
         });
@@ -982,6 +987,12 @@ void BufferService::registerMethods()
                             req.sessionId, QStringLiteral("publish_speaker"),
                             QStringLiteral("{\"editor\":\"%1\",\"speaker\":\"%2\",\"name\":\"%3\"}")
                                 .arg(req.editorId, selection.sessionSpeakerId, globalName));
+                        LOG_STEP("speaker.publish",
+                                 QStringLiteral("phiên %1 · %2 đưa giọng %3 lên DB chung với tên "
+                                                "'%4' · %5 đoạn đã ghi")
+                                     .arg(req.sessionId, req.editorId.trimmed(),
+                                          selection.sessionSpeakerId, globalName)
+                                     .arg(enrolled));
                         resp->results.append(result);
                     }
                     return grpc::Status();

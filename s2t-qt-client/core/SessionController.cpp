@@ -1,6 +1,7 @@
 #include "SessionController.h"
 
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 #include "SessionWorker.h"
 #include "StatePoller.h"
 #include "audio/MediaDecode.h"
@@ -249,6 +250,17 @@ void SessionController::startMicrophone(bool restrict, const QStringList &expect
     LOG_INFO(applog::cat::Audio)
         << "opening the microphone before creating the session -" << settings.sampleRate << "Hz /"
         << settings.channels << "ch, expected device=" << m_config->expectedDeviceName;
+    LOG_STEP("user.record",
+             QStringLiteral("NGƯỜI DÙNG bấm Ghi âm từ micro · tiêu đề '%1' · chế độ %2 · mức bảo "
+                            "mật '%3' · người dự [%4] · nhận diện %5 · mic mong đợi '%6' %7 Hz/%8 kênh")
+                 .arg(meta.title, meta.mode, meta.securityLevel,
+                      meta.participants.join(QStringLiteral(", ")),
+                      restrict ? QStringLiteral("giới hạn [%1]").arg(expected.join(QStringLiteral(", ")))
+                               : QStringLiteral("không giới hạn"),
+                      m_config->expectedDeviceName.isEmpty() ? QStringLiteral("(bất kỳ)")
+                                                             : m_config->expectedDeviceName)
+                 .arg(settings.sampleRate)
+                 .arg(settings.channels));
     QMetaObject::invokeMethod(m_capture, "start", Qt::QueuedConnection,
                               Q_ARG(AudioDeviceChoice, deviceChoice()));
 }
@@ -501,6 +513,9 @@ void SessionController::onCaptureStarted(const QString &deviceName)
         // and the honest answer, once the device is back, is neither.
         setError(QString());
         setMicStatus(m_worker->isPaused() ? MicStatus::Paused : MicStatus::Recording);
+        LOG_STEP("mic.back",
+                 QStringLiteral("microphone '%1' trở lại · ghi tiếp cùng phiên %2")
+                     .arg(deviceName, m_sessionId));
     }
     emit statusUpdated();
 }
@@ -536,6 +551,11 @@ void SessionController::onDeviceLost(const QString &reason)
     LOG_ERROR(applog::cat::Audio)
         << "microphone lost mid-session:" << reason << "- keeping session" << m_sessionId
         << "and discarding" << m_queue.pendingBytes() << "unsent bytes";
+    LOG_STEP("mic.lost",
+             QStringLiteral("MẤT MICROPHONE giữa phiên %1 · %2 · bỏ %3 byte chưa gửi · phiên "
+                            "được giữ, đang chờ cắm lại")
+                 .arg(m_sessionId.isEmpty() ? QStringLiteral("(chưa có id)") : m_sessionId, reason)
+                 .arg(m_queue.pendingBytes()));
     const QString warning = QStringLiteral(
                                 "Microphone bị ngắt khi đang ghi. Phiên được tạm dừng; "
                                 "cắm lại mic để tiếp tục cùng phiên. %1")
@@ -568,6 +588,9 @@ void SessionController::onSessionStarted(const QString &sessionId)
     LOG_INFO(applog::cat::Session)
         << "session created on the server: id=" << sessionId << "source=" << m_sourceName
         << "speakerFilter=" << m_speakerFilter;
+    LOG_STEP("session.started",
+             QStringLiteral("máy chủ đã tạo phiên %1 · nguồn: %2 · máy chủ %3")
+                 .arg(sessionId, m_sourceName, m_config->serverTarget));
     m_sessionId = sessionId;
     m_model.resetForSession(sessionId);
     if (m_poller)
@@ -616,6 +639,13 @@ void SessionController::onWorkerFinished(const FinishedSession &summary)
         << "session finished cleanly: id=" << summary.sessionId
         << "source=" << summary.sourceName << "duration=" << summary.durationSec
         << "s rev=" << summary.revision;
+    LOG_STEP("session.finished",
+             QStringLiteral("phiên %1 KẾT THÚC BÌNH THƯỜNG · %2 s audio đã gửi · bản chép %3 · "
+                            "nguồn %4")
+                 .arg(summary.sessionId)
+                 .arg(summary.durationSec, 0, 'f', 2)
+                 .arg(summary.revision)
+                 .arg(summary.sourceName));
     m_finishedSessions.removeIf(
         [&summary](const FinishedSession &item) { return item.sessionId == summary.sessionId; });
     m_finishedSessions.append(summary);
@@ -627,6 +657,10 @@ void SessionController::onWorkerFinished(const FinishedSession &summary)
 void SessionController::onWorkerFailed(const QString &message)
 {
     LOG_ERROR(applog::cat::Session) << "session" << m_sessionId << "failed:" << message;
+    LOG_STEP("session.failed",
+             QStringLiteral("phiên %1 HỎNG · %2")
+                 .arg(m_sessionId.isEmpty() ? QStringLiteral("(chưa có id)") : m_sessionId,
+                      message));
     setError(message);
     teardownWorker();
     emit statusUpdated();

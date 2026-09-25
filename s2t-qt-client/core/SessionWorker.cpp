@@ -1,6 +1,7 @@
 #include "SessionWorker.h"
 
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 #include "grpc/AsrClient.h"
 
 #include <QDateTime>
@@ -90,8 +91,12 @@ void SessionWorker::requestStop()
 {
     // m_seq belongs to the worker thread; this runs on the caller's, so the
     // count is left to the drain log rather than raced for here.
-    if (!m_stopRequested.loadAcquire())
+    if (!m_stopRequested.loadAcquire()) {
         LOG_INFO(applog::cat::Worker) << "stop requested for session" << sessionId();
+        LOG_STEP("user.stop",
+                 QStringLiteral("NGƯỜI DÙNG bấm Dừng phiên %1 - bắt đầu xả hàng đợi")
+                     .arg(sessionId()));
+    }
     m_stopRequested.storeRelease(1);
     if (m_queue)
         m_queue->wake();
@@ -100,6 +105,12 @@ void SessionWorker::requestStop()
 void SessionWorker::setPaused(bool paused)
 {
     LOG_INFO(applog::cat::Worker) << (paused ? "pausing" : "resuming") << "the audio upload";
+    // Not LOG_STEP: the macro stringifies its first argument, so the tag has
+    // to be a literal there.  Here it is a choice, so the call is written out.
+    runjournal::step(paused ? QStringLiteral("user.pause") : QStringLiteral("user.resume"),
+                     paused ? QStringLiteral("NGƯỜI DÙNG bấm Tạm dừng - audio trong lúc tạm dừng "
+                                             "bị bỏ, không xếp hàng")
+                            : QStringLiteral("NGƯỜI DÙNG bấm Tiếp tục"));
     m_paused.storeRelease(paused ? 1 : 0);
     if (m_queue)
         m_queue->setPaused(paused);
@@ -204,6 +215,11 @@ bool SessionWorker::pushPacket(AsrClient &client, const QByteArray &pcm, bool re
             << "- redialling and resending this same seq";
         if (!m_networkReconnecting) {
             m_networkReconnecting = true;
+            LOG_STEP("net.lost",
+                     QStringLiteral("MẤT KẾT NỐI tới máy chủ ở gói %1 (%2) · giữ phiên, audio mới "
+                                    "xếp hàng trên máy này")
+                         .arg(m_seq)
+                         .arg(status.toString()));
             emit statusChanged(MicStatus::NetworkReconnecting);
             emit errorChanged(QStringLiteral(
                 "Mất kết nối tới Server buffer. Đang giữ nguyên phiên và tự kết nối lại; "
@@ -229,6 +245,11 @@ bool SessionWorker::pushPacket(AsrClient &client, const QByteArray &pcm, bool re
         m_networkReconnecting = false;
         LOG_INFO(applog::cat::Worker)
             << "reconnected to the buffer server - continuing from seq=" << m_seq;
+        LOG_STEP("net.back",
+                 QStringLiteral("kết nối trở lại · gửi tiếp từ gói %1 · %2 s audio đang chờ trên "
+                                "máy này")
+                     .arg(m_seq)
+                     .arg(m_telemetry.localQueueSec, 0, 'f', 1));
         emit errorChanged(QString());
         emit statusChanged(isPaused() ? MicStatus::Paused : MicStatus::Recording);
     }
@@ -458,6 +479,12 @@ bool SessionWorker::drainAndStop(AsrClient &client, const QByteArray &tail)
         LOG_WARN(applog::cat::Worker)
             << "stop_session attempt" << attempt << "hit a transport failure:"
             << status.toString() << "- redialling and trying again";
+        LOG_STEP("stop.retry",
+                 QStringLiteral("dừng phiên lần %1 hỏng vì lỗi mạng (%2) · quay số lại và thử "
+                                "tiếp, tối đa %3 s")
+                     .arg(attempt)
+                     .arg(status.toString())
+                     .arg(kStopRetryBudgetMs / 1000));
         if (attempt == 1) {
             emit errorChanged(QStringLiteral(
                 "Mất kết nối tới Server buffer khi kết thúc phiên. Đang tự kết nối lại để "
@@ -469,11 +496,20 @@ bool SessionWorker::drainAndStop(AsrClient &client, const QByteArray &tail)
     if (!status.ok()) {
         LOG_ERROR(applog::cat::Worker) << "stop_session failed after" << stopClock.elapsed()
                                        << "ms:" << status.toString();
+        LOG_STEP("stop.failed",
+                 QStringLiteral("DỪNG PHIÊN THẤT BẠI sau %1 ms · %2 · phiên có thể vẫn đang mở "
+                                "trên máy chủ")
+                     .arg(stopClock.elapsed())
+                     .arg(status.toString()));
         emit statusChanged(MicStatus::Error);
         emit failed(QStringLiteral("Kết thúc phiên thất bại - %1").arg(status.toString()));
         return false;
     }
     emit errorChanged(QString());
+    LOG_STEP("stop.ok",
+             QStringLiteral("dừng phiên xong sau %1 ms · máy chủ đã nhận %2 s audio")
+                 .arg(stopClock.elapsed())
+                 .arg(stopped.state.sourceSeenSec, 0, 'f', 2));
     LOG_INFO(applog::cat::Worker)
         << "stop_session OK after" << stopClock.elapsed() << "ms - the server has consumed"
         << stopped.state.sourceSeenSec << "s of audio";

@@ -1,6 +1,7 @@
 #include "AudioCapture.h"
 
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 
 #include <QAudioDevice>
 #include <QAudioFormat>
@@ -212,6 +213,13 @@ void AudioCapture::start(const AudioDeviceChoice &choice)
         << "microphone capturing:" << m_boundName << format.sampleRate() << "Hz /"
         << format.channelCount() << "ch, buffer" << m_source->bufferSize() << "bytes (~"
         << kDeviceBufferMs << "ms), watchdog every" << kHealthIntervalMs << "ms";
+    LOG_STEP("mic.open",
+             QStringLiteral("mở microphone '%1' · %2 Hz / %3 kênh · bộ đệm %4 ms · bộ canh %5")
+                 .arg(m_boundName)
+                 .arg(format.sampleRate())
+                 .arg(format.channelCount())
+                 .arg(kDeviceBufferMs)
+                 .arg(m_health.isActive() ? QStringLiteral("đang chạy") : QStringLiteral("KHÔNG CHẠY")));
     emit started(m_boundName);
 }
 
@@ -302,6 +310,12 @@ void AudioCapture::checkHealth()
         LOG_ERROR(applog::cat::Audio)
             << "health check: no new bytes in 2 s (stuck at" << m_capturedBytes
             << "bytes) - the endpoint is stale";
+        LOG_STEP("mic.silent",
+                 QStringLiteral("microphone '%1' CÒN TRONG DANH SÁCH nhưng không ra dữ liệu quá "
+                                "%2 s (đứng ở %3 byte) - coi như mất thiết bị")
+                     .arg(m_boundName)
+                     .arg(kHealthIntervalMs / 1000)
+                     .arg(m_capturedBytes));
         teardown();
         emit deviceLost(QStringLiteral("luồng audio của microphone không còn dữ liệu"));
         return;

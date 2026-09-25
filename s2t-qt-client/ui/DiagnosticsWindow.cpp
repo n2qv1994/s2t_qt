@@ -3,6 +3,7 @@
 #include "Theme.h"
 
 #include "LogControls.h"
+#include "core/RunJournal.h"
 #include "core/SelfTest.h"
 #include "core/SessionController.h"
 
@@ -600,13 +601,23 @@ void DiagnosticsWindow::refreshCounters()
 
 void DiagnosticsWindow::refreshLogPath()
 {
+    // Both files, always, with the one to send named first.
+    //
+    // This used to say "chế độ debug - log ra console, không ghi tệp", which
+    // was true and unhelpful: the person reading it is usually somebody who
+    // has been asked for a log and now has to find out how to produce one.
+    // The file is written in every mode now, and the run journal beside it is
+    // the one that reads as a story rather than as a packet dump.
+    const QString journal = runjournal::path();
     const QString path = applog::logFilePath();
-    if (applog::mode() == applog::Mode::Develop && !path.isEmpty())
-        m_logPath->setText(QStringLiteral("Tệp log: %1").arg(path));
-    else if (applog::mode() == applog::Mode::Develop)
-        m_logPath->setText(QStringLiteral("Thư mục log: %1").arg(applog::logDirectory()));
+    QString text;
+    if (!journal.isEmpty())
+        text = QStringLiteral("Nhật ký quy trình (GỬI TỆP NÀY): %1").arg(journal);
     else
-        m_logPath->setText(QStringLiteral("Chế độ debug — log ra console, không ghi tệp."));
+        text = QStringLiteral("Thư mục nhật ký: %1").arg(runjournal::directory());
+    if (!path.isEmpty())
+        text += QStringLiteral("\nNhật ký gỡ lỗi chi tiết: %1").arg(path);
+    m_logPath->setText(text);
 }
 
 void DiagnosticsWindow::onLogLine(const applog::Entry &entry)

@@ -3,6 +3,7 @@
 #include "SessionStore.h"
 #include "audio/Pcm16k.h"
 #include "core/Logger.h"
+#include "core/RunJournal.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -130,6 +131,12 @@ SessionBuffer::SessionBuffer(const QString &sessionId, qint64 streamId,
         << "buffered session" << sessionId << "opened for" << settings.client << "- capacity"
         << settings.capacityBytes << "bytes, journal"
         << (m_journal.isOpen() ? m_settings.journalDir : QStringLiteral("(off)"));
+    LOG_STEP("session.open",
+             QStringLiteral("phiên %1 · client %2 · chế độ %3 · nhật ký %4 · cấu hình %5")
+                 .arg(sessionId, settings.client,
+                      config.recordOnly ? QStringLiteral("CHỈ GHI ÂM") : QStringLiteral("ghi + AI"),
+                      m_journal.isOpen() ? QStringLiteral("bật") : QStringLiteral("TẮT"),
+                      config.rawJson.isEmpty() ? QStringLiteral("(trống)") : config.rawJson));
 }
 
 SessionBuffer::SessionBuffer(const jrn::Recovered &recovered, const Settings &settings)
@@ -231,6 +238,13 @@ SessionBuffer::SessionBuffer(const jrn::Recovered &recovered, const Settings &se
         << "recovered session" << m_sessionId << "from" << recovered.handle << "-"
         << recovered.backlog.size() << "packets to re-send (seq" << (recovered.progress.seq + 1)
         << ".." << recovered.lastAcceptedSeq << "), originally from" << m_settings.client;
+    LOG_STEP("session.recover",
+             QStringLiteral("phiên %1 dựng lại từ nhật ký · %2 gói còn phải đẩy · bản chép cũ %3 "
+                            "dòng · mốc thời gian dời %4 s")
+                 .arg(m_sessionId)
+                 .arg(recovered.backlog.size())
+                 .arg(m_live.snapshot(m_sessionId, m_backendStreamId).state.rows.size())
+                 .arg(m_streamTimeOffsetSec, 0, 'f', 2));
 }
 
 SessionBuffer::~SessionBuffer()
@@ -349,6 +363,12 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
         LOG_INFO(applog::cat::Session)
             << "session" << m_sessionId << "sends" << packetRate << "Hz /" << packetChannels
             << "ch - normalising every packet to" << audio::kPipelineSampleRate << "Hz mono";
+        LOG_STEP("audio.normalise",
+                 QStringLiteral("phiên %1 · client gửi %2 Hz/%3 kênh → chuẩn hoá về %4 Hz mono")
+                     .arg(m_sessionId)
+                     .arg(packetRate)
+                     .arg(packetChannels)
+                     .arg(audio::kPipelineSampleRate));
     }
 
     if (m_pendingBytes + pcm.size() > m_settings.capacityBytes) {
@@ -365,6 +385,12 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
         m_lastErrorAt = nowSeconds();
         LOG_ERROR(applog::cat::Session) << "push rejected for" << m_sessionId << "-"
                                         << status.message;
+        LOG_STEP("audio.queue_full",
+                 QStringLiteral("phiên %1 · hàng đợi đầy (%2/%3 byte) · TỪ CHỐI gói - tầng suy "
+                                "luận không theo kịp")
+                     .arg(m_sessionId)
+                     .arg(m_pendingBytes)
+                     .arg(m_settings.capacityBytes));
         return status;
     }
 
@@ -491,6 +517,13 @@ grpc::Status SessionBuffer::applyTextEdit(const asr::TextEditRequest &request,
                 .arg(request.startSec, 0, 'f', 2)
                 .arg(request.endSec, 0, 'f', 2)
                 .arg(m_live.commitBoundarySec(), 0, 'f', 2);
+        LOG_STEP("edit.refused",
+                 QStringLiteral("phiên %1 · %2 sửa [%3, %4] nhưng mốc chốt mới ở %5 s · TỪ CHỐI "
+                                "(edit_range_not_committed)")
+                     .arg(m_sessionId, request.editorId)
+                     .arg(request.startSec, 0, 'f', 2)
+                     .arg(request.endSec, 0, 'f', 2)
+                     .arg(m_live.commitBoundarySec(), 0, 'f', 2));
         return bad;
     }
     if (!m_live.applyEdit(request.baseRevision, request.startSec, request.endSec,
@@ -529,6 +562,13 @@ grpc::Status SessionBuffer::applyTextEdit(const asr::TextEditRequest &request,
         << (request.editorId.isEmpty() ? QStringLiteral("?") : request.editorId) << "-"
         << request.startSec << ".." << request.endSec << "->" << request.replacementWords.size()
         << "words, revision now" << m_live.revision();
+    LOG_STEP("edit.apply",
+             QStringLiteral("phiên %1 · %2 sửa đoạn [%3, %4] thành %5 từ · bản %6 · đã ghi xuống kho")
+                 .arg(m_sessionId, request.editorId)
+                 .arg(request.startSec, 0, 'f', 2)
+                 .arg(request.endSec, 0, 'f', 2)
+                 .arg(request.replacementWords.size())
+                 .arg(m_live.revision()));
     stateLock.unlock();
     // Down to the store now, not at the next stop.  An edit that lives only in
     // RAM is lost to a restart and to the retention timer, and the audit row
@@ -595,6 +635,12 @@ grpc::Status SessionBuffer::renameSpeaker(const asr::RenameSpeakerRequest &reque
                                    << "verified as"
                                    << (request.verifiedName.isEmpty() ? QStringLiteral("(xoá tên)")
                                                                       : request.verifiedName);
+    LOG_STEP("speaker.rename",
+             QStringLiteral("phiên %1 · %2 đặt tên cho làn %3 → %4")
+                 .arg(m_sessionId, request.editorId,
+                      request.fromSpeaker.isEmpty() ? QStringLiteral("?") : request.fromSpeaker,
+                      request.verifiedName.isEmpty() ? QStringLiteral("(xoá tên)")
+                                                     : request.verifiedName));
     stateLock.unlock();
     saveState(true);
     return grpc::Status();
@@ -820,6 +866,13 @@ void SessionBuffer::publishSpeakerRegistry(BackendSession &session)
             << "evidence staged for" << m_sessionId << "registry" << entry.sessionSpeakerId
             << "slots" << entry.diarSlots.join(QLatin1Char(',')) << "-" << spans.size()
             << "span(s), named by a reviewer as" << reviewerName;
+        LOG_STEP("speaker.evidence",
+                 QStringLiteral("phiên %1 · ghim %2 đoạn bằng chứng cho giọng %3 (làn %4) vì "
+                                "người soát đã đặt tên '%5'")
+                     .arg(m_sessionId)
+                     .arg(spans.size())
+                     .arg(entry.sessionSpeakerId, entry.diarSlots.join(QLatin1Char(',')),
+                          reviewerName));
     }
 }
 
@@ -899,6 +952,10 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
                 LOG_INFO(applog::cat::Session)
                     << "reconnected to the inference tier - continuing" << m_sessionId
                     << "from seq=" << packet.seq;
+                LOG_STEP("tier.back",
+                         QStringLiteral("phiên %1 · tầng suy luận trở lại · tiếp tục từ gói %2")
+                             .arg(m_sessionId)
+                             .arg(packet.seq));
                 m_lastError.clear();
             }
             lock.unlock();
@@ -927,6 +984,12 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
                 << "push_audio seq=" << packet.seq << "for" << m_sessionId
                 << "transport failure:" << status.toString()
                 << "- holding the packet and redialling; the client keeps recording";
+            LOG_STEP("tier.unreachable",
+                     QStringLiteral("phiên %1 · mất kết nối tới tầng suy luận ở gói %2 (%3) · giữ "
+                                    "gói và quay số lại, client vẫn ghi bình thường")
+                         .arg(m_sessionId)
+                         .arg(packet.seq)
+                         .arg(status.toString()));
         }
         noteError(status);
         {
@@ -1219,6 +1282,31 @@ void SessionBuffer::run()
                     QStringLiteral("{\"ok\":%1,\"duration_sec\":%2}")
                         .arg(status.ok() ? QStringLiteral("true") : QStringLiteral("false"))
                         .arg(m_live.sourceSeenSec(), 0, 'f', 3));
+            }
+
+            {
+                // The one line somebody reading the journal will look for
+                // first: did this meeting end with a transcript, and how big
+                // was it.  Everything needed to answer "đúng hay sai" without
+                // opening the database.
+                QMutexLocker stateLock(&m_stateMutex);
+                int words = 0;
+                for (const asr::DisplayRow &row : m_live.snapshot(m_sessionId, m_backendStreamId)
+                                                      .state.rows)
+                    words += row.displayTokens.size();
+                QMutexLocker lock(&m_mutex);
+                LOG_STEP("session.stop",
+                         QStringLiteral("phiên %1 · %2 · audio %3 s · %4 dòng / %5 từ · bản %6 · "
+                                        "%7/%8 gói đã đẩy, %9 lần thử lại")
+                             .arg(m_sessionId,
+                                  status.ok() ? QStringLiteral("xả sạch") : status.toString())
+                             .arg(m_live.sourceSeenSec(), 0, 'f', 2)
+                             .arg(m_live.snapshot(m_sessionId, m_backendStreamId).state.rows.size())
+                             .arg(words)
+                             .arg(m_live.revision())
+                             .arg(m_forwardedPackets)
+                             .arg(m_acceptedPackets)
+                             .arg(m_retries));
             }
 
             QMutexLocker lock(&m_mutex);
