@@ -45,6 +45,10 @@ const QString kControlAppName = QStringLiteral("xvf_host");
 const QString kControlAppFilter = QString();
 #endif
 
+// Marks the microphone-list entry that stands in for a saved device the OS no
+// longer reports.  Its text is a note of ours, not a device name.
+const int kMissingDeviceRole = Qt::UserRole + 1;
+
 QString formatTimestamp(double epochSeconds)
 {
     if (epochSeconds <= 0)
@@ -643,9 +647,17 @@ SettingsDialog::SettingsDialog(AppConfig *config, QWidget *parent)
         // the one failure this dialog exists to prevent: it refuses the
         // session at record time with a message about a name the operator
         // never typed on this screen.
-        m_expectedName->setText(m_device->currentData().toByteArray().isEmpty()
-                                    ? QString()
-                                    : m_device->currentText());
+        //
+        // Except for the "saved device, not present" placeholder: its text is
+        // ours, not the device's, so copying it would set a guard that the
+        // real microphone can never match once it is plugged back in.  Going
+        // back to that entry restores the guard that was saved with it.
+        if (m_device->currentData(kMissingDeviceRole).toBool())
+            m_expectedName->setText(m_config->expectedDeviceName);
+        else
+            m_expectedName->setText(m_device->currentData().toByteArray().isEmpty()
+                                        ? QString()
+                                        : m_device->currentText());
         updateDeviceHint();
     });
     connect(m_expectedName, &QLineEdit::textChanged, this, &SettingsDialog::updateDeviceHint);
@@ -749,6 +761,7 @@ void SettingsDialog::refreshDevices()
         // falling back to the default input, which is how somebody ends up
         // recording a meeting on the wrong microphone.
         m_device->addItem(QStringLiteral("(thiết bị đã lưu, hiện không thấy)"), wanted);
+        m_device->setItemData(m_device->count() - 1, true, kMissingDeviceRole);
         m_device->setCurrentIndex(m_device->count() - 1);
     } else {
         m_device->setCurrentIndex(0);
