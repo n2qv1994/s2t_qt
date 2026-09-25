@@ -732,8 +732,10 @@ Ba `stage` được sinh ra, đặt tên đúng như bên pipeline vẫn đọc 
 `payload_json` là nguyên văn object JSON tầng suy luận gửi lên, không cắt
 xén — đó mới là thứ đọc được khi truy một dấu câu sai.
 
-**Trace bị cắt bớt.** Mỗi phiên giữ 4000 sự kiện gần nhất; cũ hơn thì bị xoá
-khi có lượt ghi mới. Một cuộc họp ba giờ sinh ra hàng chục nghìn sự kiện và
+**Trace bị cắt bớt.** Mỗi phiên giữ 2000 sự kiện gần nhất **cho mỗi `stage`**,
+tính riêng từng stage; cũ hơn thì bị xoá khi có lượt ghi mới. (Trước
+2026-09-24 là 4000 dùng chung, và `streaming_window` đẩy hết `correction_asr` /
+`itn` của một cuộc họp dài ra ngoài.) Một cuộc họp ba giờ sinh ra hàng chục nghìn sự kiện và
 câu hỏi về trace luôn là về thứ vừa xảy ra. `after_seq` là **con trỏ**, không
 phải bộ lọc: truyền lại `next_seq` của lần trước để chỉ lấy phần mới.
 

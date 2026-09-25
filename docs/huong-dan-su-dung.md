@@ -40,7 +40,9 @@ Tài liệu này dành cho người vận hành.
 
 > **Ảnh trong tài liệu này là ảnh chụp máy thật**, lấy trên máy RHEL đang chạy
 > với Server buffer và tầng suy luận thật, ngày 2026-09-04 — không phải bản vẽ
-> mô phỏng. Chụp lại cả bộ bằng một lệnh: xem `tools/doc_shots.cpp`.
+> mô phỏng. Ba ảnh Cấu hình và Nhật ký (`06`, `10`, `13`) chụp lại ngày
+> 2026-09-25 theo giao diện mới. Chụp lại cả bộ bằng một lệnh: xem
+> `tools/doc_shots.cpp`.
 
 ---
 
@@ -51,18 +53,27 @@ sổ dòng lệnh và:
 
 ```bash
 cd ~/s2t-qt
-./run_s2t.sh            # Server buffer chạy nền + giao diện.
-                        # Đóng giao diện là dừng cả hai.
+./run_s2t.sh restart    # 1. Server buffer chạy nền, lâu dài (không mở giao diện)
+./run_s2t.sh client     # 2. Mở giao diện. Đóng giao diện KHÔNG dừng server.
 ```
 
-Các cách gọi khác, khi cần:
+Đây là cách nên dùng hằng ngày: server chạy một lần và nằm đó, giao diện mở
+và đóng bao nhiêu lần cũng được.
 
 | Lệnh | Làm gì |
 |---|---|
-| `./run_s2t.sh client` | Chỉ mở giao diện, khi Server buffer đã chạy sẵn |
-| `./run_s2t.sh restart` | Dừng server cũ, chạy server nền mới, **không** mở giao diện |
+| `./run_s2t.sh restart` | Dừng server cũ (nếu có), chạy server nền mới, **không** mở giao diện. Server chạy tiếp sau khi cửa sổ lệnh đóng. |
+| `./run_s2t.sh client` | Chỉ mở giao diện, dùng server đang chạy sẵn |
+| `./run_s2t.sh` (không tham số) = `./run_s2t.sh all` | Chạy **một cặp tạm**: server + giao diện. **Đóng giao diện là dừng luôn server.** |
 | `./run_s2t.sh stop` | Dừng server đang giữ cổng 8800 |
 | `./run_s2t.sh config` | Ghi lại cấu hình client cho khớp server ở máy này (có sao lưu) |
+
+> **Cẩn thận với `./run_s2t.sh` không tham số khi server đã chạy nền.** Nó
+> dừng server nền đó, chạy server của riêng nó, rồi **tắt server khi bạn đóng
+> giao diện** — sau đó cổng 8800 không còn ai nghe và mọi máy khác đang nối vào
+> đều mất kết nối. Chuyện này đã xảy ra thật ngày 2026-09-25: nhật ký quy trình
+> của server ghi `server.signal` đúng 12 giây sau `server.ready`, cùng giây với
+> lúc giao diện được đóng. Muốn mở giao diện thì dùng `./run_s2t.sh client`.
 
 Script lo hết phần môi trường: `PATH`, `LD_LIBRARY_PATH`, `QT_PLUGIN_PATH`
 trỏ vào `~/Qt`, ép mã hoá UTF-8, và mặc định `DISPLAY=:1`.
@@ -89,7 +100,7 @@ chạy — giao diện sẽ báo đèn đỏ và không mở được phiên nà
 Không có gì tự chạy. Làm đúng hai bước:
 
 ```bash
-cd ~/s2t-qt && ./run_s2t.sh
+cd ~/s2t-qt && ./run_s2t.sh restart && ./run_s2t.sh client
 ```
 
 rồi kiểm tra đèn kết nối trong giao diện ([mục 1.4](#14-kiểm-tra-kết-nối)).
@@ -103,6 +114,10 @@ rồi kiểm tra đèn kết nối trong giao diện ([mục 1.4](#14-kiểm-tra
 Mở **Công cụ → Cấu hình** (`Ctrl+,`) và điền:
 
 ![Hộp thoại Cấu hình](images/10-cau-hinh.png)
+
+*Đã chọn mic ở ô **Micro**: ô tên tự điền theo, và dòng xám bên dưới nói trước
+bấm Ghi âm sẽ thu bằng thiết bị nào. Dòng dưới cùng là đường dẫn tệp log — tệp
+luôn được ghi, dù chọn chế độ nào.*
 
 | Mục | Ý nghĩa |
 |---|---|
@@ -135,6 +150,11 @@ Cấu hình được lưu lại và tự nạp ở lần mở sau.
 > ```
 > Không tìm thấy microphone có tên chứa "Speaker".
 > ```
+>
+> Từ 2026-09-25 hộp thoại Cấu hình báo điều này **ngay khi mở**, bằng dòng chữ
+> đỏ dưới ô tên — không phải đợi tới lúc bấm ghi âm:
+>
+> ![Cấu hình còn giữ "Speaker": dòng báo đỏ](images/13-cau-hinh-mic-sai.png)
 >
 > Cách xử lý, theo thứ tự:
 >
@@ -414,6 +434,15 @@ bạn tải về, chỉnh sửa sẽ bị từ chối và bảng tự tải lạ
 Nếu nhận được *"chưa chốt tới đoạn này, thử lại sau vài giây"*: đoạn đó vẫn còn
 là kết quả tạm, chưa chốt. Đợi vài giây rồi sửa lại.
 
+- **Bản sửa lúc đang họp được giữ.** Một từ đã sửa tay thì lượt hiệu chỉnh tự
+  động đến sau không ghi đè lên nó nữa (trước 2026-09-24 thì có).
+- **Bản sửa được ghi xuống kho ngay**, nên nó còn nguyên sau khi server khởi
+  động lại hay sau khi phiên rời bộ nhớ.
+- **Phiên cũ đã đóng từ lâu vẫn sửa và đổi tên được.** Sau khi họp xong, sửa
+  được toàn bộ bản chép, không còn giới hạn mốc chốt.
+- Mọi lần sửa và đổi tên đều **bắt buộc có tên người thao tác**; thiếu thì
+  server từ chối.
+
 Menu **Công cụ → Lịch sử hiệu chỉnh** (`F7`) xem toàn bộ nhật ký kiểm toán của phiên: ai sửa gì, lúc nào.
 
 ![Lịch sử hiệu chỉnh](images/09-lich-su-hieu-chinh.png)
@@ -515,12 +544,34 @@ không kéo theo các cái còn lại.
 > luận chỉ xuất kết quả phân cụm giọng ở đúng nhịp cuối cùng. Một cuộc họp còn
 > đang ghi thì phần này trống, và đó không phải lỗi.
 >
-> Bằng chứng được chọn tự động: các đoạn dài nhất mà **chỉ một mình** người đó
-> nói, cộng lại tối đa 45 giây, bỏ qua những tiếng đế dưới một giây. Không cần
-> và không nên đổi tên tay trước để "mồi" cho nó.
+> **Bằng chứng chỉ được ghim cho giọng mà người soát đã đổi tên.** Muốn đẩy một
+> giọng lên DB chung thì trình tự là:
 >
-> Trước 2026-09-21 thao tác publish luôn báo *"giọng này chưa có bằng chứng nào
-> được ghim"* dù làm đúng; nếu còn gặp câu đó thì máy chủ chưa được cập nhật.
+> 1. **Trong lúc họp, trước khi bấm Dừng phiên**, đổi tên người nói đó ở bảng
+>    Soát & sửa (`F9`) — bấm đúp ô người nói, gõ tên thật.
+> 2. **Dừng phiên.** Đúng lúc này, và chỉ lúc này, hệ thống chọn các đoạn dài
+>    nhất mà **chỉ một mình** người đó nói, cộng lại tối đa 45 giây, bỏ qua
+>    tiếng đế dưới một giây.
+> 3. Mở `F5` → *Người nói trong phiên*, chọn đẩy lên DB chung, **Lưu lựa chọn**.
+>
+> Giọng mà **không ai đổi tên** — kể cả khi mô hình đã tự gán một cái tên cho
+> nó — thì không có bằng chứng nào và không đẩy lên được. Đây là cố ý (sửa
+> ngày 2026-09-24): trước đó hệ thống tự ghim cho tên do mô hình gán, không ai
+> duyệt, và có lúc lấy nhầm giọng của người A làm mẫu cho người B. Một mẫu
+> sai trong DB chung là một cái tên sai ở mọi cuộc họp sau.
+>
+> **Đổi tên sau khi đã dừng phiên thì chỉ đổi chữ hiển thị**, không ghim được
+> bằng chứng: hệ thống chỉ biết đoạn nào thuộc cụm giọng nào ở đúng nhịp cuối
+> của phiên. Quên đổi tên trước khi dừng thì giọng đó không đẩy lên DB chung từ
+> phiên này được — dùng **Đăng ký giọng mới** ở trên (thu trực tiếp hoặc nạp
+> từ tệp) thay thế.
+>
+> Vì vậy gặp câu *"giọng này chưa có bằng chứng nào được ghim - hãy dùng
+> rename_speaker…"* thì nghĩa đúng như chữ: **chưa ai đổi tên giọng đó trước
+> khi dừng phiên**. Không phải lỗi máy chủ.
+>
+> Nếu publish báo lỗi vì tên đó **đã từng bị xoá** khỏi DB chung: dịch vụ đăng
+> ký không nhận lại tên đã xoá. Dùng một tên khác, hoặc nhờ quản trị khôi phục.
 
 ---
 
@@ -550,7 +601,10 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 > quanh thời điểm đó** thì bên pipeline lần ra được ngay cửa sổ nào đã quyết
 > định sai. Không có nó thì chỉ còn cách dựng lại cả phiên bằng tay.
 >
-> Mỗi phiên giữ 4000 sự kiện gần nhất; một cuộc họp dài sẽ rụng dần phần đầu.
+> Mỗi phiên giữ **2000 sự kiện gần nhất cho mỗi loại thẻ**, tính riêng từng
+> loại — nên `streaming_window` (ra nhiều nhất) không còn đẩy mất các thẻ
+> `correction_asr`/`itn` của một cuộc họp dài như trước 2026-09-24. Cuộc họp
+> rất dài vẫn rụng dần phần đầu của từng loại.
 
 **Nghiệm thu pipeline** (`F10`) — bằng chứng để nghiệm thu hệ thống:
 
@@ -642,9 +696,11 @@ Xem trực tiếp mọi việc ứng dụng đang làm.
 dòng, số cảnh báo và số lỗi đang có trong bộ đệm.*
 
 - **Chế độ** — quyết định có in kèm ra console hay không. **Tệp thì luôn được
-  ghi ở cả hai chế độ**: `Debug` in ra console (chỉ thấy nếu mở ứng dụng từ cửa
-  sổ lệnh) *và* ghi tệp; `Develop` chỉ ghi tệp. Trước 2026-09-25, `Debug`
-  không ghi tệp nào cả — nghĩa là mặc định không có gì để gửi về khi có sự cố.
+  ghi ở cả hai chế độ**: *Debug — ghi tệp + in ra console* (bản console chỉ
+  thấy nếu mở ứng dụng từ cửa sổ lệnh); *Develop — chỉ ghi tệp*. Trước
+  2026-09-25, `Debug` không ghi tệp nào cả — nghĩa là mặc định không có gì để
+  gửi về khi có sự cố — và nhãn cũ *"Debug — in ra console"* vẫn còn nói như
+  vậy cho tới bản 2026-09-25 tối.
 - **Mức ghi** — quyết định dòng nào được ghi:
 
   | Mức | Dùng khi |
@@ -892,7 +948,10 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 8.3
 - **Phiên không tự kết thúc khi mất mạng hay mất mic.** Chỉ có nút **Dừng phiên**, lỗi
   không khắc phục được, hoặc đóng ứng dụng mới kết thúc phiên.
 - **Đóng ứng dụng khi đang ghi sẽ cắt phiên** mà không flush correction. Ứng
-  dụng có hỏi lại trước khi làm.
+  dụng có hỏi lại trước khi làm — **trừ khi** nó bị tắt từ bên ngoài (đăng
+  xuất, tắt máy, `kill`, `run_s2t.sh stop`): khi đó không có ai để hỏi, nên nó
+  thoát ngay, nhật ký quy trình ghi *"bị tắt bằng tín hiệu SIGTERM"*. **Bấm Dừng
+  phiên trước khi đăng xuất hay tắt máy.**
 - **Tên người thao tác không được nhớ giữa các lần chạy** — xem mục 1.3.
 - **Mức bảo mật chỉ là nhãn**, không thay cho phân quyền phía server.
 - **Ứng dụng này không phải là server.** Nó không mở cổng nào và không có API
@@ -992,8 +1051,9 @@ rồi trên máy RHEL:
 
 ```bash
 export QMAKE6=$HOME/Qt/6.11.2/gcc_64/bin/qmake
-export OUT=$HOME/s2t-qt/build-rhel
+export OUT=$HOME/s2t-qt/build-rhel           # BẮT BUỘC - xem ghi chú dưới
 cd ~/s2t-qt && tools/build_rhel9.sh          # build cả hai nửa
+# hoặc chỉ một nửa:  tools/build_rhel9.sh client   /   tools/build_rhel9.sh server
 
 export LD_LIBRARY_PATH=$HOME/Qt/6.11.2/gcc_64/lib
 build-rhel/s2t-qt-server/s2t-qt-server --selftest       # phải: 6/6 bộ OK
@@ -1002,6 +1062,16 @@ QT_QPA_PLATFORM=offscreen \
 
 ./run_s2t.sh restart                          # chạy lại server bằng bản mới
 ```
+
+> **Luôn `export OUT` như trên.** Không đặt thì script build vào
+> `~/build-rhel` (cạnh `~/s2t-qt`, không phải bên trong), và `run_s2t.sh` vẫn
+> chạy bản cũ ở `~/s2t-qt/build-rhel` — build xong, test xong, mà thứ đang chạy
+> là bản trước. Build một nửa (`client`/`server`) đặt kết quả vào
+> `$OUT/s2t-qt-client` / `$OUT/s2t-qt-server`, đúng chỗ bản build đầy đủ đặt
+> nó; trước 2026-09-25 lệnh đó ghi đè Makefile tổng và không link được.
+>
+> Sau khi build lại, **giao diện đang mở vẫn là bản cũ** cho tới khi đóng và
+> mở lại (`./run_s2t.sh client`); server thì `restart` như trên.
 
 Kiểm tra bản vừa chạy đúng là bản mong muốn: mở
 `~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log` mới nhất, phần

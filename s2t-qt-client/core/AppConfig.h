@@ -70,9 +70,10 @@ public:
     // defaults to matching it.
     bool paceFileReplay = true;
 
-    // Where the debug log goes: Debug -> console, Develop -> file.  Persisted
-    // so a deployed workstation keeps writing to its file across restarts
-    // without anyone having to remember a command-line switch.  --log-mode and
+    // Whether the debug log is also copied to the console: the file is always
+    // written, Debug adds a console copy, Develop does not.  Persisted so the
+    // choice survives a restart without anyone having to remember a
+    // command-line switch.  --log-mode and
     // S2T_LOG_MODE still outrank this at startup; see core/Logger.h.
     applog::Mode logMode = applog::Mode::Debug;
     applog::Level logLevel = applog::Level::Debug;

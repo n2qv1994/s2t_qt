@@ -90,7 +90,7 @@ public:
     //
     // Kept apart from the audit log on purpose: audit is what a person decided
     // and is never trimmed, this is what the tier decided and is trimmed to the
-    // most recent kTraceKeepPerSession events on every write.
+    // most recent kTraceKeepPerStage events of EACH stage on every write.
     void appendTrace(const QString &sessionId, const QList<asr::PipelineTraceEvent> &events);
     // `afterSeq` is a cursor, not a filter: a client polls with the nextSeq it
     // was handed last time.  An empty `stages` means every stage.

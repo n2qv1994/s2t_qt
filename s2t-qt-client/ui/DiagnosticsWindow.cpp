@@ -190,8 +190,8 @@ QWidget *DiagnosticsWindow::buildLogTab()
     m_mode = new QComboBox(page);
     logcontrols::fillModes(m_mode, applog::mode());
     m_mode->setToolTip(QStringLiteral(
-        "Debug in ra console của cửa sổ lệnh đã mở ứng dụng; mở bằng nhấp đúp thì "
-        "không thấy gì. Develop ghi ra tệp, luôn đọc lại được."));
+        "Tệp log luôn được ghi ở cả hai chế độ. Debug in kèm một bản ra console "
+        "của cửa sổ lệnh đã mở ứng dụng; Develop thì chỉ ghi tệp."));
     sinkRow->addWidget(m_mode);
 
     sinkRow->addSpacing(12);

@@ -7,10 +7,15 @@ namespace {
 
 // Only the two modes need a sentence of their own; the levels read well enough
 // from their name plus a short note.
+//
+// Since the log file became always-on, the mode only decides whether a console
+// copy is made as well.  The old labels ("Debug - in ra console") told the
+// operator that Debug meant "no file", which is exactly the belief that left
+// remote testers with nothing to send.
 QString modeLabel(applog::Mode mode)
 {
-    return mode == applog::Mode::Develop ? QStringLiteral("Develop — ghi ra tệp")
-                                         : QStringLiteral("Debug — in ra console");
+    return mode == applog::Mode::Develop ? QStringLiteral("Develop — chỉ ghi tệp")
+                                         : QStringLiteral("Debug — ghi tệp + in ra console");
 }
 
 QString levelLabel(applog::Level level)

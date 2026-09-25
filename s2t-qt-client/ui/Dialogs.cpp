@@ -782,19 +782,19 @@ void SettingsDialog::updateDeviceHint()
 
 void SettingsDialog::updateLogHint()
 {
+    // The file is written in both modes; only the console copy differs.  The
+    // hint used to tell Debug users to switch to Develop "to get a file",
+    // which stopped being true when the file became always-on.
     const applog::Mode chosen = logcontrols::selectedMode(m_logMode);
-    if (chosen == applog::Mode::Develop) {
-        const QString path = applog::logFilePath();
-        m_logPath->setText(
-            path.isEmpty()
-                ? QStringLiteral("Log sẽ được ghi vào thư mục dữ liệu ứng dụng (tệp "
-                                 "s2t_qt.log, tự xoay vòng khi đầy 8 MB).")
-                : QStringLiteral("Tệp log: %1").arg(path));
-        return;
-    }
-    m_logPath->setText(QStringLiteral(
-        "Log in ra console. Chỉ thấy được nếu mở ứng dụng từ cửa sổ lệnh; "
-        "nếu mở bằng cách nhấp đúp thì hãy chọn chế độ Develop."));
+    const QString path = applog::logFilePath();
+    const QString file =
+        path.isEmpty() ? QStringLiteral("Log luôn được ghi vào thư mục dữ liệu ứng dụng (tệp "
+                                        "s2t_qt.log, tự xoay vòng khi đầy 8 MB).")
+                       : QStringLiteral("Tệp log (luôn được ghi): %1").arg(path);
+    m_logPath->setText(chosen == applog::Mode::Develop
+                           ? file
+                           : file + QStringLiteral("\nKèm một bản in ra console - chỉ thấy "
+                                                   "được khi mở ứng dụng từ cửa sổ lệnh."));
 }
 
 void SettingsDialog::browseTokenFile()

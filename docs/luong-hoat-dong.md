@@ -1083,13 +1083,13 @@ LOG_INFO(applog::cat::Worker) << "start_session OK - session_id=" << id;
         ▼
 applog::Record  (dựng trên stack, phát ra ở destructor)
         │
-        ├──► sink: console (Debug) hoặc tệp xoay vòng (Develop)
+        ├──► sink: tệp xoay vòng (LUÔN) + bản console (chỉ Debug)
         ├──► vòng đệm ~4000 dòng gần nhất
         └──► applog::Bus ──queued signal──► DiagnosticsWindow (luồng GUI)
 ```
 
-- **Cờ chế độ** quyết định *đi đâu*; **mức** quyết định *bao nhiêu*. Hai thứ
-  độc lập.
+- **Cờ chế độ** quyết định *có in kèm ra console không* — tệp thì luôn được
+  ghi, từ 2026-09-25; **mức** quyết định *bao nhiêu*. Hai thứ độc lập.
 - Thứ tự quyết định chế độ: `--log-mode` → `S2T_LOG_MODE` → cấu hình đã lưu →
   mặc định lúc build (`qmake CONFIG+=develop`). Một lần `setMode()` sau đó — tức
   người dùng đổi trong ứng dụng — luôn thắng.
@@ -1267,16 +1267,23 @@ set PATH=C:\Qt\6.11.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;%PATH%
 qmake s2t_qt.pro && mingw32-make -j8          # cả hai (TEMPLATE = subdirs)
 
 # RHEL 9 — dùng qmake6, không phải qmake (qmake ở đó là của Qt 5)
+export QMAKE6=$HOME/Qt/6.11.2/gcc_64/bin/qmake
+export OUT=$HOME/s2t-qt/build-rhel   # mặc định là ../build-rhel = ~/build-rhel
 tools/build_rhel9.sh            # cả hai
 tools/build_rhel9.sh server     # chỉ server: không cần Qt Multimedia/Widgets
 tools/build_rhel9.sh client
 ```
 
+Build một nửa đặt kết quả vào `$OUT/<nửa đó>` — đúng chỗ bản subdirs đặt nó,
+nên hai kiểu build dùng chung object. Trước 2026-09-25 nó chạy qmake ngay trong
+`$OUT`: ghi đè Makefile tổng, rải `.o` ra gốc, và không link được vì
+`$OUT/s2t-qt-client` đã là một thư mục.
+
 Cờ build:
 
 | Cờ | Tác dụng |
 |---|---|
-| `CONFIG+=develop` | Mặc định log ra tệp thay vì console |
+| `CONFIG+=develop` | Mặc định chế độ Develop: chỉ ghi tệp, không in kèm console (tệp thì luôn được ghi) |
 | `CONFIG+=memcheck` | `-O1 -g3 -fno-omit-frame-pointer -rdynamic`, cho gdb/valgrind |
 
 Cả hai dự án build sạch với `-Wall -Wextra` và điều đó được đặt ngay trong
