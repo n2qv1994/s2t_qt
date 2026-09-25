@@ -1,6 +1,7 @@
 #include "SessionBuffer.h"
 
 #include "SessionStore.h"
+#include "audio/Pcm16k.h"
 #include "core/Logger.h"
 
 #include <QDateTime>
@@ -39,6 +40,24 @@ const int kTraceFlushEvents = 64;
 // for what VAD strips without turning a publish into a file transfer.
 const double kEvidenceMaxSec = 45.0;
 
+// How often the transcript is written to the store while a meeting runs.
+//
+// It used to be written once, at stop.  A server that died - or was stopped
+// for an upgrade - in the middle of a meeting therefore lost every word spoken
+// before it: the journal carries the audio, never the transcript, and the
+// resumed session started its word count from nothing.  Measured 2026-09-24:
+// a 45 s meeting killed at 30 s came back with 45 of 128 words.
+//
+// Per packet would be six SQLite writes a second of a structure that grows
+// with the meeting; at this interval the worst case is the last two seconds,
+// which the tier has not finished correcting anyway.
+const double kStateSaveIntervalSec = 2.0;
+// ...and the longest it is allowed to stretch to when the state gets big.
+// See saveState(): the interval follows what a save costs, so a three-hour
+// meeting saves less often than a three-minute one rather than spending the
+// forwarder thread on it.
+const double kStateSaveIntervalMaxSec = 10.0;
+
 double percentile(QList<double> values, double fraction)
 {
     if (values.isEmpty())
@@ -60,13 +79,17 @@ SessionBuffer::SessionBuffer(const QString &sessionId, qint64 streamId,
     m_updatedAt = m_startedAt;
     m_clientReturned = true;
     m_title = config.title;
-    m_sampleRate = config.sampleRate;
-    m_channels = config.channels;
-    m_live.configure(config.title, config.sampleRate, config.channels, config.sourceTotalSec);
+    // Whatever the client says it is sending, what this buffer holds - and
+    // what it archives - is 16 kHz mono; push() normalises every packet on the
+    // way in.  Recording anything else here is what made a microphone meeting
+    // play back at a third speed.
+    m_sampleRate = quint32(audio::kPipelineSampleRate);
+    m_channels = 1;
+    m_live.configure(config.title, m_sampleRate, m_channels, config.sourceTotalSec);
 
     if (m_settings.store) {
         m_settings.store->createSession(sessionId, config.title, settings.client, config.rawJson,
-                                        config.sampleRate, config.channels);
+                                        m_sampleRate, m_channels);
         m_settings.store->appendAudit(sessionId, QStringLiteral("session_start"), config.rawJson);
     }
 
@@ -133,15 +156,41 @@ SessionBuffer::SessionBuffer(const jrn::Recovered &recovered, const Settings &se
         LOG_WARN(applog::cat::Session)
             << "recovered session" << m_sessionId << "-" << warning;
     }
-    m_live.configure(m_title.isEmpty() ? m_config.title : m_title, m_config.sampleRate,
-                     m_config.channels, m_config.sourceTotalSec);
-    // The transcript itself is NOT recovered: the words were never on disk, only
-    // the audio was.  The backlog replays through the tier and rebuilds them,
-    // which is why order across the restart had to be preserved.
+    m_live.configure(m_title.isEmpty() ? m_config.title : m_title,
+                     quint32(audio::kPipelineSampleRate), 1, m_config.sourceTotalSec);
 
     // Everything the pipeline had already acknowledged before the restart.
     m_upstreamSourceSeenSec = recovered.progress.sourceSeenSec;
     m_upstreamSpeechSeenSec = recovered.progress.speechSeenSec;
+
+    // The transcript IS recovered, as of 2026-09-24.
+    //
+    // It used to be left behind - "the words were never on disk, only the
+    // audio was" - and the backlog was expected to rebuild them.  It does not:
+    // the backlog is only the packets the tier had not seen yet, so everything
+    // already transcribed was simply lost, and a graceful restart for an
+    // upgrade cost as much as a crash.  The snapshot in the store is what
+    // carries it across now; §7b.5 of the handover doc claims a restart is
+    // invisible to the client, and this is what makes that true of the words
+    // as well as of the audio.
+    if (m_settings.store) {
+        asr::StateResponse saved;
+        if (m_settings.store->loadState(m_sessionId, &saved)) {
+            m_live.restore(saved);
+            m_stateVersion = qMax(m_stateVersion, m_live.version());
+            LOG_INFO(applog::cat::Session)
+                << "recovered transcript for" << m_sessionId << "-" << saved.state.rows.size()
+                << "rows, revision" << saved.transcriptRevision << ", committed to"
+                << saved.commitBoundarySec << "s";
+        }
+    }
+    // The tier is about to be handed a NEW stream, and a new stream counts
+    // from zero.  Everything it says from here is offset by the audio it has
+    // already consumed, or the second half of the meeting lands on top of the
+    // first: measured 2026-09-24, a sentence spoken at 30.3 s was filed at
+    // 0.4 s and clicking it played back the wrong audio.
+    m_streamTimeOffsetSec = qMax(m_upstreamSourceSeenSec, m_live.sourceSeenSec());
+    m_live.setTimeOffset(m_streamTimeOffsetSec);
     m_lastAcceptedSeq = recovered.lastAcceptedSeq;
     m_acceptedPackets = recovered.acceptedPackets;
     m_acceptedBytes = recovered.acceptedBytes;
@@ -281,7 +330,28 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
         return status;
     }
 
-    if (m_pendingBytes + request.pcm.size() > m_settings.capacityBytes) {
+    // 16 kHz mono, once, here - before the journal, before the archive and
+    // before anything is forwarded.
+    //
+    // asr_diar_session has no sample-rate input and treats whatever it is
+    // given as 16 kHz, so a microphone packet at 48 kHz produced a transcript
+    // of two words for twenty seconds of clear speech and an archive that
+    // played back three times too slow while the database said 16000.  The
+    // reference adapter normalises at exactly this point and stores the
+    // normalised audio (`_normalize_http_audio`), which is what keeps the
+    // archive and the transcript describing the same samples.
+    const quint32 packetRate = request.sampleRate ? request.sampleRate : m_config.sampleRate;
+    const quint32 packetChannels = request.channels ? request.channels : m_config.channels;
+    const QByteArray pcm =
+        audio::toPipelineFormat(request.pcm, int(packetRate), int(packetChannels));
+    if (!m_loggedResample && pcm.size() != request.pcm.size()) {
+        m_loggedResample = true;
+        LOG_INFO(applog::cat::Session)
+            << "session" << m_sessionId << "sends" << packetRate << "Hz /" << packetChannels
+            << "ch - normalising every packet to" << audio::kPipelineSampleRate << "Hz mono";
+    }
+
+    if (m_pendingBytes + pcm.size() > m_settings.capacityBytes) {
         // Refuse out loud.  Dropping the packet instead would leave a hole in
         // the audio that nothing downstream could detect, and the client is
         // built to stop on a rejection rather than to continue with one.
@@ -299,9 +369,12 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
     }
 
     Packet packet;
-    packet.pcm = request.pcm;
-    packet.sampleRate = request.sampleRate;
-    packet.channels = request.channels;
+    packet.pcm = pcm;
+    // What the packet IS now, not what it arrived as: the journal is replayed
+    // straight into the tier after a restart, so a record that still claimed
+    // 48 kHz would be resampled a second time.
+    packet.sampleRate = quint32(audio::kPipelineSampleRate);
+    packet.channels = 1;
     packet.audioFormat = request.audioFormat;
     packet.reset = request.reset;
     packet.vadChunkMs = request.vadChunkMs;
@@ -333,8 +406,8 @@ grpc::Status SessionBuffer::push(const asr::PushAudioRequest &request, asr::Push
     m_acceptedPackets += 1;
     m_acceptedBytes += quint64(packet.pcm.size());
     m_lastAcceptedSeq = qMax(m_lastAcceptedSeq, request.seq);
-    m_sampleRate = request.sampleRate ? request.sampleRate : m_sampleRate;
-    m_channels = request.channels ? request.channels : m_channels;
+    m_sampleRate = quint32(audio::kPipelineSampleRate);
+    m_channels = 1;
     m_lastAudioFormat = request.audioFormat.isEmpty() ? m_lastAudioFormat : request.audioFormat;
     m_updatedAt = nowSeconds();
     if (!m_clientReturned) {
@@ -392,7 +465,34 @@ grpc::Status SessionBuffer::reviewState(double viewStartSec, double viewEndSec,
 grpc::Status SessionBuffer::applyTextEdit(const asr::TextEditRequest &request,
                                           asr::ReviewEditResponse *out)
 {
+    if (request.editorId.trimmed().isEmpty()) {
+        // Every other write on this server already refuses an anonymous
+        // caller.  These two did not, and the audit row went to disk with
+        // "editor":"" - a history that records that somebody changed the
+        // transcript but not who.
+        grpc::Status bad;
+        bad.code = grpc::InvalidArgument;
+        bad.message = QStringLiteral("thiếu editor_id - mỗi lần sửa bản chép đều được ghi nhật ký "
+                                     "kèm người thao tác");
+        return bad;
+    }
     QMutexLocker stateLock(&m_stateMutex);
+    if (!m_live.isEditable(request.startSec, request.endSec)) {
+        // edit_range_not_committed, the same name the reference store raises.
+        // Past the commit boundary the tier is still rewriting these words, so
+        // an edit accepted here is one the next correction window silently
+        // undoes - which is worse than refusing it, because the operator
+        // watched it appear.
+        grpc::Status bad;
+        bad.code = grpc::InvalidArgument;
+        bad.message =
+            QStringLiteral("edit_range_not_committed: đoạn [%1, %2] chưa được chốt (mốc chốt "
+                           "hiện tại %3 s) - máy vẫn đang tự sửa phần này")
+                .arg(request.startSec, 0, 'f', 2)
+                .arg(request.endSec, 0, 'f', 2)
+                .arg(m_live.commitBoundarySec(), 0, 'f', 2);
+        return bad;
+    }
     if (!m_live.applyEdit(request.baseRevision, request.startSec, request.endSec,
                           request.replacementWords)) {
         // ABORTED and not INVALID_ARGUMENT: the client's cure is to re-read and
@@ -429,14 +529,43 @@ grpc::Status SessionBuffer::applyTextEdit(const asr::TextEditRequest &request,
         << (request.editorId.isEmpty() ? QStringLiteral("?") : request.editorId) << "-"
         << request.startSec << ".." << request.endSec << "->" << request.replacementWords.size()
         << "words, revision now" << m_live.revision();
+    stateLock.unlock();
+    // Down to the store now, not at the next stop.  An edit that lives only in
+    // RAM is lost to a restart and to the retention timer, and the audit row
+    // that says it happened outlives it - which is how a reviewer ends up
+    // believing a correction was saved when it was not.
+    saveState(true);
     return grpc::Status();
 }
 
 grpc::Status SessionBuffer::renameSpeaker(const asr::RenameSpeakerRequest &request,
                                           asr::ReviewEditResponse *out)
 {
+    if (request.editorId.trimmed().isEmpty()) {
+        grpc::Status bad;
+        bad.code = grpc::InvalidArgument;
+        bad.message = QStringLiteral("thiếu editor_id - mỗi lần đổi tên người nói đều được ghi "
+                                     "nhật ký kèm người thao tác");
+        return bad;
+    }
     QMutexLocker stateLock(&m_stateMutex);
     m_live.renameSpeaker(request.fromSpeaker, request.toSpeaker, request.verifiedName);
+    // Remembered here rather than written straight to the registry, because
+    // the two use different ids: this is a diarization slot, while a registry
+    // entry is a CAM++ cluster that owns a LIST of slots.  Which entry this
+    // rename belongs to is only knowable once the tier exports the registry,
+    // which happens on the final tick - see publishSpeakerRegistry().
+    {
+        const QString slot =
+            request.toSpeaker.isEmpty() ? request.fromSpeaker : request.toSpeaker;
+        QMutexLocker lock(&m_mutex);
+        if (request.verifiedName.trimmed().isEmpty())
+            m_reviewerNames.remove(slot);
+        else
+            m_reviewerNames.insert(slot, request.verifiedName.trimmed());
+        if (!request.fromSpeaker.isEmpty() && request.fromSpeaker != slot)
+            m_reviewerNames.remove(request.fromSpeaker);
+    }
     out->sessionId = m_sessionId;
     out->transcript = m_live.transcript();
     out->state = m_live.snapshot(m_sessionId, m_backendStreamId).state;
@@ -446,11 +575,15 @@ grpc::Status SessionBuffer::renameSpeaker(const asr::RenameSpeakerRequest &reque
     }
     if (m_settings.store) {
         // A manual rename outranks any later automatic sync, so it is recorded
-        // as such - see SessionStore::syncSpeakers.
-        m_settings.store->setVerifiedName(m_sessionId, request.toSpeaker.isEmpty()
-                                                           ? request.fromSpeaker
-                                                           : request.toSpeaker,
-                                          request.verifiedName, true);
+        // as such - see SessionStore::syncSpeakers.  Written against the
+        // registry entry that OWNS this diarization slot when the registry
+        // already exists; when it does not yet, m_reviewerNames above carries
+        // the decision to the stop path.
+        const QString slot =
+            request.toSpeaker.isEmpty() ? request.fromSpeaker : request.toSpeaker;
+        const QString registryId = m_settings.store->speakerForSlot(m_sessionId, slot);
+        if (!registryId.isEmpty())
+            m_settings.store->setVerifiedName(m_sessionId, registryId, request.verifiedName, true);
         m_settings.store->appendAudit(
             m_sessionId, QStringLiteral("rename_speaker"),
             QStringLiteral("{\"editor\":\"%1\",\"from\":\"%2\",\"to\":\"%3\",\"name\":\"%4\"}")
@@ -462,6 +595,8 @@ grpc::Status SessionBuffer::renameSpeaker(const asr::RenameSpeakerRequest &reque
                                    << "verified as"
                                    << (request.verifiedName.isEmpty() ? QStringLiteral("(xoá tên)")
                                                                       : request.verifiedName);
+    stateLock.unlock();
+    saveState(true);
     return grpc::Status();
 }
 
@@ -477,7 +612,14 @@ asr::SessionSummary SessionBuffer::summary() const
     out.durationSec = m_live.sourceSeenSec();
     out.final = m_live.done();
     out.running = !m_finished;
-    out.participants = m_live.speakerIds();
+    // The attendee list the operator typed, not the diarization slots the tier
+    // found.  They were the same field until 2026-09-24, which meant a picker
+    // showed "0, 1" where the meeting's own participants belonged - and the
+    // archived copy of the same meeting showed the real names, so the list
+    // changed shape the moment the session left RAM.
+    out.participants = m_config.participants;
+    out.securityLevel = m_config.securityLevel;
+    out.mode = m_config.mode;
     return out;
 }
 
@@ -577,6 +719,43 @@ void SessionBuffer::drainTrace(BackendSession &session, bool flush)
     m_pendingTrace.clear();
 }
 
+void SessionBuffer::saveState(bool force)
+{
+    if (!m_settings.store)
+        return;
+    asr::StateResponse snapshot;
+    {
+        // Both bookkeeping fields live under the transcript's own lock: this
+        // is called from the forwarder thread on every packet and from a
+        // connection thread on every edit.
+        QMutexLocker stateLock(&m_stateMutex);
+        const double now = nowSeconds();
+        // The interval grows with what a save actually costs, so a long
+        // meeting cannot spend the forwarder thread on serialization.  A
+        // minute of meeting is ~15 kB of state, so three hours is a few
+        // megabytes; at the 2 s floor that would be a megabyte a second of
+        // SQLite writes on the same thread that owes the tier a packet every
+        // 160 ms.  Bound it at 5% duty and the worst case is a save every ten
+        // seconds - still far less than the meeting that used to be lost
+        // whole.
+        const double interval =
+            qBound(kStateSaveIntervalSec, m_lastSaveCostMs * 0.02, kStateSaveIntervalMaxSec);
+        if (!force && now - m_lastStateSaveAt < interval)
+            return;
+        if (!force && m_live.version() == m_lastSavedVersion)
+            return;
+        snapshot = m_live.snapshot(m_sessionId, m_backendStreamId);
+        m_lastSavedVersion = m_live.version();
+        m_lastStateSaveAt = now;
+    }
+    QElapsedTimer clock;
+    clock.start();
+    m_settings.store->saveState(m_sessionId, snapshot);
+    const double costMs = double(clock.nsecsElapsed()) / 1e6;
+    QMutexLocker stateLock(&m_stateMutex);
+    m_lastSaveCostMs = costMs;
+}
+
 void SessionBuffer::publishSpeakerRegistry(BackendSession &session)
 {
     if (!m_settings.store)
@@ -590,24 +769,57 @@ void SessionBuffer::publishSpeakerRegistry(BackendSession &session)
     // undo a correction somebody made during the meeting.
     m_settings.store->syncSpeakers(m_sessionId, entries);
 
-    // Then the evidence, which is what SaveSessionSpeakers needs and what it
-    // never had: until 2026-09-21 stageEvidence() had exactly one call site
-    // and it was in the self-test, so publishing a voice to the shared
-    // database always failed with "chưa có bằng chứng nào được ghim" no matter
-    // what the operator did.
+    // Then the evidence - but only for a voice a REVIEWER named, and only from
+    // the diarization slots that voice actually owns.
     //
-    // The spans come from the transcript rather than from the tier: the tier
-    // exports which voices it told apart, and the transcript is where those
-    // same ids are attached to timestamps.  That makes the evidence a
-    // measurement of this meeting instead of a by-product of a rename.
+    // Two separate defects were here, and both are quiet ones:
+    //
+    //   - the spans were looked up by `sessionSpeakerId`, which is a CAM++
+    //     registry id, against the transcript, where the ids are diarization
+    //     slots.  They are different namespaces that happen to both count from
+    //     zero, so registry entry "0" - whose diar_slots is [] - was handed
+    //     26.5 s of evidence belonging to entry "1".  On 427 real meetings the
+    //     reference adapter recorded, 44% fall into that case.  Publishing one
+    //     of those teaches the shared database the wrong person's voice under
+    //     a real name, and every later meeting then mis-names them.
+    //   - evidence was staged at stop for names the MODEL had guessed, with
+    //     nobody asked.  Design is explicit that a voice is pinned when a
+    //     reviewer renames it, and that is the only way the shared database
+    //     stays something a person vouched for.
+    QHash<QString, QString> reviewerNames;
+    {
+        QMutexLocker lock(&m_mutex);
+        reviewerNames = m_reviewerNames;
+    }
     QMutexLocker stateLock(&m_stateMutex);
     for (const reg::SessionSpeakerEntry &entry : entries) {
-        const QList<QPair<double, double>> spans =
-            m_live.speakerSpans(entry.sessionSpeakerId, kEvidenceMaxSec);
+        // Which slots this voice owns, and what a reviewer called any of them.
+        QString reviewerName;
+        for (const QString &slot : entry.diarSlots) {
+            const QString named = reviewerNames.value(slot);
+            if (!named.isEmpty()) {
+                reviewerName = named;
+                break;
+            }
+        }
+        if (reviewerName.isEmpty())
+            continue; // nobody vouched for this voice
+
+        QList<QPair<double, double>> spans;
+        for (const QString &slot : entry.diarSlots)
+            spans.append(m_live.speakerSpans(slot, kEvidenceMaxSec));
+        std::sort(spans.begin(), spans.end(),
+                  [](const QPair<double, double> &a, const QPair<double, double> &b) {
+                      return a.first < b.first;
+                  });
         if (spans.isEmpty())
             continue;
-        m_settings.store->stageEvidence(m_sessionId, entry.sessionSpeakerId, spans,
-                                        entry.verifiedName);
+        m_settings.store->setVerifiedName(m_sessionId, entry.sessionSpeakerId, reviewerName, true);
+        m_settings.store->stageEvidence(m_sessionId, entry.sessionSpeakerId, spans, reviewerName);
+        LOG_INFO(applog::cat::Session)
+            << "evidence staged for" << m_sessionId << "registry" << entry.sessionSpeakerId
+            << "slots" << entry.diarSlots.join(QLatin1Char(',')) << "-" << spans.size()
+            << "span(s), named by a reviewer as" << reviewerName;
     }
 }
 
@@ -646,8 +858,12 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
             // rejected never became part of it.
             if (m_settings.store)
                 m_settings.store->appendAudio(m_sessionId, packet.pcm);
-            m_upstreamSourceSeenSec = response.sourceSeenSec;
-            m_upstreamSpeechSeenSec = response.speechSeenSec;
+            // On the meeting's timeline, not the stream's - see
+            // m_streamTimeOffsetSec.  The client subtracts this from what it
+            // has sent to draw the server queue, so a number that restarted at
+            // zero would show the whole meeting as backlog.
+            m_upstreamSourceSeenSec = response.sourceSeenSec + m_streamTimeOffsetSec;
+            m_upstreamSpeechSeenSec = response.speechSeenSec + m_streamTimeOffsetSec;
             m_upstreamTiming = response.timing;
             // m_stateVersion is the transcript's now, set above.  The tier does
             // not have one to report and never did after the adapter went.
@@ -686,6 +902,7 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
                 m_lastError.clear();
             }
             lock.unlock();
+            saveState(false);
             drainTrace(session, false);
             return true;
         }
@@ -732,8 +949,146 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
     }
 }
 
+// mode=record_only: the audio is kept and nothing is inferred.
+//
+// The whole point of the mode is that a plain recording never reaches the
+// inference tier - not that the tier runs and its answer is thrown away.  It
+// did reach it until 2026-09-24: a ten-second record_only session pushed
+// 714 568 bytes upstream and came back with 33 words, so a meeting somebody
+// marked as "do not transcribe" was transcribed anyway, and the words were in
+// the archive to prove it.
+void SessionBuffer::runRecordOnly()
+{
+    {
+        QMutexLocker lock(&m_mutex);
+        m_openStatus = grpc::Status();
+        m_openDone = true;
+        m_opened.wakeAll();
+    }
+    LOG_INFO(applog::cat::Session)
+        << "session" << m_sessionId << "is mode=record_only - audio is archived and the "
+        << "inference tier is never called";
+
+    const double bytesPerSec =
+        double(qMax(1u, quint32(audio::kPipelineSampleRate)) * 2u);
+    for (;;) {
+        Packet packet;
+        bool haveWork = false;
+        bool drainDone = false;
+        {
+            QMutexLocker lock(&m_mutex);
+            while (m_queue.isEmpty() && !m_stopRequested.loadRelaxed()
+                   && !m_shutdownRequested.loadRelaxed()) {
+                m_notEmpty.wait(&m_mutex);
+            }
+            if (m_shutdownRequested.loadRelaxed())
+                break;
+            if (!m_queue.isEmpty()) {
+                packet = m_queue.takeFirst();
+                m_pendingBytes -= packet.pcm.size();
+                haveWork = true;
+            } else {
+                drainDone = true;
+            }
+        }
+
+        if (haveWork) {
+            if (m_settings.store)
+                m_settings.store->appendAudio(m_sessionId, packet.pcm);
+            QMutexLocker lock(&m_mutex);
+            ++m_forwardedPackets;
+            m_forwardedBytes += quint64(packet.pcm.size());
+            // There is no tier to report progress, so the buffer's own byte
+            // count is the honest figure - and it is what the client subtracts
+            // to draw its queue.
+            m_upstreamSourceSeenSec += double(packet.pcm.size()) / bytesPerSec;
+            m_updatedAt = nowSeconds();
+            if (m_journal.isOpen()) {
+                jrn::Progress progress;
+                progress.seq = packet.seq;
+                progress.sourceSeenSec = m_upstreamSourceSeenSec;
+                progress.speechSeenSec = m_upstreamSpeechSeenSec;
+                progress.stateVersion = m_stateVersion;
+                QString journalError;
+                if (!m_journal.appendProgress(progress, &journalError)) {
+                    LOG_WARN(applog::cat::Session)
+                        << "journal progress write failed for" << m_sessionId << "-"
+                        << journalError;
+                }
+            }
+            continue;
+        }
+
+        if (drainDone) {
+            asr::StopSessionResponse response;
+            {
+                QMutexLocker stateLock(&m_stateMutex);
+                {
+                    QMutexLocker lock(&m_mutex);
+                    // Nothing else moves these counters in this mode: there is
+                    // no tier answer to fold in, so the transcript's idea of
+                    // how much audio it has seen comes from the queue.
+                    m_live.noteProgress(m_upstreamSourceSeenSec, m_upstreamSpeechSeenSec);
+                }
+                m_live.markDone();
+                const asr::StateResponse snapshot =
+                    m_live.snapshot(m_sessionId, m_backendStreamId);
+                response.sessionId = m_sessionId;
+                response.streamId = m_backendStreamId;
+                response.stateVersion = snapshot.stateVersion;
+                response.events.final = true;
+                response.state = snapshot.state;
+            }
+            saveState(true);
+            if (m_settings.store) {
+                QMutexLocker stateLock(&m_stateMutex);
+                m_settings.store->markFinished(m_sessionId, m_live.sourceSeenSec());
+                m_settings.store->appendAudit(
+                    m_sessionId, QStringLiteral("session_stop"),
+                    QStringLiteral("{\"ok\":true,\"mode\":\"record_only\",\"duration_sec\":%1}")
+                        .arg(m_live.sourceSeenSec(), 0, 'f', 3));
+            }
+            QMutexLocker lock(&m_mutex);
+            m_stateVersion = response.stateVersion;
+            m_stopResponse = response;
+            m_stopStatus = grpc::Status();
+            m_stopDone = true;
+            m_finished = true;
+            m_finishedAt = nowSeconds();
+            m_updatedAt = m_finishedAt;
+            if (m_journal.isOpen()) {
+                QString journalError;
+                if (!m_journal.appendStopped(true, &journalError)) {
+                    LOG_WARN(applog::cat::Session) << "journal stop record failed for"
+                                                   << m_sessionId << "-" << journalError;
+                }
+            }
+            m_stopped.wakeAll();
+            break;
+        }
+    }
+
+    QMutexLocker lock(&m_mutex);
+    if (!m_finished) {
+        m_finished = true;
+        m_finishedAt = nowSeconds();
+        if (!m_stopDone) {
+            m_stopStatus.code = grpc::Unavailable;
+            m_stopStatus.message = QStringLiteral("máy chủ đệm đã tắt trước khi phiên kết thúc");
+            m_stopDone = true;
+        }
+        m_stopped.wakeAll();
+    }
+    m_journal.close();
+}
+
 void SessionBuffer::run()
 {
+    if (m_config.recordOnly) {
+        runRecordOnly();
+        return;
+    }
+
     // Opened here, on this thread, and never handed to another: the socket
     // underneath has thread affinity.  See RpcLane.h for the same rule stated
     // once for the lanes that genuinely do have to cross threads.
@@ -814,7 +1169,8 @@ void SessionBuffer::run()
             // what is still outstanding.  Either way, when it returns the tier
             // has seen every byte the client sent.
             asr::PushAudioResponse tail;
-            const grpc::Status status = m_backend->finish(&tail);
+            QList<asr::PushAudioResponse> flushed;
+            const grpc::Status status = m_backend->finish(&tail, &flushed);
 
             // Everything the tier collected, written before the meeting is
             // marked over: campp_registry_json is exported ONLY on this final
@@ -824,6 +1180,12 @@ void SessionBuffer::run()
             asr::StopSessionResponse response;
             {
                 QMutexLocker stateLock(&m_stateMutex);
+                // In order, and before the terminal answer: each silence tick
+                // can carry the correction that finally closes the last
+                // sentence, and applying them out of order would splice an
+                // older window over a newer one.
+                for (const asr::PushAudioResponse &answer : flushed)
+                    m_live.apply(answer);
                 if (status.ok())
                     m_live.apply(tail);
                 m_live.markDone();

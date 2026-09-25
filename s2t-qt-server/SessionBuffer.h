@@ -35,6 +35,7 @@
 
 #include <QAtomicInt>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QList>
 #include <QMutex>
 #include <QString>
@@ -169,6 +170,13 @@ private:
     // Both belong here and not in the backend - the backend cannot see the
     // transcript, and the store cannot see the tier.
     void publishSpeakerRegistry(BackendSession &session);
+    // Writes the transcript to the store.  `force` ignores the interval and is
+    // what an edit, a rename and the stop path use; everything else is
+    // throttled to kStateSaveIntervalSec so a meeting is at most a couple of
+    // seconds from being recoverable without costing six writes a second.
+    void saveState(bool force);
+    // The forwarder loop for mode=record_only: archive, ACK, never infer.
+    void runRecordOnly();
     void recordForwardMs(double ms);
     void noteError(const grpc::Status &status);
 
@@ -251,6 +259,23 @@ private:
     LiveTranscript m_live;
     BackendSessionConfig m_config;
     qint64 m_backendStreamId = 0;
+    // Guarded by m_stateMutex, like the transcript they describe.
+    double m_lastStateSaveAt = 0.0;
+    quint64 m_lastSavedVersion = 0;
+    // What the last save cost, in milliseconds.  The save interval follows it
+    // so the cost stays a small fraction of the meeting's wall time.
+    double m_lastSaveCostMs = 0.0;
+    // Non-zero only for a meeting resumed after a restart: the tier's new
+    // stream counts from zero and everything it says is moved onto the
+    // meeting's own timeline by this much.  Forwarder thread only.
+    double m_streamTimeOffsetSec = 0.0;
+    bool m_loggedResample = false;
+
+    // Diarization slot -> the name a reviewer gave it.  Guarded by m_mutex.
+    // Kept because a rename names a SLOT while the speaker registry is keyed
+    // by CAM++ cluster, and the mapping between the two only exists once the
+    // tier exports the registry on the final tick.
+    QHash<QString, QString> m_reviewerNames;
 
     // Written under m_mutex, like everything else it protects.
     jrn::Journal m_journal;

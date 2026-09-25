@@ -633,7 +633,38 @@ ListSessionsRequest → ListSessionsResponse
 giây)`, `4 updated_at`, `5 duration_sec`, `6 final (bool)`, `7 running (bool)`,
 `8 participants (repeated string)`, `9 security_level`, `10 mode`.
 
-Phân trang bằng `next_cursor`: rỗng nghĩa là hết.
+Phân trang bằng `next_cursor`: rỗng nghĩa là hết. Con trỏ là
+`"<created_at>|<session_id>"` của **hàng cuối cùng vừa trả về**, và trang sau
+bắt đầu ngay sau hàng đó. (Trước 2026-09-24 con trỏ là `created_at` của hàng
+**đầu trang sau** và được so bằng `<`, nên mỗi lần lật trang mất đúng một cuộc
+họp: 23 phiên lật 2 phiên/lần chỉ thấy 16.)
+
+Một phiên đang chạy chỉ xuất hiện **một lần**, ở đúng vị trí thời gian của nó,
+với `running = true`.
+
+### 5.8b `delete_session`
+
+```
+/asr.ui.v1.ProductASRService/delete_session
+DeleteSessionRequest → DeleteSessionResponse
+```
+
+**Request**: `1 session_id (string)`, `2 editor_id (string, bắt buộc)`.
+
+**Response**: `1 session_id`, `2 bytes_removed (uint64)`, `3 deleted_at
+(double)`.
+
+Xoá vĩnh viễn một cuộc họp **đã kết thúc**: hàng trong kho, bản chép, registry
+giọng của phiên, vết pipeline và tệp audio phẳng. Không thể hoàn tác.
+
+| Tình huống | Trả về |
+|---|---|
+| Thiếu `editor_id` | `INVALID_ARGUMENT` |
+| Phiên đang chạy | `FAILED_PRECONDITION` — hãy `stop_session` trước |
+| Không có trong kho | `NOT_FOUND` |
+
+**Nhật ký kiểm toán được giữ lại**, và được ghi *trước* khi xoá: bản thân việc
+xoá là một quyết định của con người, nên bia mộ phải sống lâu hơn thứ nó xoá.
 
 ### 5.9 `rename_speaker`
 
@@ -1152,12 +1183,35 @@ Chuỗi JSON compact truyền trong `start_session`. Mọi khoá đều tuỳ ch
 | Khoá | Kiểu | Ý nghĩa |
 |---|---|---|
 | `pipeline_trace` | `bool` | Bật lưu vết từng chặng cho phiên này. Chỉ ghi khi bật. |
+| `conf_threshold` | `number` | Ngưỡng tin cậy, trong `[0, 1]` |
 | `source_total_sec` | `number` | Tổng độ dài nguồn khi phát lại tệp — cho thanh tiến trình |
 | `expected_speakers` | `array<string>` | **Ba trạng thái — xem bên dưới** |
-| `mode` | `string` | Chế độ cuộc họp |
-| `session_title` | `string` | Tiêu đề |
-| `participants` | `array<string>` | Danh sách người dự |
-| `security_level` | `string` | Mức bảo mật |
+| `mode` | `string` | `record_and_s2t` (mặc định) hoặc `record_only` |
+| `session_title` | `string` | Tiêu đề, tối đa 200 ký tự |
+| `participants` | `array<string>` | Danh sách người dự, tối đa 256 tên |
+| `security_level` | `string` | `thuong` \| `mat` \| `toi_mat` \| `tuyet_mat`, hoặc để trống |
+
+**`start_session` kiểm tra cấu hình và từ chối bằng `INVALID_ARGUMENT`** (từ
+2026-09-24; trước đó mọi giá trị sai đều được nhận im lặng). Bị từ chối:
+
+- `config_json` không phải đối tượng JSON;
+- khoá lạ, ví dụ `{"foo": 1}`;
+- `mode` khác hai giá trị trên — `"meeting"` là lỗi thường gặp nhất;
+- `security_level` khác bốn giá trị trên;
+- `participants` hoặc `expected_speakers` không phải mảng chuỗi;
+- `conf_threshold` ngoài `[0, 1]`, `source_total_sec` âm, `pipeline_trace`
+  không phải `true`/`false`.
+
+Server còn nhận thêm các khoá riêng của nó (`title`, `sample_rate`,
+`channels`, `language`, `model`, `vad_chunk_ms`…) để cấu hình viết tay và nhật
+ký của bản cũ vẫn mở được phiên.
+
+**`mode=record_only` là một lời hứa, không phải một nhãn.** Phiên đó **không
+gọi tầng suy luận** — không VAD, không ASR, không diarization, không ITN — chỉ
+lưu audio. Bản chép trả về rỗng, và đó là câu trả lời đúng.
+
+**`participants` / `security_level` / `mode` được trả lại nguyên vẹn** trong
+`list_sessions`, cả khi phiên còn chạy lẫn khi đã vào kho.
 
 > ### `expected_speakers` có ba trạng thái, không phải hai
 >

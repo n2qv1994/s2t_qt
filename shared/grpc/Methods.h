@@ -23,6 +23,10 @@ constexpr const char *GetAudioRange = "/asr.ui.v1.ProductASRService/get_audio_ra
 constexpr const char *ApplyTextEdit = "/asr.ui.v1.ProductASRService/apply_text_edit";
 constexpr const char *StopSession = "/asr.ui.v1.ProductASRService/stop_session";
 constexpr const char *ListSessions = "/asr.ui.v1.ProductASRService/list_sessions";
+// In the .proto since the start and missing here until 2026-09-24, which left
+// an archive nothing could ever remove a meeting from - and meeting audio is
+// the largest thing this deployment stores.
+constexpr const char *DeleteSession = "/asr.ui.v1.ProductASRService/delete_session";
 constexpr const char *RenameSpeaker = "/asr.ui.v1.ProductASRService/rename_speaker";
 constexpr const char *GetPipelineTrace = "/asr.ui.v1.ProductASRService/get_pipeline_trace";
 constexpr const char *GetAuditHistory = "/asr.ui.v1.ProductASRService/get_audit_history";

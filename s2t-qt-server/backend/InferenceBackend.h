@@ -65,6 +65,16 @@ struct BackendSessionConfig
     // Passed to Triton's expected_speakers_json input, which is how a meeting
     // with a known attendee list gets verified names instead of "Người 1".
     QString expectedSpeakersJson;
+    // Carried through untouched so list_sessions can answer with what the
+    // operator entered, live and from the archive alike.  None of them means
+    // anything to the tier: security_level in particular is a label, not an
+    // access control, and the .proto says so.
+    QList<QString> participants;
+    QString securityLevel;
+    QString mode = QStringLiteral("record_and_s2t");
+    // mode=record_only.  A plain recording never reaches the inference tier -
+    // that is the whole meaning of the mode, not "infer and discard".
+    bool recordOnly = false;
     // The request exactly as it arrived.  Kept so the journal and the audit log
     // record what was asked for, not what we made of it.
     QString rawJson;
@@ -73,6 +83,18 @@ struct BackendSessionConfig
     // explains itself through `warning`, because refusing to start a meeting
     // over a malformed optional field would be the worse failure.
     static BackendSessionConfig fromJson(const QString &json, QString *warning);
+
+    // What start_session checks BEFORE a meeting exists, and the one place
+    // that is allowed to refuse.
+    //
+    // Separate from fromJson() on purpose: fromJson is forgiving because it
+    // also reads configs off a journal written by an older build, while this
+    // is the contract with the caller.  Accepting `mode=meeting` or
+    // `security_level=abc` silently - which is what happened until
+    // 2026-09-24 - means the operator's choice is not what they think it is,
+    // and nothing downstream will ever tell them.  The rule set is the
+    // reference adapter's (grpc_session_adapter.py: `start`).
+    static bool validateJson(const QString &json, QString *error);
 };
 
 // One meeting's worth of inference.
@@ -91,7 +113,15 @@ public:
     // No more audio is coming.  Anything still in flight is collected into
     // `out`.  This is the drain barrier's far end: when it returns OK the tier
     // has seen every byte the client sent.
-    virtual grpc::Status finish(asr::PushAudioResponse *out) = 0;
+    //
+    // `flushed` collects the answers to whatever the backend has to send
+    // before the terminal one.  Triton's dense endpointer only decides a
+    // sentence is over when it has heard the silence after it, so the flush is
+    // a few ticks of real silence and then the final chunk - and each of those
+    // ticks can carry a correction that belongs in the transcript.  The caller
+    // folds them in order before `out`.
+    virtual grpc::Status finish(asr::PushAudioResponse *out,
+                                QList<asr::PushAudioResponse> *flushed = nullptr) = 0;
 
     // Drops the session without a flush - used when the whole server is going
     // down, where pretending to have closed the meeting cleanly would be a lie.

@@ -370,6 +370,26 @@ struct ListSessionsRequest
     void parse(pw::Reader &reader);
 };
 
+// delete_session.  The editor id is not optional on the wire and not optional
+// here: the deletion tombstone is kept outside the session it removed, and a
+// tombstone with nobody's name on it explains nothing six months later.
+struct DeleteSessionRequest
+{
+    QString sessionId;
+    QString editorId;
+    QByteArray serialize() const;
+    void parse(pw::Reader &reader);
+};
+
+struct DeleteSessionResponse
+{
+    QString sessionId;
+    quint64 bytesRemoved = 0;
+    double deletedAt = 0.0;
+    QByteArray serialize() const;
+    void parse(pw::Reader &reader);
+};
+
 struct SessionSummary
 {
     QString sessionId;

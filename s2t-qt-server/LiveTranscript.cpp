@@ -93,6 +93,21 @@ QString sentenceCased(const QString &token)
     return token;
 }
 
+// Two surfaces of the same word, compared without the mark or the capital:
+// the correction pass and the streaming pass spell a word differently
+// ("kiểm" against "kiểm,") and that difference must not make them look like
+// two different words.
+QString wordCore(const QString &token)
+{
+    QString out;
+    out.reserve(token.size());
+    for (const QChar &ch : token) {
+        if (ch.isLetterOrNumber())
+            out.append(ch.toLower());
+    }
+    return out;
+}
+
 bool hasLetter(const QString &token)
 {
     for (const QChar &ch : token) {
@@ -115,10 +130,55 @@ void LiveTranscript::configure(const QString &title, quint32 sampleRate, quint32
     // Diarization slots are per stream: carrying a previous meeting's turns
     // over would place this one's first words on last one's speakers.
     m_turns.clear();
+    m_pending.clear();
+    m_pendingRows.clear();
+    m_manualSpans.clear();
+    m_nameBySlot.clear();
 }
 
-quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
+// Everything the tier reports, moved onto the meeting's own timeline.
+//
+// A resumed meeting opens a new stream and that stream counts from zero, so
+// without this the words of the second half sit on top of the first and a
+// reviewer clicking a sentence at 30 s hears the audio from 0.4 s.  Every
+// field carrying a time has to move together - words, the correction, the
+// chunk bounds, the commit boundary, the diarization subframes and the two
+// "seen" counters - or the parts of one answer stop agreeing with each other.
+asr::PushAudioResponse LiveTranscript::shifted(const asr::PushAudioResponse &response) const
 {
+    if (qFuzzyIsNull(m_timeOffsetSec))
+        return response;
+    const double offset = m_timeOffsetSec;
+    asr::PushAudioResponse out = response;
+    const auto move = [offset](QList<asr::Word> *words) {
+        for (asr::Word &word : *words) {
+            word.startSec += offset;
+            word.endSec += offset;
+        }
+    };
+    move(&out.asrWords);
+    move(&out.correction.mergedWords);
+    if (out.chunkStartSec > 0.0 || out.chunkEndSec > 0.0) {
+        out.chunkStartSec += offset;
+        out.chunkEndSec += offset;
+    }
+    if (out.correction.commitBoundarySec > 0.0)
+        out.correction.commitBoundarySec += offset;
+    if (out.sourceSeenSec > 0.0)
+        out.sourceSeenSec += offset;
+    if (out.speechSeenSec > 0.0)
+        out.speechSeenSec += offset;
+    const qint64 offsetMs = qint64(offset * 1000.0);
+    for (qint64 &value : out.diarization.subframeStartMs)
+        value += offsetMs;
+    for (qint64 &value : out.diarization.subframeEndMs)
+        value += offsetMs;
+    return out;
+}
+
+quint64 LiveTranscript::apply(const asr::PushAudioResponse &incoming)
+{
+    const asr::PushAudioResponse response = shifted(incoming);
     ++m_version;
 
     if (response.sourceSeenSec > m_sourceSeenSec)
@@ -152,17 +212,29 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
     // timestamps have to be on the timeline before the lookup happens.
     foldDiarization(response.diarization);
 
-    // asr_words is a ROLLING WINDOW, not a delta.
+    // Who the tier says this slot is.  Only the streaming chunk carries a
+    // verified name; the correction that actually puts the word into the
+    // official transcript carries none, so without remembering it here a
+    // meeting with a matched CAM++ identity shows every row unnamed.
+    if (!isUnassignedSlot(response.speaker) && !isPlaceholderName(response.verifiedName))
+        m_nameBySlot.insert(response.speaker, response.verifiedName.trimmed());
+
+    // asr_words is a ROLLING WINDOW, not a delta, and it is a GUESS.
     //
     // asr_diar_session re-emits every word its ASR window still covers on each
     // chunk - about eight seconds of them - so appending what arrives produces
     // "học học học học học". The words carry stable timestamps, which is what
     // makes the fix exact: replace the span they cover rather than add to it.
-    // A re-sent word lands on its own previous position and the transcript
-    // stops growing sideways.
+    //
+    // They land in the provisional lane, never in the official transcript.
+    // Everything past commit_boundary_sec is still being re-decided by the
+    // correction pass, and a word that reaches the official lane early is
+    // written twice when the correction finally covers it - the "Hôm Hôm nay"
+    // in the acceptance report.  m_pending is that lane; the correction below
+    // is the only thing that promotes a word out of it.
     if (!response.asrWords.isEmpty()) {
-        replaceSpan(response.asrWords, response.speaker, response.speakerProb,
-                    response.verifiedName);
+        mergePending(response.asrWords, response.speaker, response.speakerProb,
+                     response.verifiedName);
     } else if (!response.text.isEmpty()) {
         // A tier that gives no word timings still gives text.  It becomes one
         // word spanning the chunk, so the row machinery and the editor both
@@ -200,8 +272,33 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
     // the row at 00:21 was labelled Newsman, then Anna, then nobody, then
     // "Người 4" - same words, four different speakers, purely from corrections
     // rolling over it.
-    if (!response.correction.mergedWords.isEmpty())
+    if (!response.correction.mergedWords.isEmpty()) {
         replaceSpan(response.correction.mergedWords, QString(), 0.0f, QString());
+        // The correction owns these seconds now.  Whatever the edge was
+        // holding for them is not a second opinion, it is the older guess.
+        double from = 0.0;
+        double to = 0.0;
+        bool have = false;
+        for (const asr::Word &word : response.correction.mergedWords) {
+            if (word.endSec <= word.startSec)
+                continue;
+            from = have ? qMin(from, word.startSec) : word.startSec;
+            to = have ? qMax(to, word.endSec) : word.endSec;
+            have = true;
+        }
+        if (have)
+            dropPendingInSpan(from, to);
+    }
+    // Anything the tier has committed is the official transcript's business,
+    // even when this particular correction did not mention it.
+    if (m_commitBoundarySec > 0.0)
+        dropPendingInSpan(0.0, m_commitBoundarySec);
+    // ...and the reverse: a correction window routinely reaches a little past
+    // the boundary it reports, and those last few words are still going to be
+    // re-decided.  They go back to the edge until the boundary catches up, so
+    // the official transcript never contains a word the tier has not committed.
+    holdBackUncommitted();
+    rebuildProvisional();
 
     // The interim edge.  Replaced wholesale every time, never appended.
     if (!response.streamingText.isEmpty()) {
@@ -225,6 +322,166 @@ quint64 LiveTranscript::apply(const asr::PushAudioResponse &response)
 
     recount();
     return m_version;
+}
+
+bool LiveTranscript::overlapsManualEdit(double startSec, double endSec) const
+{
+    for (const QPair<double, double> &span : m_manualSpans) {
+        if (qMin(endSec, span.second) - qMax(startSec, span.first) > 0.0)
+            return true;
+    }
+    return false;
+}
+
+void LiveTranscript::mergePending(const QList<asr::Word> &words, const QString &speaker,
+                                  float speakerProb, const QString &verifiedName)
+{
+    double from = 0.0;
+    double to = 0.0;
+    bool have = false;
+    for (const asr::Word &word : words) {
+        if (word.endSec <= word.startSec)
+            continue;
+        from = have ? qMin(from, word.startSec) : word.startSec;
+        to = have ? qMax(to, word.endSec) : word.endSec;
+        have = true;
+    }
+    if (!have)
+        return;
+
+    // The window this batch covers is replaced, not added to - a re-sent word
+    // lands on its own previous position instead of beside it.
+    QList<asr::Word> kept;
+    kept.reserve(m_pending.size() + words.size());
+    for (const asr::Word &word : m_pending) {
+        if (word.startSec >= from - 1e-6 && word.startSec < to)
+            continue;
+        kept.append(word);
+    }
+    for (const asr::Word &incoming : words) {
+        if (incoming.w.trimmed().isEmpty())
+            continue;
+        // A word the tier has already committed belongs to the official lane,
+        // and a span somebody edited by hand belongs to them.
+        if (incoming.endSec <= m_commitBoundarySec + 1e-3)
+            continue;
+        if (overlapsManualEdit(incoming.startSec, incoming.endSec))
+            continue;
+        asr::Word word = incoming;
+        if (isUnassignedSlot(word.speaker)) {
+            const QString atWord = speakerAt(word.startSec, word.endSec);
+            word.speaker = !atWord.isEmpty() ? atWord
+                                             : (isUnassignedSlot(speaker) ? QString() : speaker);
+        }
+        kept.append(word);
+    }
+    std::stable_sort(kept.begin(), kept.end(), [](const asr::Word &a, const asr::Word &b) {
+        return a.startSec < b.startSec;
+    });
+    m_pending = kept;
+    if (!isPlaceholderName(verifiedName))
+        m_pendingName = verifiedName.trimmed();
+    if (speakerProb > 0.0f)
+        m_pendingProb = speakerProb;
+}
+
+void LiveTranscript::holdBackUncommitted()
+{
+    if (m_done || m_commitBoundarySec <= 0.0)
+        return;
+    QList<asr::Word> released;
+    bool changed = false;
+    QList<asr::Word> keptWords;
+    QHash<QString, QString> nameBySpeaker;
+    for (const asr::DisplayRow &row : m_rows) {
+        if (!row.verifiedName.isEmpty())
+            nameBySpeaker.insert(row.speaker, row.verifiedName);
+        for (const asr::Word &word : row.displayTokens) {
+            if (word.endSec > m_commitBoundarySec + 1e-3
+                && !overlapsManualEdit(word.startSec, word.endSec)) {
+                released.append(word);
+                changed = true;
+                continue;
+            }
+            keptWords.append(word);
+        }
+    }
+    if (!changed)
+        return;
+
+    m_rows.clear();
+    m_nextRowId = 1;
+    for (const asr::Word &word : keptWords)
+        appendWords({word}, word.speaker, m_pendingProb, nameBySpeaker.value(word.speaker));
+
+    // Back onto the edge, where a later correction will find them again.
+    for (const asr::Word &word : released) {
+        bool already = false;
+        for (const asr::Word &pending : m_pending) {
+            if (qMin(pending.endSec, word.endSec) - qMax(pending.startSec, word.startSec) > 0.0) {
+                already = true;
+                break;
+            }
+        }
+        if (!already)
+            m_pending.append(word);
+    }
+    std::stable_sort(m_pending.begin(), m_pending.end(),
+                     [](const asr::Word &a, const asr::Word &b) {
+                         return a.startSec < b.startSec;
+                     });
+}
+
+void LiveTranscript::dropPendingInSpan(double startSec, double endSec)
+{
+    QList<asr::Word> kept;
+    kept.reserve(m_pending.size());
+    for (const asr::Word &word : m_pending) {
+        // Strictly by the word's own start, the same rule spliceWords() uses,
+        // so the two lanes cannot disagree about which side a word is on.
+        if (word.startSec >= startSec - 1e-6 && word.startSec < endSec + 1e-3)
+            continue;
+        kept.append(word);
+    }
+    m_pending = kept;
+}
+
+void LiveTranscript::rebuildProvisional()
+{
+    m_pendingRows.clear();
+    int index = 0;
+    for (const asr::Word &word : m_pending) {
+        const bool sameTurn = !m_pendingRows.isEmpty()
+            && m_pendingRows.last().speaker == word.speaker
+            && (word.startSec - m_pendingRows.last().endSec) <= kTurnGapSec;
+        if (!sameTurn) {
+            asr::DisplayRow row;
+            // Ids of their own, stable across polls while the row lasts: the
+            // client keys its lane locks on them and would otherwise treat one
+            // moving row as a new one every 160 ms.
+            row.rowId = QStringLiteral("prov%1").arg(++index);
+            row.speaker = word.speaker;
+            row.speakerProb = m_pendingProb;
+            row.verifiedName = m_pendingName;
+            row.startSec = word.startSec;
+            row.endSec = word.endSec;
+            row.isProvisional = true;
+            m_pendingRows.append(row);
+        }
+        asr::DisplayRow &row = m_pendingRows.last();
+        row.displayTokens.append(word);
+        row.endSec = qMax(row.endSec, word.endSec);
+    }
+    for (asr::DisplayRow &row : m_pendingRows) {
+        if (row.verifiedName.isEmpty())
+            row.verifiedName = m_nameBySlot.value(row.speaker);
+        // Never the start of a sentence: the edge is the middle of whatever
+        // the official transcript was saying.
+        rebuildPhrases(&row, false);
+        row.isProvisional = true;
+        row.updatingText = row.mergedText;
+        row.updatingTokens = row.displayTokens;
+    }
 }
 
 void LiveTranscript::replaceSpan(const QList<asr::Word> &words, const QString &speaker,
@@ -262,7 +519,7 @@ void LiveTranscript::replaceSpan(const QList<asr::Word> &words, const QString &s
     // timings, that was the path every single chunk took.  The result was a
     // transcript whose committed rows had an empty speaker and no name at all
     // while the provisional row, set directly in apply(), showed both.
-    spliceWords(m_revision, from, to, words, speaker, speakerProb, verifiedName);
+    spliceWords(m_revision, from, to, words, speaker, speakerProb, verifiedName, true);
 }
 
 void LiveTranscript::appendWords(const QList<asr::Word> &words, const QString &speaker,
@@ -298,10 +555,30 @@ void LiveTranscript::appendWords(const QList<asr::Word> &words, const QString &s
     }
 
     if (!m_rows.isEmpty())
-        rebuildPhrases(&m_rows.last());
+        rebuildPhrasesAt(m_rows.size() - 1);
 }
 
-void LiveTranscript::rebuildPhrases(asr::DisplayRow *row) const
+bool LiveTranscript::rowOpensSentence(int index) const
+{
+    if (index <= 0)
+        return true; // the meeting opens one
+    const asr::DisplayRow &previous = m_rows.at(index - 1);
+    if (previous.displayTokens.isEmpty())
+        return true;
+    // A row break is a turn or a pause, not a full stop.  Whether a capital
+    // belongs here is decided by the punctuation of the word before it, which
+    // is the same rule _sentence_case_itn_parts uses over the rendered text.
+    return closesSentence(previous.displayTokens.last().w);
+}
+
+void LiveTranscript::rebuildPhrasesAt(int index)
+{
+    if (index < 0 || index >= m_rows.size())
+        return;
+    rebuildPhrases(&m_rows[index], rowOpensSentence(index));
+}
+
+void LiveTranscript::rebuildPhrases(asr::DisplayRow *row, bool opensSentence) const
 {
     row->phrases.clear();
     row->mergedText.clear();
@@ -316,14 +593,21 @@ void LiveTranscript::rebuildPhrases(asr::DisplayRow *row) const
     // does NOT capitalise its word records.  _sentence_case_itn_parts
     // (itn_merge.py:313) runs over the whole rendered text instead, so the
     // first word after a full stop arrives as "tăng" and would stay that way
-    // if every layer only looked at one word at a time.  A row is the widest
-    // piece of text this side ever holds at once, and a row is one speaker
-    // turn, so a row opens a sentence.
+    // if every layer only looked at one word at a time.
+    //
+    // It is applied to the COPY that goes into the phrase, never to
+    // displayTokens.  Writing the capital back into the token makes it
+    // permanent: a later correction that moves the sentence boundary cannot
+    // take it off again, so a word ends up capitalised in the middle of a
+    // sentence with nothing left to explain why.  The client renders the
+    // phrase surface (TranscriptModel::relabelFromSurface prefers it), so the
+    // capital still reaches the screen.
     asr::Phrase phrase;
     float sum = 0.0f;
     int count = 0;
-    bool sentenceStart = true;
-    for (asr::Word &word : row->displayTokens) {
+    bool sentenceStart = opensSentence;
+    for (const asr::Word &token : row->displayTokens) {
+        asr::Word word = token;
         if (sentenceStart)
             word.w = sentenceCased(word.w);
         // A token with no letter in it - a stray mark - neither takes the
@@ -454,18 +738,189 @@ void LiveTranscript::recount()
     }
 }
 
+void LiveTranscript::noteProgress(double sourceSeenSec, double speechSeenSec)
+{
+    if (sourceSeenSec > m_sourceSeenSec)
+        m_sourceSeenSec = sourceSeenSec;
+    if (speechSeenSec > m_speechSeenSec)
+        m_speechSeenSec = speechSeenSec;
+    ++m_version;
+}
+
 void LiveTranscript::markDone()
 {
+    // The tail the correction pass never reached.  The final flush normally
+    // covers everything, so this is usually empty - but when it is not, these
+    // are real words that were spoken, and dropping them would silently
+    // truncate the end of the meeting.
+    //
+    // A word is only promoted when the official lane has nothing over the same
+    // seconds: the correction and the edge describe the same audio, and
+    // promoting a word the correction already rewrote is exactly the duplicate
+    // this lane exists to prevent.
+    QList<asr::Word> promoted;
+    for (const asr::Word &word : m_pending) {
+        if (word.endSec <= m_commitBoundarySec + 1e-3)
+            continue;
+        if (overlapsManualEdit(word.startSec, word.endSec))
+            continue;
+        bool covered = false;
+        for (const asr::DisplayRow &row : m_rows) {
+            if (row.endSec < word.startSec - 0.3 || row.startSec > word.endSec + 0.3)
+                continue;
+            for (const asr::Word &placed : row.displayTokens) {
+                const double overlap =
+                    qMin(placed.endSec, word.endSec) - qMax(placed.startSec, word.startSec);
+                if (overlap > 0.2 * qMax(0.01, word.endSec - word.startSec)) {
+                    covered = true;
+                    break;
+                }
+                // The same word, a fraction of a second away.  A correction
+                // does not re-use the streaming pass's timings exactly, so the
+                // settled copy of a word and the edge's copy of it routinely
+                // sit next to each other rather than on top of each other -
+                // and promoting the second one is what puts "kiểm kiểm" at the
+                // end of a meeting.
+                if (qAbs(placed.startSec - word.startSec) < 0.3
+                    && wordCore(placed.w) == wordCore(word.w)) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered)
+                break;
+        }
+        if (!covered)
+            promoted.append(word);
+    }
+    if (!promoted.isEmpty()) {
+        QList<asr::Word> flat;
+        for (const asr::DisplayRow &row : m_rows)
+            flat.append(row.displayTokens);
+        flat.append(promoted);
+        std::stable_sort(flat.begin(), flat.end(), [](const asr::Word &a, const asr::Word &b) {
+            return a.startSec < b.startSec;
+        });
+        QHash<QString, QString> nameBySpeaker;
+        for (const asr::DisplayRow &row : m_rows) {
+            if (!row.verifiedName.isEmpty())
+                nameBySpeaker.insert(row.speaker, row.verifiedName);
+        }
+        m_rows.clear();
+        m_nextRowId = 1;
+        for (const asr::Word &word : flat)
+            appendWords({word}, word.speaker, m_pendingProb, nameBySpeaker.value(word.speaker));
+        ++m_revision;
+    }
+    m_pending.clear();
+    m_pendingRows.clear();
+
     if (m_haveProvisional && !m_provisional.displayTokens.isEmpty()) {
         // Whatever the edge held is now as settled as it will ever be.
         m_provisional.isProvisional = false;
         m_rows.append(m_provisional);
-        rebuildPhrases(&m_rows.last());
+        rebuildPhrasesAt(m_rows.size() - 1);
     }
     m_haveProvisional = false;
     m_provisional = asr::DisplayRow();
     m_done = true;
     ++m_version;
+    recount();
+}
+
+bool LiveTranscript::isEditable(double startSec, double endSec) const
+{
+    Q_UNUSED(startSec);
+    // A finished meeting has no moving edge: every word in it is final, so
+    // every word in it can be corrected.
+    if (m_done)
+        return true;
+    return endSec <= m_commitBoundarySec + 1e-3;
+}
+
+void LiveTranscript::restore(const asr::StateResponse &state)
+{
+    m_rows = state.state.rows;
+    m_pending.clear();
+    m_pendingRows.clear();
+    m_provisional = asr::DisplayRow();
+    m_haveProvisional = false;
+    m_revision = state.transcriptRevision;
+    m_version = qMax(m_version, state.stateVersion);
+    m_commitBoundarySec = state.commitBoundarySec;
+    m_done = state.transcriptFinal;
+    m_sourceSeenSec = qMax(m_sourceSeenSec, state.state.sourceSeenSec);
+    m_speechSeenSec = qMax(m_speechSeenSec, state.state.speechSeenSec);
+    if (state.state.sourceTotalSec > 0.0)
+        m_sourceTotalSec = state.state.sourceTotalSec;
+    if (!state.state.title.isEmpty())
+        m_title = state.state.title;
+    m_ampTrace = state.state.ampTrace;
+    m_ampStepSec = state.state.ampTraceStepSec;
+    // Row ids have to keep rising past whatever the snapshot already used, or
+    // the next row collides with one the client has on screen.
+    m_nextRowId = 1;
+    for (const asr::DisplayRow &row : m_rows) {
+        const QString id = row.rowId;
+        if (!id.startsWith(QLatin1Char('r')))
+            continue;
+        bool ok = false;
+        const int number = id.mid(1).toInt(&ok);
+        if (ok && number >= m_nextRowId)
+            m_nextRowId = number + 1;
+    }
+    // Names first: a resumed meeting has to keep calling a voice what it was
+    // already calling it, and the tier's next chunk may take a while to say
+    // so again.
+    m_nameBySlot.clear();
+    for (const asr::DisplayRow &row : m_rows) {
+        if (!row.speaker.isEmpty() && !isPlaceholderName(row.verifiedName))
+            m_nameBySlot.insert(row.speaker, row.verifiedName);
+    }
+
+    // The diarization timeline is not in the snapshot; it is rebuilt from the
+    // words that were placed with it, so a resumed meeting still knows who
+    // owned the seconds it has already transcribed.
+    m_turns.clear();
+    for (const asr::DisplayRow &row : m_rows) {
+        for (const asr::Word &word : row.displayTokens) {
+            if (word.endSec <= word.startSec || word.speaker.isEmpty())
+                continue;
+            if (!m_turns.isEmpty() && m_turns.last().speaker == word.speaker
+                && word.startSec <= m_turns.last().endSec + kTurnGapSec) {
+                m_turns.last().endSec = qMax(m_turns.last().endSec, word.endSec);
+                continue;
+            }
+            m_turns.append({word.startSec, word.endSec, word.speaker});
+        }
+    }
+    std::stable_sort(m_turns.begin(), m_turns.end(),
+                     [](const DiarTurn &a, const DiarTurn &b) { return a.startSec < b.startSec; });
+
+    // The moving edge of a snapshot becomes settled text.
+    //
+    // The words the tier had emitted but not yet corrected sit in the
+    // provisional lane, and after a restart nothing will ever correct them:
+    // the audio behind them was already consumed by the stream that died, so
+    // it is not in the backlog and is never decoded again.  Leaving them in
+    // the edge means the next commit boundary - which lands past them, on the
+    // new stream's timeline - drops them silently.  Measured 2026-09-24: a
+    // 45 s meeting killed at 30 s came back with 8 of 29 words in the 20-30 s
+    // bucket, and that hole is exactly this.
+    //
+    // So they are promoted, and the commit boundary is moved to cover them.
+    // That is the honest reading: they are as settled as they will ever be.
+    double promotedTo = m_commitBoundarySec;
+    for (const asr::DisplayRow &row : state.state.provisionalRows) {
+        for (const asr::Word &word : row.displayTokens) {
+            if (word.w.trimmed().isEmpty() || word.endSec <= word.startSec)
+                continue;
+            appendWords({word}, word.speaker.isEmpty() ? row.speaker : word.speaker,
+                        row.speakerProb, row.verifiedName);
+            promotedTo = qMax(promotedTo, word.endSec);
+        }
+    }
+    m_commitBoundarySec = promotedTo;
     recount();
 }
 
@@ -498,18 +953,44 @@ asr::StateResponse LiveTranscript::snapshot(const QString &sessionId, qint64 str
     state.confThresholdPct = kConfThresholdPct;
     const bool windowed = viewStartSec >= 0.0 || viewEndSec >= 0.0;
     for (const asr::DisplayRow &row : m_rows) {
-        if (windowed) {
-            // Any overlap with the window keeps the row: clipping a row in half
-            // would hand the review pane a sentence with no beginning.
-            if (viewStartSec >= 0.0 && row.endSec < viewStartSec)
-                continue;
-            if (viewEndSec >= 0.0 && row.startSec > viewEndSec)
-                continue;
+        if (!windowed) {
+            state.rows.append(row);
+            continue;
         }
-        state.rows.append(row);
+        if (viewStartSec >= 0.0 && row.endSec < viewStartSec)
+            continue;
+        if (viewEndSec >= 0.0 && row.startSec > viewEndSec)
+            continue;
+        // The row overlaps the window, but its words may run far outside it -
+        // a turn is minutes long and the window is ten seconds.  Asking for
+        // [20, 30] and getting the whole meeting back, which is what this did
+        // until 2026-09-24, makes the review window useless for the thing it
+        // exists for: playing one sentence against its own audio.
+        asr::DisplayRow clipped = row;
+        clipped.displayTokens.clear();
+        for (const asr::Word &word : row.displayTokens) {
+            if (viewStartSec >= 0.0 && word.endSec < viewStartSec)
+                continue;
+            if (viewEndSec >= 0.0 && word.startSec > viewEndSec)
+                continue;
+            clipped.displayTokens.append(word);
+        }
+        if (clipped.displayTokens.isEmpty())
+            continue;
+        clipped.startSec = clipped.displayTokens.first().startSec;
+        clipped.endSec = clipped.displayTokens.last().endSec;
+        // The row no longer opens where it did, so the capital it was given
+        // does not belong to it any more either.
+        rebuildPhrases(&clipped, false);
+        state.rows.append(clipped);
     }
-    if (m_haveProvisional)
-        state.provisionalRows.append(m_provisional);
+    // The moving edge is live-only: a windowed read is a review of settled
+    // text, and a guess about the last second of a meeting has no place in it.
+    if (!windowed) {
+        state.provisionalRows.append(m_pendingRows);
+        if (m_haveProvisional)
+            state.provisionalRows.append(m_provisional);
+    }
     state.speakerIds = speakerIds();
     state.nPhrases = m_nPhrases;
     state.nLow = m_nLow;
@@ -643,12 +1124,43 @@ bool LiveTranscript::applyEdit(quint64 baseRevision, double startSec, double end
 {
     // An operator edit changes text, never who said it, so it passes no
     // speaker of its own and every word keeps the slot it already had.
-    return spliceWords(baseRevision, startSec, endSec, words, QString(), 0.0f, QString());
+    if (!spliceWords(baseRevision, startSec, endSec, words, QString(), 0.0f, QString()))
+        return false;
+
+    // From here the tier may not write over these seconds.  A confirmed human
+    // decision outranks any later machine correction - realtime_ui.py carries
+    // the same rule as the `manual` flag on each word, and without it the
+    // correction window that rolls over this span a few seconds later quietly
+    // puts the old text back while the audit log still says the edit applied.
+    double from = startSec;
+    double to = endSec;
+    for (const asr::Word &word : words) {
+        if (word.endSec <= word.startSec)
+            continue;
+        from = qMin(from, word.startSec);
+        to = qMax(to, word.endSec);
+    }
+    QList<QPair<double, double>> merged;
+    merged.append({from, to});
+    for (const QPair<double, double> &span : m_manualSpans) {
+        if (qMin(merged.last().second, span.second) - qMax(merged.last().first, span.first)
+            >= 0.0) {
+            merged.last().first = qMin(merged.last().first, span.first);
+            merged.last().second = qMax(merged.last().second, span.second);
+        } else {
+            merged.append(span);
+        }
+    }
+    m_manualSpans = merged;
+    dropPendingInSpan(from, to);
+    rebuildProvisional();
+    return true;
 }
 
 bool LiveTranscript::spliceWords(quint64 baseRevision, double startSec, double endSec,
                                  const QList<asr::Word> &words, const QString &speaker,
-                                 float speakerProb, const QString &verifiedName)
+                                 float speakerProb, const QString &verifiedName,
+                                 bool respectManual)
 {
     if (baseRevision != m_revision)
         return false;
@@ -679,6 +1191,13 @@ bool LiveTranscript::spliceWords(quint64 baseRevision, double startSec, double e
             nameBySpeaker.insert(row.speaker, row.verifiedName);
         for (const asr::Word &word : row.displayTokens) {
             const bool inside = word.startSec >= startSec && word.startSec < endSec;
+            // A word somebody typed is not the tier's to take back.  It stays
+            // where it is and is not even offered as "what used to be here",
+            // so the incoming batch cannot inherit its lane either.
+            if (inside && respectManual && overlapsManualEdit(word.startSec, word.endSec)) {
+                kept.append({word, row.verifiedName, row.speakerProb});
+                continue;
+            }
             if (inside)
                 replaced.append({word, row.verifiedName, row.speakerProb});
             else
@@ -714,6 +1233,8 @@ bool LiveTranscript::spliceWords(quint64 baseRevision, double startSec, double e
         return nullptr;
     };
     for (const asr::Word &incoming : words) {
+        if (respectManual && overlapsManualEdit(incoming.startSec, incoming.endSec))
+            continue; // these seconds belong to whoever edited them
         asr::Word word = incoming;
         // An editor that gives no timing gets the range it replaced, so the
         // word still sorts into the right place in the meeting.
@@ -783,11 +1304,54 @@ bool LiveTranscript::spliceWords(quint64 baseRevision, double startSec, double e
         } else {
             name = nameBySpeaker.value(word.speaker);
         }
+        // Last resort, and the one that makes speaker verification visible at
+        // all: the name the tier gave this slot on the chunk that decoded it.
+        // A correction carries no name, and since the correction is what puts
+        // a word into the official transcript, every first placement would
+        // otherwise be anonymous.  Only when nothing else supplied a name -
+        // the freeze rule above still wins.
+        if (isPlaceholderName(name))
+            name = m_nameBySlot.value(word.speaker);
         kept.append({word, name, prob});
     }
     std::stable_sort(kept.begin(), kept.end(), [](const Placed &a, const Placed &b) {
         return a.word.startSec < b.word.startSec;
     });
+
+    // Collapse a word against its own echo.
+    //
+    // Two correction windows can both report the same word with timings a
+    // fraction of a second apart, and the span rule cannot see that: the
+    // second batch only replaces the span ITS OWN words cover, so a copy
+    // sitting just before that span survives.  What reaches the screen is
+    // "Hôm Hôm nay" - measured on every session of the 2026-09-24 run.  The
+    // reference adapter collapses the same way
+    // (`_collapse_overlapping_repeats`), and for the same reason.
+    //
+    // The later copy wins: it is the one decided with context on both sides.
+    // A genuine repetition - somebody saying "rất rất" - is several hundred
+    // milliseconds apart and survives this.
+    QList<Placed> collapsed;
+    collapsed.reserve(kept.size());
+    for (const Placed &item : kept) {
+        if (!collapsed.isEmpty()) {
+            Placed &previous = collapsed.last();
+            const QString core = wordCore(item.word.w);
+            if (!core.isEmpty() && core == wordCore(previous.word.w)
+                && item.word.startSec < previous.word.endSec + 0.3) {
+                // Keep whichever surface carries punctuation, and widen the
+                // span to cover both so no audio is orphaned between them.
+                const double from = qMin(previous.word.startSec, item.word.startSec);
+                const double to = qMax(previous.word.endSec, item.word.endSec);
+                previous = item;
+                previous.word.startSec = from;
+                previous.word.endSec = to;
+                continue;
+            }
+        }
+        collapsed.append(item);
+    }
+    kept = collapsed;
 
     m_rows.clear();
     m_nextRowId = 1;
@@ -815,8 +1379,23 @@ void LiveTranscript::renameSpeaker(const QString &from, const QString &to,
             if (word.speaker == from && !to.isEmpty())
                 word.speaker = to;
         }
-        rebuildPhrases(&row);
     }
+    for (int index = 0; index < m_rows.size(); ++index) {
+        if (m_rows.at(index).speaker == to || m_rows.at(index).speaker == from)
+            rebuildPhrasesAt(index);
+    }
+    // A reviewer's decision outranks whatever the tier will say next, so the
+    // slot map follows the rename - otherwise the next chunk's verified name
+    // lands on the words that arrive after it and the meeting ends up with
+    // two names for one voice.
+    const QString slot = to.isEmpty() ? from : to;
+    if (verifiedName.trimmed().isEmpty())
+        m_nameBySlot.remove(slot);
+    else
+        m_nameBySlot.insert(slot, verifiedName.trimmed());
+    if (!from.isEmpty() && from != slot)
+        m_nameBySlot.remove(from);
+    rebuildProvisional();
     if (m_haveProvisional && m_provisional.speaker == from) {
         if (!to.isEmpty())
             m_provisional.speaker = to;

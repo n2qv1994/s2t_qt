@@ -589,6 +589,7 @@ struct UpstreamRecord
     QList<quint64> seqs;
     QList<int> sizes;
     int livePolls = 0;
+    int flushTicks = 0;
     double sourceSeenSec = 0.0;
     // When set, push_audio answers UNAVAILABLE.  That is a *transport* status,
     // so the buffer holds the packet and keeps retrying it - which is how the
@@ -693,11 +694,21 @@ void registerFakeUpstream(grpc::Server *server, UpstreamRecord *record)
                 return status;
             }
 
+            // Silence with no seq byte in it is the stop flush, not audio the
+            // client sent: since 2026-09-24 the backend pumps a few ticks of
+            // real silence before the terminal request, because the dense
+            // endpointer will not close the last sentence until it has heard
+            // the pause after it.  Counted apart so "the pipeline received
+            // exactly N packets" keeps meaning what it says.
+            const bool silent = audio.size() > 0 && audio.count('\0') == audio.size();
             if (final) {
                 // The far end of the drain barrier.  Recorded as "stop" so the
                 // ordering assertion reads the same as it did when there was a
                 // stop_session RPC to record.
                 record->events << QStringLiteral("stop");
+            } else if (silent) {
+                record->events << QStringLiteral("flush");
+                ++record->flushTicks;
             } else {
                 record->events << QStringLiteral("push");
                 record->seqs << seqFromAudio(audio);
@@ -742,6 +753,10 @@ int chain()
     const int kPackets = 10;
     // 160 ms at 48 kHz mono s16 - the client's live packet size.
     const int kPacketBytes = 15360;
+    // What the tier is handed for it.  push_audio normalises every packet to
+    // 16 kHz mono before anything else happens to it, so three input bytes
+    // become one - see SessionBuffer::push and shared/audio/Pcm16k.h.
+    const int kUpstreamPacketBytes = kPacketBytes / 3;
 
     // ---- the stand-in inference tier --------------------------------------
     UpstreamRecord record;
@@ -969,16 +984,25 @@ int chain()
             check(ordered, "the pipeline received them in order");
             bool wholePackets = true;
             for (int size : record.sizes) {
-                if (size != kPacketBytes)
+                if (size != kUpstreamPacketBytes)
                     wholePackets = false;
             }
-            check(wholePackets, "every packet arrived whole");
+            check(wholePackets,
+                  QStringLiteral("every packet arrived whole, normalised to 16 kHz mono (%1 B "
+                                 "expected, first %2)")
+                      .arg(kUpstreamPacketBytes)
+                      .arg(record.sizes.isEmpty() ? 0 : record.sizes.first()));
             // The barrier itself: stop is last, and everything before it is a
             // push.  If stop_session could overtake the queue this fails.
             check(!record.events.isEmpty() && record.events.last() == QStringLiteral("stop"),
                   "stop_session reached the pipeline last");
             check(record.events.count(QStringLiteral("push")) == kPackets,
                   "no push_audio arrived after stop_session");
+            // D6: silence before the terminal request, not instead of it.
+            check(record.flushTicks > 0 && record.events.indexOf(QStringLiteral("flush"))
+                      > record.events.lastIndexOf(QStringLiteral("push")),
+                  QStringLiteral("the stop flush pumps silence after the last packet (%1 ticks)")
+                      .arg(record.flushTicks));
         }
 
         // ---- after the end ------------------------------------------------------
@@ -1157,6 +1181,12 @@ int restart()
     const int kBeforeStall = 4;   // forwarded normally
     const int kDuringStall = 6;   // accepted, journalled, never forwarded
     const int kPacketBytes = 4096;
+    // The pusher below declares 48 kHz, and push_audio normalises to 16 kHz
+    // mono before the packet is journalled, so this is what both the journal
+    // and the tier hold.  Rounded, not divided: 2048 frames at a third of the
+    // rate is 682.67, and the resampler emits 683 - the same rounding np.interp
+    // does in the reference adapter.
+    const int kUpstreamPacketBytes = 2 * int(qRound(double(kPacketBytes / 2) / 3.0));
 
     QTemporaryDir journalDir;
     check(journalDir.isValid(), "a journal directory can be created");
@@ -1305,7 +1335,7 @@ int restart()
             check(ordered, "every packet arrived exactly once, in order, across the restart");
             bool whole = true;
             for (int size : record.sizes) {
-                if (size != kPacketBytes)
+                if (size != kUpstreamPacketBytes)
                     whole = false;
             }
             check(whole, "every packet arrived whole");
@@ -1509,7 +1539,18 @@ int store()
     check(tail.pcm.size() == 3200,
           QStringLiteral("and returns only what exists (%1 bytes)").arg(tail.pcm.size()));
     check(!store.audioRange(id, 1.0, 0.5, &range, &error), "an inverted range is refused");
-    check(!store.audioRange(id, 0.0, 120.0, &range, &error), "a range over 60 s is refused");
+    // Over-long and negative ranges are clamped rather than refused (changed
+    // 2026-09-24).  A reviewer dragging to either edge of the waveform asks
+    // for exactly those, and the response says which range it really served -
+    // which a refusal does not, while stopping the player dead.
+    asr::AudioRangeResponse wide;
+    check(store.audioRange(id, 0.0, 120.0, &wide, &error)
+              && wide.endSec <= 60.0 + 1e-6,
+          QStringLiteral("a range over 60 s is clamped to 60 (%1 s)").arg(wide.endSec));
+    asr::AudioRangeResponse negative;
+    check(store.audioRange(id, -5.0, 0.5, &negative, &error) && negative.startSec >= 0.0,
+          QStringLiteral("a range starting before zero is clamped to zero (%1 s)")
+              .arg(negative.startSec));
 
     // A session that was started and never pushed to is empty, not missing -
     // start_session without a successful push is a real state.
@@ -1738,9 +1779,19 @@ int punctuation()
         check(row.mergedText == QStringLiteral("Hôm khu vực. Tăng"),
               QStringLiteral("the word after a full stop is capitalised by this side (%1)")
                   .arg(row.mergedText));
+        // And NOT on the display token, deliberately (2026-09-24).  Writing
+        // the capital back into the token makes it permanent: a later
+        // correction that moves the sentence boundary cannot take it off
+        // again, and the word stays capitalised in the middle of a sentence.
+        // The client renders the phrase surface - relabelFromSurface() prefers
+        // it over the bare tokens - so the capital still reaches the screen.
         check(row.displayTokens.size() == 4
-                  && row.displayTokens.last().w == QStringLiteral("Tăng"),
-              "and the capital is on the token too, so the editor sees the same text");
+                  && row.displayTokens.last().w == QStringLiteral("tăng"),
+              QStringLiteral("the token itself keeps the tier's own surface (%1)")
+                  .arg(row.displayTokens.isEmpty() ? QString() : row.displayTokens.last().w));
+        check(!row.phrases.isEmpty()
+                  && row.phrases.last().words.first().w == QStringLiteral("Tăng"),
+              "the capital lives on the phrase copy, which is what is drawn");
     }
 
     // The ellipsis closes a sentence as much as a full stop does, and it is
@@ -1799,6 +1850,11 @@ int punctuation()
         second.speaker = QStringLiteral("4");
         meeting.apply(second);
     }
+    // Evidence is read off the finished transcript, which is where the real
+    // path reads it: streaming words live in the provisional lane until a
+    // correction settles them, and markDone() is what promotes whatever the
+    // correction never covered.
+    meeting.markDone();
     const QList<QPair<double, double>> spans = meeting.speakerSpans(QStringLiteral("3"), 45.0);
     check(spans.size() == 1 && nearly(spans.first().first, 0.0) && nearly(spans.first().second, 4.0),
           QStringLiteral("a speaker's evidence is the span their own words cover (%1)")
@@ -1831,6 +1887,7 @@ int punctuation()
         say(QStringLiteral("2"), 3.5, 4.0);
         say(QStringLiteral("1"), 4.5, 8.0); // 0.5 s after slot 2 - inside kTurnGapSec
     }
+    interleaved.markDone();
     const QList<QPair<double, double>> split = interleaved.speakerSpans(QStringLiteral("1"), 45.0);
     check(split.size() == 2,
           QStringLiteral("a span breaks where somebody else spoke, however short the gap (%1)")

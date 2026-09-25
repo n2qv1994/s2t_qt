@@ -19,12 +19,14 @@ double nowSeconds()
     return double(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
 }
 
-// Sample rate assumed when sizing a session's queue before the first packet
-// has arrived to say otherwise.  48 kHz mono is what the client records at and
-// what run_windows_ui.ps1 passed; a session that turns out to use something
-// else is still bounded, just to a different number of seconds.
-const int kAssumedSampleRate = 48000;
-const int kAssumedChannels = 1;
+// What `buffer/seconds` is counted in.
+//
+// Every packet is normalised to 16 kHz mono before it reaches the queue - see
+// SessionBuffer::push - so this is not an assumption any more, it is the
+// format the queue holds.  It was 48 kHz, which made the setting mean three
+// times what it said: `buffer_seconds=10` accepted 30 seconds of audio.
+const int kQueueSampleRate = 16000;
+const int kQueueChannels = 1;
 
 } // namespace
 
@@ -168,7 +170,7 @@ SessionBuffer::Settings BufferHub::settingsFor(const QString &client) const
     settings.store = &m_store;
     settings.client = client;
     settings.capacityBytes =
-        m_config.bufferBytesPerSession(kAssumedSampleRate, kAssumedChannels);
+        m_config.bufferBytesPerSession(kQueueSampleRate, kQueueChannels);
     settings.upstreamTimeoutMs = m_config.upstreamTimeoutMs;
     settings.statePollMs = m_config.statePollMs;
     settings.journalDir = m_config.journalDir;
@@ -262,6 +264,20 @@ grpc::Status BufferHub::startSession(const asr::StartSessionRequest &request,
 
     Q_UNUSED(timeoutMs);
 
+    // Checked before anything exists.  A config this server does not
+    // understand is the caller's mistake, and telling them now is the only
+    // moment it can still be fixed - after this point the meeting is running
+    // under a setting they did not ask for and nothing will ever say so.
+    QString configError;
+    if (!BackendSessionConfig::validateJson(request.configJson, &configError)) {
+        LOG_WARN(applog::cat::Session)
+            << "start_session from" << client << "refused -" << configError;
+        grpc::Status status;
+        status.code = grpc::InvalidArgument;
+        status.message = configError;
+        return status;
+    }
+
     QString warning;
     const BackendSessionConfig sessionConfig =
         BackendSessionConfig::fromJson(request.configJson, &warning);
@@ -321,6 +337,103 @@ void BufferHub::forget(const QString &sessionId)
     // resurrect it at the next start.
     if (!handle.isEmpty() && !m_config.journalDir.trimmed().isEmpty())
         jrn::store::remove(m_config.journalDir, handle);
+}
+
+grpc::Status BufferHub::editArchived(const asr::TextEditRequest &request,
+                                     asr::ReviewEditResponse *out)
+{
+    if (request.editorId.trimmed().isEmpty()) {
+        grpc::Status bad;
+        bad.code = grpc::InvalidArgument;
+        bad.message = QStringLiteral("thiếu editor_id - mỗi lần sửa bản chép đều được ghi nhật ký "
+                                     "kèm người thao tác");
+        return bad;
+    }
+
+    QMutexLocker lock(&m_archiveMutex);
+    asr::StateResponse saved;
+    if (!m_store.loadState(request.sessionId, &saved)) {
+        grpc::Status bad;
+        bad.code = grpc::NotFound;
+        bad.message = QStringLiteral("kho phiên không có bản chép của phiên '%1'")
+                          .arg(request.sessionId);
+        return bad;
+    }
+
+    LiveTranscript transcript;
+    transcript.restore(saved);
+    if (!transcript.applyEdit(request.baseRevision, request.startSec, request.endSec,
+                              request.replacementWords)) {
+        grpc::Status status;
+        status.code = grpc::Aborted;
+        status.message = QStringLiteral("bản chép đã đổi (phiên bản %1, bạn gửi %2) - hãy đọc lại "
+                                        "rồi sửa tiếp")
+                             .arg(transcript.revision())
+                             .arg(request.baseRevision);
+        return status;
+    }
+
+    const asr::StateResponse snapshot =
+        transcript.snapshot(request.sessionId, saved.streamId);
+    m_store.saveState(request.sessionId, snapshot);
+    m_store.appendAudit(
+        request.sessionId, QStringLiteral("text_edit"),
+        QStringLiteral("{\"editor\":\"%1\",\"start_sec\":%2,\"end_sec\":%3,\"words\":%4,"
+                       "\"revision\":%5,\"archived\":true}")
+            .arg(request.editorId)
+            .arg(request.startSec, 0, 'f', 3)
+            .arg(request.endSec, 0, 'f', 3)
+            .arg(request.replacementWords.size())
+            .arg(transcript.revision()));
+    out->sessionId = request.sessionId;
+    out->transcript = transcript.transcript();
+    out->state = snapshot.state;
+    LOG_INFO(applog::cat::Session)
+        << "archived text edit on" << request.sessionId << "by" << request.editorId << "-"
+        << request.startSec << ".." << request.endSec << "- revision now" << transcript.revision();
+    return grpc::Status();
+}
+
+grpc::Status BufferHub::renameArchived(const asr::RenameSpeakerRequest &request,
+                                       asr::ReviewEditResponse *out)
+{
+    if (request.editorId.trimmed().isEmpty()) {
+        grpc::Status bad;
+        bad.code = grpc::InvalidArgument;
+        bad.message = QStringLiteral("thiếu editor_id - mỗi lần đổi tên người nói đều được ghi "
+                                     "nhật ký kèm người thao tác");
+        return bad;
+    }
+
+    QMutexLocker lock(&m_archiveMutex);
+    asr::StateResponse saved;
+    if (!m_store.loadState(request.sessionId, &saved)) {
+        grpc::Status bad;
+        bad.code = grpc::NotFound;
+        bad.message = QStringLiteral("kho phiên không có bản chép của phiên '%1'")
+                          .arg(request.sessionId);
+        return bad;
+    }
+
+    LiveTranscript transcript;
+    transcript.restore(saved);
+    transcript.renameSpeaker(request.fromSpeaker, request.toSpeaker, request.verifiedName);
+    const asr::StateResponse snapshot =
+        transcript.snapshot(request.sessionId, saved.streamId);
+    m_store.saveState(request.sessionId, snapshot);
+    const QString slot = request.toSpeaker.isEmpty() ? request.fromSpeaker : request.toSpeaker;
+    const QString registryId = m_store.speakerForSlot(request.sessionId, slot);
+    if (!registryId.isEmpty())
+        m_store.setVerifiedName(request.sessionId, registryId, request.verifiedName, true);
+    m_store.appendAudit(
+        request.sessionId, QStringLiteral("rename_speaker"),
+        QStringLiteral("{\"editor\":\"%1\",\"from\":\"%2\",\"to\":\"%3\",\"name\":\"%4\","
+                       "\"archived\":true}")
+            .arg(request.editorId, request.fromSpeaker, request.toSpeaker, request.verifiedName));
+    out->sessionId = request.sessionId;
+    out->transcript = transcript.transcript();
+    out->state = snapshot.state;
+    return grpc::Status();
 }
 
 void BufferHub::noteUpstream(bool reachable, double latencyMs, const QString &detail)
@@ -399,7 +512,7 @@ quint64 BufferHub::queueCapacityBytes() const
 {
     QMutexLocker lock(&m_mutex);
     const quint64 perSession =
-        quint64(m_config.bufferBytesPerSession(kAssumedSampleRate, kAssumedChannels));
+        quint64(m_config.bufferBytesPerSession(kQueueSampleRate, kQueueChannels));
     return perSession * quint64(m_sessions.size());
 }
 

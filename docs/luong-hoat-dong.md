@@ -302,6 +302,14 @@ của model.
 2. `stop_session` — **deadline 3600 giây**. Đây là rào chắn xả: sau một lần
    upload tệp nhanh hoặc sau khi phục hồi mạng, hàng đợi phía server có thể còn
    giữ hàng phút audio. Deadline ngắn sẽ chốt nhầm một phiên chưa xử lý xong.
+   **Lỗi vận chuyển ở bước này được quay số lại và thử lại** (từ 2026-09-24,
+   tối đa 120 giây), đúng như `push_audio` vẫn làm, vì `stop_session` phía
+   server là bất biến — gọi lần hai trả lại đúng câu trả lời lần đầu. Ca thật
+   mà nó sinh ra để lo: người dùng bấm **Tạm dừng**, mạng chập vài giây, rồi
+   bấm **Dừng phiên**. Lúc tạm dừng không có `push_audio` nào nên không ai
+   phát hiện kết nối đã chết; `stop_session` đi trên đúng socket chết đó, hỏng
+   sau 0 ms, và trước bản vá này giao diện báo "Kết thúc phiên thất bại" trong
+   khi phiên vẫn `running=true` trên server, không cách nào đóng lại từ UI.
 3. `get_review_state` để lấy số revision cuối. Thất bại ở bước này **không** làm
    hỏng phiên — cuộc họp đã dừng và đã lưu, chỉ là bản tóm tắt thiếu số revision.
 4. `emit finished(summary)`.
@@ -483,6 +491,27 @@ Khi mất thiết bị: **không chèn khoảng lặng, không kết thúc phiê
 một lần. Audio trong lúc mất thiết bị không lấy lại được vì nó chưa từng được
 thu, nhưng phần trước và sau vẫn thuộc cùng một cuộc họp.
 
+> **Toàn bộ đoạn trên từng không chạy một dòng nào.** `QTimer` khai báo làm
+> thành viên thường **không** là con của đối tượng chứa nó, nên
+> `moveToThread()` để lại nó trên luồng cũ; `m_health.start()` chạy trên luồng
+> thu âm bị Qt từ chối bằng đúng một dòng trên stderr
+> (`QObject::startTimer: Timers cannot be started from another thread`), và
+> bộ canh không bao giờ tích. Kết quả đo được ngày 2026-09-24: rút mic giữa
+> cuộc họp không có cảnh báo nào, giao diện vẫn "đang ghi", và một mic câm 6
+> phút 33 giây đi qua mà không ai biết.
+>
+> Từ 2026-09-24 cả hai timer được `setParent(this)` trong constructor nên
+> chúng đi theo đối tượng, và `start()` kiểm tra lại `isActive()` — nếu bộ
+> canh vẫn không khởi động được thì log nói thẳng ra rằng phiên này đang chạy
+> **không có** bộ canh nào.
+>
+> Timer thứ hai (`m_drain`, 20 ms) rút dữ liệu khỏi thiết bị song song với
+> `readyRead`: `QAudioSource` chỉ phát tín hiệu khi bộ đệm của nó có dữ liệu,
+> và một bộ đệm tràn giữa hai tín hiệu thì mất những gì nó đang giữ. Trên mic
+> ảo PipeWire chỉ 47% số khung phát ra tới được client (11,4 s audio trong
+> 24,3 s ghi) trong khi `pw-record` trên đúng thiết bị đó thu đủ. Bộ đệm
+> thiết bị cũng được nâng từ 20 ms lên 200 ms cho cùng lý do.
+
 ### Máy trạng thái mic
 
 ```
@@ -612,6 +641,54 @@ Client poll năm lần một giây; để một lần poll hỏng làm nhấp nh
 bản chép thì tệ hơn là hiện nó chậm 200 ms. Quá 2 giây thì trạng thái lỗi được
 trả thẳng cho client — che giấu lâu hơn thế là nói dối.
 
+### 7b.4b Hai làn chữ, và ranh giới giữa chúng
+
+Tầng suy luận trả về hai thứ chữ khác hẳn nhau, và trộn chúng làm một là lỗi
+mà người dùng nhìn thấy dưới dạng từ bị lặp ở mép đoạn ("Hôm Hôm nay", "Hồi
+hồi nhỏ"):
+
+| Nguồn | Là gì | Đi đâu |
+|---|---|---|
+| `asr_words`, `streaming_text` | **Phỏng đoán.** Cửa sổ ASR ~8 giây, được gửi lại mỗi gói và bị viết lại bởi pass correction. | Làn tạm — `provisional_rows` |
+| `correction.merged_words` | **Quyết định.** Đã qua ITN, dấu câu và ngữ cảnh hai bên. | Bản chép chính thức — `rows` |
+
+`commit_boundary_sec` là ranh giới: **không có từ nào sau mốc đó nằm trong
+`rows`**. Hai chiều đều được canh, vì cửa sổ correction thường với qua mốc nó
+tự báo vài trăm mili giây:
+
+- từ nào trong làn tạm mà correction đã chốt thì bị bỏ khỏi làn tạm
+  (`dropPendingInSpan`) — giữ cả hai bản là đúng cái lặp chữ ở trên;
+- từ nào correction gửi tới mà vượt mốc chốt thì bị **trả ngược** về làn tạm
+  (`holdBackUncommitted`) cho tới khi mốc đuổi kịp.
+
+Lúc dừng, `markDone()` đưa nốt phần làn tạm mà correction chưa bao giờ phủ vào
+bản chép chính thức — nhưng chỉ những từ **không** đè lên từ nào đã có, để lần
+xả cuối không sinh ra bản trùng.
+
+Đo trên cuộc họp nghiệm thu 60 giây: trước bản vá 62/63 lần poll có chữ
+streaming lọt vào làn chính thức, nhiều nhất 47 từ; sau bản vá là 0/63.
+
+### 7b.4c Sửa tay: chỉ trong vùng đã chốt, và không bị máy đè lại
+
+Hai quy tắc, cả hai nằm ở `SessionBuffer::applyTextEdit` và `LiveTranscript`:
+
+1. **`end_sec` phải ≤ `commit_boundary_sec`**, nếu không trả `INVALID_ARGUMENT`
+   với thông điệp bắt đầu bằng `edit_range_not_committed`. Ngoài vùng đó máy
+   vẫn đang tự sửa, nên một bản sửa được nhận ở đấy là bản sửa mà cửa sổ
+   correction kế tiếp âm thầm xoá đi — tệ hơn là từ chối, vì người dùng đã
+   nhìn thấy nó hiện ra. Phiên đã kết thúc thì không còn mép động: sửa được
+   toàn bộ.
+2. **Đoạn đã sửa tay được ghim lại** (`m_manualSpans`). Mọi correction đến sau
+   không được ghi đè lên những giây đó: từ cũ không bị thay, và từ mới trùng
+   khoảng thời gian ấy bị bỏ. Trước bản vá, audit ghi "đã sửa" trong khi bản
+   chép cuối vẫn là chữ gốc.
+
+Mỗi lần sửa hoặc đổi tên đều **ghi xuống kho ngay** (`saveState(true)`), kể cả
+sau khi phiên đã dừng. Và một phiên đã rời RAM vẫn sửa được: `BufferHub::
+editArchived` nạp bản chép đã lưu vào một `LiveTranscript` tạm, áp dụng đúng
+đường sửa ấy, rồi ghi lại — một khoá riêng (`m_archiveMutex`) giữ cho hai người
+soát cùng lúc không xoá bản sửa của nhau.
+
 ### 7b.5 Khi tầng suy luận sập
 
 Vòng đẩy giữ nguyên gói và thử lại **cùng một `seq`**, với `reset()` kênh giữa
@@ -698,6 +775,23 @@ phiên đã xong còn tệ hơn cái giá của một lần đồng bộ.
 chuyển, vòng thử lại sẵn có gửi lại đúng `seq` cũ, bộ đệm phát lại ACK đã lưu,
 và cuộc họp đi tiếp. Hàng đợi 60 giây mặc định của client hấp thụ trọn một lần
 khởi động lại thông thường.
+
+**Bản chép cũng sống sót — từ 2026-09-24.** Trước đó câu "vô hình" ở trên chỉ
+đúng với *audio*: nhật ký không bao giờ chứa chữ, nên mọi từ đã chép trước lúc
+khởi động lại đều mất, và một lần dừng êm để nâng cấp đắt ngang một cú sập.
+Đo được: cuộc họp 45 giây bị `kill -9` ở giây 30 quay lại với 45/128 từ.
+
+Hai việc làm nên điều đó, cả hai đều ở `SessionBuffer`:
+
+1. **Bản chép được ghi xuống kho mỗi 2 giây** (`kStateSaveIntervalSec`), và
+   ngay lập tức sau mỗi lần sửa tay, đổi tên hoặc dừng. Mỗi gói một lần ghi thì
+   là sáu lần ghi SQLite mỗi giây cho một cấu trúc lớn dần theo cuộc họp; 2
+   giây là phần tệ nhất có thể mất, mà phần đó tầng suy luận còn chưa chốt.
+2. **Phiên khôi phục nạp lại bản chép đó** (`LiveTranscript::restore`) và đặt
+   **mốc thời gian lệch** (`setTimeOffset`) bằng số giây audio tầng suy luận đã
+   nhận. Luồng mới mở trên tier đếm lại từ 0; không có mốc lệch này thì nửa sau
+   cuộc họp nằm đè lên nửa đầu, và một câu nói ở giây 30,3 bị ghi ở giây 0,4 —
+   bấm vào nó sẽ nghe ra đoạn audio khác.
 
 **Độ bền là một lựa chọn, và tài liệu nói thật về nó:**
 
@@ -1446,8 +1540,8 @@ cắt vì cỡ cứng, phông tiếng Việt đo khác trên RHEL, và tuần t�
     cửa sổ. Hai cổng đã từng làm vậy nằm ở `shouldUpgradeLockedText()` và
     `relabelFromSurface()` trong client; bốn ca kiểm thử giữ chúng đúng nằm
     trong `--selftest`.
-32. **Bằng chứng để publish một giọng được dựng từ bản chép, không phải từ
-    thao tác đổi tên.** `SaveSessionSpeakers` với `GLOBAL_SHARED` đòi
+32. **Bằng chứng để publish một giọng được dựng từ bản chép, và chỉ được ghim
+    khi có người soát đổi tên.** `SaveSessionSpeakers` với `GLOBAL_SHARED` đòi
     `evidence_json` khác rỗng. Đến 2026-09-21 `stageEvidence()` chỉ có đúng
     một call site và nó nằm trong self-test, nên publish **luôn** thất bại với
     "chưa có bằng chứng nào được ghim" dù thao tác đúng. Giờ ở lúc
@@ -1455,6 +1549,22 @@ cắt vì cỡ cứng, phông tiếng Việt đo khác trên RHEL, và tuần t�
     giọng nào, `LiveTranscript::speakerSpans()` tìm các khoảng thời gian của
     từng giọng trong bản chép, và `SessionBuffer::publishSpeakerRegistry()`
     nối hai thứ đó lại.
+
+    **Hai id trông giống nhau nhưng không phải một** —
+    `session_speaker_id` là cụm CAM++, còn `speaker` trong bản chép là **slot
+    diarization**; một cụm sở hữu một **danh sách** slot (`diar_slots`). Tra
+    bằng nhầm id là lỗi im lặng nhất của cả hệ: đến 2026-09-24 mục registry
+    `0` (danh sách slot rỗng) vẫn nhận 26,5 giây bằng chứng — số đó lấy từ
+    slot `0`, tức giọng của mục registry `1`. Trên 427 cuộc họp thật của
+    adapter, 187 (44%) rơi vào ca sai đó, và hậu quả là DB chung học giọng của
+    người này dưới tên người kia, rồi gọi sai tên ở mọi cuộc họp sau. Đường
+    tra đúng là `entry.diarSlots`; `diar_slots` rỗng thì **không ghim gì**.
+
+    **Và chỉ ghim khi người soát đã đổi tên.** Ghim tự động lúc dừng cho một
+    cái tên do model tự gán là đưa vào DB dùng chung một thứ không ai chịu
+    trách nhiệm. `rename_speaker` đặt tên cho một *slot*, nên tên đó được giữ
+    trong `m_reviewerNames` cho tới lúc dừng — thời điểm duy nhất biết được
+    slot ấy thuộc cụm nào.
 
     Một khoảng **phải đứt ở chỗ người khác nói xen vào**, dù khoảng hở ngắn
     hơn `kTurnGapSec`. Đưa cho CAM++ một đoạn có hai giọng sẽ ra một embedding

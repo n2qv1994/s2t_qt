@@ -88,6 +88,23 @@ QByteArray ListSessionsRequest::serialize() const
     return w.take();
 }
 
+QByteArray DeleteSessionRequest::serialize() const
+{
+    Writer w;
+    w.putString(1, sessionId);
+    w.putString(2, editorId);
+    return w.take();
+}
+
+QByteArray DeleteSessionResponse::serialize() const
+{
+    Writer w;
+    w.putString(1, sessionId);
+    w.putUInt64(2, bytesRemoved);
+    w.putDouble(3, deletedAt);
+    return w.take();
+}
+
 QByteArray RenameSpeakerRequest::serialize() const
 {
     Writer w;
@@ -741,6 +758,33 @@ void ListSessionsRequest::parse(Reader &r)
         switch (field) {
         case 1: limit = r.readUInt32(); break;
         case 2: cursor = r.readString(); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
+void DeleteSessionRequest::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: sessionId = r.readString(); break;
+        case 2: editorId = r.readString(); break;
+        default: r.skip(type); break;
+        }
+    }
+}
+
+void DeleteSessionResponse::parse(Reader &r)
+{
+    int field = 0;
+    WireType type = pw::VarintType;
+    while (r.nextField(&field, &type)) {
+        switch (field) {
+        case 1: sessionId = r.readString(); break;
+        case 2: bytesRemoved = r.readUInt64(); break;
+        case 3: deletedAt = r.readDouble(); break;
         default: r.skip(type); break;
         }
     }

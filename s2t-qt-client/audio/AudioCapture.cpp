@@ -10,6 +10,21 @@
 
 namespace {
 
+// How often the bound device is checked for still being the right one and
+// still delivering.  Two seconds is the reconnect deadline the acceptance
+// report asks for: past that, a silent microphone has to be visible.
+const int kHealthIntervalMs = 2000;
+
+// How often the device's buffer is drained on top of readyRead.  20 ms is one
+// capture buffer, so a missed signal costs nothing.
+const int kDrainIntervalMs = 20;
+
+// How much the device may buffer before frames are lost.  200 ms, not the 20
+// of the callback cadence: the old size left no headroom at all for a
+// scheduling hiccup on a loaded machine, and the frames a full buffer drops
+// are gone with nothing anywhere to say so.
+const int kDeviceBufferMs = 200;
+
 QAudioFormat makeFormat(const AudioDeviceChoice &choice)
 {
     QAudioFormat format;
@@ -23,8 +38,30 @@ QAudioFormat makeFormat(const AudioDeviceChoice &choice)
 
 AudioCapture::AudioCapture(QObject *parent) : QObject(parent)
 {
-    m_health.setInterval(2000);
+    // Both timers are PARENTED to this object, and that is the whole fix for
+    // the watchdog never running.
+    //
+    // A QTimer declared as a plain member is not a child of the object that
+    // holds it, so moveToThread() leaves its affinity on the thread this was
+    // constructed on - the GUI thread.  start() then runs on the capture
+    // thread and Qt refuses it with "QObject::startTimer: Timers cannot be
+    // started from another thread", on stderr, once, at mic open.  The health
+    // check therefore never ticked: a microphone unplugged mid-meeting was
+    // never noticed, the status stayed "đang ghi", and 6 minutes 33 seconds of
+    // a meeting went by with no audio and no warning (measured 2026-09-24).
+    m_health.setParent(this);
+    m_health.setInterval(kHealthIntervalMs);
     connect(&m_health, &QTimer::timeout, this, &AudioCapture::checkHealth);
+
+    // QAudioSource in pull mode only emits readyRead while its own buffer has
+    // something in it, and a buffer that overruns between two signals loses
+    // what it held.  Draining on a timer as well as on the signal is what
+    // stops that: on the virtual PipeWire source only 47% of the frames
+    // played reached the client - 11.4 s of audio out of 24.3 s of recording -
+    // while pw-record on the same device captured all of them.
+    m_drain.setParent(this);
+    m_drain.setInterval(kDrainIntervalMs);
+    connect(&m_drain, &QTimer::timeout, this, &AudioCapture::onReadyRead);
 }
 
 AudioCapture::~AudioCapture()
@@ -143,9 +180,8 @@ void AudioCapture::start(const AudioDeviceChoice &choice)
     }
 
     m_source = new QAudioSource(selected, format, this);
-    // ~20 ms of audio per buffer, the same callback cadence the PortAudio
-    // client used before the 160 ms transport packet is assembled upstream.
-    m_source->setBufferSize(format.sampleRate() * format.channelCount() * 2 * 20 / 1000);
+    m_source->setBufferSize(format.sampleRate() * format.channelCount() * 2 * kDeviceBufferMs
+                            / 1000);
     m_io = m_source->start();
     if (!m_io || m_source->error() != QAudio::NoError) {
         const QString reason = m_source ? QStringLiteral("mã lỗi %1").arg(int(m_source->error()))
@@ -163,9 +199,19 @@ void AudioCapture::start(const AudioDeviceChoice &choice)
     m_boundName = resolvedName;
     m_running = true;
     m_health.start();
+    m_drain.start();
+    if (!m_health.isActive()) {
+        // Only reachable if this object's timers still belong to another
+        // thread - the exact failure this class hit in production.  Saying so
+        // beats recording a whole meeting with no watchdog behind it.
+        LOG_ERROR(applog::cat::Audio)
+            << "the microphone watchdog did not start - AudioCapture's timers are on another "
+               "thread; a device that stops delivering will NOT be reported";
+    }
     LOG_INFO(applog::cat::Audio)
         << "microphone capturing:" << m_boundName << format.sampleRate() << "Hz /"
-        << format.channelCount() << "ch, buffer" << m_source->bufferSize() << "bytes (~20ms)";
+        << format.channelCount() << "ch, buffer" << m_source->bufferSize() << "bytes (~"
+        << kDeviceBufferMs << "ms), watchdog every" << kHealthIntervalMs << "ms";
     emit started(m_boundName);
 }
 
@@ -185,6 +231,7 @@ void AudioCapture::stop()
 void AudioCapture::teardown()
 {
     m_health.stop();
+    m_drain.stop();
     m_running = false;
     if (m_io) {
         disconnect(m_io, nullptr, this, nullptr);

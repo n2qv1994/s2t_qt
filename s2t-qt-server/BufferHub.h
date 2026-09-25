@@ -93,6 +93,24 @@ public:
     SessionRef find(const QString &sessionId) const;
     void forget(const QString &sessionId);
 
+    // Editing a meeting that has left RAM.
+    //
+    // The design rule is that a stored meeting stays editable - a transcript
+    // is reviewed for weeks after the meeting, and every session leaves RAM
+    // within finished_retention_sec.  These load the stored state into a
+    // LiveTranscript, apply the change, and write it straight back, so an
+    // archived edit goes through exactly the same code as a live one.
+    //
+    // Serialised against each other by m_archiveMutex: two reviewers editing
+    // one archived meeting would otherwise both pass the revision check and
+    // the second write would erase the first, with the audit log showing both
+    // applied.  The reference store takes a per-document lock for the same
+    // reason.
+    grpc::Status editArchived(const asr::TextEditRequest &request,
+                              asr::ReviewEditResponse *out);
+    grpc::Status renameArchived(const asr::RenameSpeakerRequest &request,
+                                asr::ReviewEditResponse *out);
+
     // Called from the probe thread and from a failing backend call.
     void noteUpstream(bool reachable, double latencyMs, const QString &detail);
     buf::UpstreamStatus upstreamStatus() const;
@@ -144,6 +162,9 @@ private:
     UpstreamProbe *m_probe = nullptr;
 
     mutable QMutex m_mutex;
+    // Read-modify-write on an archived transcript, one at a time.  Never taken
+    // together with m_mutex.
+    QMutex m_archiveMutex;
     QHash<QString, SessionRef> m_sessions;
     buf::UpstreamStatus m_upstream;
     QTimer m_reaper;

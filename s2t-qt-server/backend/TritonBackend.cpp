@@ -3,6 +3,7 @@
 #include "core/Logger.h"
 #include "grpc/Methods.h"
 #include "grpc/UnaryCall.h"
+#include "audio/Pcm16k.h"
 #include "proto/TritonInfer.h"
 
 #include <QDateTime>
@@ -57,6 +58,14 @@ const char *const kWantedOutputs[] = {
     // when an operator reports a wrong mark.
     "correction_trace_json",
 };
+
+// Ticks of silence pumped before the terminal request at stop.
+//
+// The number is the reference adapter's (`_STOP_FLUSH_TICKS`): the dense
+// endpointer needs to hear the pause after the last sentence before it will
+// commit it, and a meeting that ends mid-sentence has no such pause on the
+// wire.  Six ticks of 160 ms is under a second of extra drain.
+const int kFlushTicks = 6;
 
 QByteArray rawFloats(const QList<float> &values)
 {
@@ -296,8 +305,30 @@ public:
                      request.vadChunkMs ? request.vadChunkMs : m_config.vadChunkMs, out);
     }
 
-    grpc::Status finish(asr::PushAudioResponse *out) override
+    grpc::Status finish(asr::PushAudioResponse *out,
+                        QList<asr::PushAudioResponse> *flushed) override
     {
+        // Silence first, then the final chunk.
+        //
+        // asr_diar_session's endpointer closes a sentence when it has heard
+        // the pause after it, and a meeting that ends mid-sentence has no such
+        // pause on the wire.  The reference adapter pumps six ticks of real
+        // silence before the terminal request for exactly this reason; sending
+        // only `is_final` leaves the last sentence to be closed by whatever
+        // the model can manage without right context.
+        const quint32 tickMs = m_config.vadChunkMs ? m_config.vadChunkMs : 160;
+        const int tickBytes =
+            int(qint64(audio::kPipelineSampleRate) * 2 * qint64(tickMs) / 1000);
+        const QByteArray silence(tickBytes, '\0');
+        for (int tick = 0; tick < kFlushTicks; ++tick) {
+            asr::PushAudioResponse answer;
+            const grpc::Status status = infer(silence, false, false, tickMs, &answer);
+            if (!status.ok())
+                return status;
+            if (flushed)
+                flushed->append(answer);
+        }
+
         // An empty final chunk is how this model is told the meeting is over:
         // it flushes the endpointer and emits the last correction pass.
         const grpc::Status status = infer(QByteArray(), false, true, m_config.vadChunkMs, out);

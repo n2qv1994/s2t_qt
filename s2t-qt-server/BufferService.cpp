@@ -174,8 +174,23 @@ void BufferService::registerMethods()
                         // Not live any more - but it may still be in the
                         // archive.  Reviewing a meeting from last week is the
                         // normal case for this RPC, not the exception.
-                        if (hub->store().loadState(req.sessionId, resp))
+                        //
+                        // The window is applied to the stored state too.  It
+                        // was not until 2026-09-24, so asking an archived
+                        // meeting for [20, 30] s returned all 152 words of it,
+                        // 117 of them outside the window - which defeats the
+                        // one thing a review window is for.
+                        if (hub->store().loadState(req.sessionId, resp)) {
+                            if (req.hasViewStartSec || req.hasViewEndSec) {
+                                LiveTranscript view;
+                                view.restore(*resp);
+                                *resp = view.snapshot(
+                                    resp->sessionId, resp->streamId,
+                                    req.hasViewStartSec ? req.viewStartSec : -1.0,
+                                    req.hasViewEndSec ? req.viewEndSec : -1.0);
+                            }
                             return grpc::Status();
+                        }
                         return noSuchSession(req.sessionId, durable);
                     }
                     // Below zero means "no bound", which is what an unset
@@ -191,9 +206,65 @@ void BufferService::registerMethods()
             return serve<asr::TextEditRequest, asr::ReviewEditResponse>(
                 call, out, [&](const asr::TextEditRequest &req, asr::ReviewEditResponse *resp) {
                     const SessionRef session = hub->find(req.sessionId);
-                    if (!session)
+                    if (session)
+                        return session->applyTextEdit(req, resp);
+                    // Not live any more - which is the normal state of a
+                    // meeting somebody is reviewing.  It used to answer
+                    // NOT_FOUND while the client still offered an edit button,
+                    // so correcting last week's transcript was impossible and
+                    // looked like a bug in the client.
+                    if (hub->store().hasSession(req.sessionId))
+                        return hub->editArchived(req, resp);
+                    return noSuchSession(req.sessionId, durable);
+                });
+        });
+
+    m_server->registerMethod(
+        QString::fromLatin1(rpcpath::DeleteSession),
+        [hub, durable](const grpc::ServerCall &call, QByteArray *out) {
+            return serve<asr::DeleteSessionRequest, asr::DeleteSessionResponse>(
+                call, out,
+                [&](const asr::DeleteSessionRequest &req, asr::DeleteSessionResponse *resp) {
+                    if (req.editorId.trimmed().isEmpty()) {
+                        grpc::Status bad;
+                        bad.code = grpc::InvalidArgument;
+                        bad.message = QStringLiteral("thiếu editor_id - xoá một cuộc họp là thao "
+                                                     "tác không thể hoàn tác và phải ghi rõ ai làm");
+                        return bad;
+                    }
+                    // A running meeting is refused rather than torn out from
+                    // under its own forwarder: the thread is still archiving
+                    // audio into the file this would delete.
+                    const SessionRef session = hub->find(req.sessionId);
+                    if (session && !session->isFinished()) {
+                        grpc::Status bad;
+                        bad.code = grpc::FailedPrecondition;
+                        bad.message = QStringLiteral("phiên '%1' đang chạy - hãy dừng phiên trước "
+                                                     "khi xoá")
+                                          .arg(req.sessionId);
+                        return bad;
+                    }
+                    if (!hub->store().hasSession(req.sessionId))
                         return noSuchSession(req.sessionId, durable);
-                    return session->applyTextEdit(req, resp);
+                    // The audit row goes in BEFORE the delete, so the
+                    // tombstone survives even if the removal half-fails.
+                    hub->store().appendAudit(
+                        req.sessionId, QStringLiteral("delete_session"),
+                        QStringLiteral("{\"editor\":\"%1\"}").arg(req.editorId.trimmed()));
+                    if (session)
+                        hub->forget(req.sessionId);
+                    quint64 bytes = 0;
+                    QString error;
+                    if (!hub->store().deleteSession(req.sessionId, &bytes, &error)) {
+                        grpc::Status bad;
+                        bad.code = grpc::Internal;
+                        bad.message = error;
+                        return bad;
+                    }
+                    resp->sessionId = req.sessionId;
+                    resp->bytesRemoved = bytes;
+                    resp->deletedAt = nowSeconds();
+                    return grpc::Status();
                 });
         });
 
@@ -203,9 +274,11 @@ void BufferService::registerMethods()
             return serve<asr::RenameSpeakerRequest, asr::ReviewEditResponse>(
                 call, out, [&](const asr::RenameSpeakerRequest &req, asr::ReviewEditResponse *resp) {
                     const SessionRef session = hub->find(req.sessionId);
-                    if (!session)
-                        return noSuchSession(req.sessionId, durable);
-                    return session->renameSpeaker(req, resp);
+                    if (session)
+                        return session->renameSpeaker(req, resp);
+                    if (hub->store().hasSession(req.sessionId))
+                        return hub->renameArchived(req, resp);
+                    return noSuchSession(req.sessionId, durable);
                 });
         });
 
@@ -215,24 +288,34 @@ void BufferService::registerMethods()
             return serve<asr::ListSessionsRequest, asr::ListSessionsResponse>(
                 call, out,
                 [&](const asr::ListSessionsRequest &req, asr::ListSessionsResponse *resp) {
-                    // Live meetings first, then the archive.  A meeting that is
-                    // running exists in both - it was written to the store at
-                    // start - so the live entry wins: it is the one with a true
-                    // `running` flag and an up-to-the-second duration.
-                    QSet<QString> seen;
-                    if (req.cursor.isEmpty()) {
-                        for (const asr::SessionSummary &live : hub->summaries(0)) {
-                            resp->sessions.append(live);
-                            seen.insert(live.sessionId);
-                        }
-                    }
+                    // The archive is the list; a live meeting only overwrites
+                    // its own row in it.
+                    //
+                    // It used to be the other way round - live entries pushed
+                    // in front of the first page - and that made the paging
+                    // arithmetic wrong in two directions at once: the first
+                    // page carried more rows than the caller asked for, and a
+                    // running meeting appeared a second time, as an archived
+                    // row, on whichever later page its timestamp fell on.
+                    QHash<QString, asr::SessionSummary> live;
+                    for (const asr::SessionSummary &item : hub->summaries(0))
+                        live.insert(item.sessionId, item);
+
                     QString nextCursor;
-                    for (const asr::SessionSummary &stored :
-                         hub->store().listSessions(int(req.limit), req.cursor, &nextCursor)) {
-                        if (!seen.contains(stored.sessionId))
-                            resp->sessions.append(stored);
+                    const QList<asr::SessionSummary> stored =
+                        hub->store().listSessions(int(req.limit), req.cursor, &nextCursor);
+                    for (const asr::SessionSummary &item : stored) {
+                        const auto it = live.constFind(item.sessionId);
+                        // The live entry wins where there is one: it is the
+                        // only one with a true `running` flag and a duration
+                        // that is up to this second.
+                        resp->sessions.append(it != live.constEnd() ? it.value() : item);
                     }
                     resp->nextCursor = nextCursor;
+
+                    // A server with no archive at all still has to answer.
+                    if (!hub->store().enabled() && req.cursor.isEmpty())
+                        resp->sessions = hub->summaries(int(req.limit));
                     return grpc::Status();
                 });
         });
@@ -640,7 +723,7 @@ void BufferService::registerMethods()
 
     m_server->registerMethod(
         QString::fromLatin1(rpcpath::GetSpeakerRegistryStatus),
-        [campp, deadline](const grpc::ServerCall &call, QByteArray *out) {
+        [campp, deadline, hub](const grpc::ServerCall &call, QByteArray *out) {
             const int ms = deadline(call);
             return serve<reg::GetSpeakerRegistryStatusRequest, reg::GetSpeakerRegistryStatusResponse>(
                 call, out,
@@ -675,10 +758,18 @@ void BufferService::registerMethods()
                             entry.value(QStringLiteral("longest_sample_sec")).toDouble();
                         resp->speakersBelowPolicy.append(weak);
                     }
-                    // The per-session counters stay zero: they come from the
-                    // session speaker registry, which needs the store this
-                    // server does not have yet.  Zero is the honest answer -
-                    // nothing has been staged here.
+                    // The per-session counters come out of this server's own
+                    // registry, not out of CAM++.  They answered a flat zero
+                    // until 2026-09-24 - two voices waiting for review were
+                    // reported as none waiting, and a voice already written to
+                    // the shared database was reported as not published, which
+                    // is the reading an operator uses to decide whether there
+                    // is anything left to do.
+                    if (!req.sessionId.isEmpty()) {
+                        hub->store().speakerCounts(req.sessionId, &resp->sessionPendingCount,
+                                                   &resp->sessionPublishedCount,
+                                                   &resp->sessionFailedCount);
+                    }
                     return status;
                 });
         });
@@ -851,10 +942,38 @@ void BufferService::registerMethods()
                             continue;
                         }
 
+                        // "enrolled" with nothing enrolled is not a publish.
+                        //
+                        // enroll_service answers 200 with segments_enrolled=0
+                        // when it will not add the sample - the case measured
+                        // on 2026-09-24 was a name that had been DELETED from
+                        // the shared database earlier: the tombstone stays,
+                        // the new sample is dropped, and the operator is told
+                        // the voice was published while the next meeting goes
+                        // on not recognising it.  Reporting that as success is
+                        // the worst kind of wrong answer here.
+                        const quint32 enrolled =
+                            quint32(qMax(0, object.value(QStringLiteral("segments_enrolled"))
+                                                .toInt()));
+                        if (enrolled == 0) {
+                            result.ok = false;
+                            result.status = QStringLiteral("publish_failed");
+                            result.error = QStringLiteral(
+                                "dịch vụ đăng ký nhận yêu cầu nhưng không ghi đoạn nào "
+                                "(segments_enrolled=0) - thường là do tên '%1' đã từng bị xoá "
+                                "khỏi DB chung; hãy dùng một tên khác hoặc kích hoạt lại giọng cũ")
+                                               .arg(globalName);
+                            hub->store().updateSpeakerStatus(req.sessionId,
+                                                             selection.sessionSpeakerId,
+                                                             QStringLiteral("publish_failed"),
+                                                             QString(), result.error);
+                            resp->results.append(result);
+                            continue;
+                        }
+
                         result.ok = true;
                         result.status = QStringLiteral("global_shared");
-                        result.segmentsEnrolled =
-                            quint32(object.value(QStringLiteral("segments_enrolled")).toInt());
+                        result.segmentsEnrolled = enrolled;
                         hub->store().updateSpeakerStatus(req.sessionId,
                                                          selection.sessionSpeakerId,
                                                          QStringLiteral("global_shared"),

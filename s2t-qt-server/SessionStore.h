@@ -63,6 +63,11 @@ public:
     QList<asr::SessionSummary> listSessions(int limit, const QString &cursor,
                                             QString *nextCursor);
     bool hasSession(const QString &sessionId);
+    // Removes a finished meeting: its rows, its registry, its trace and the
+    // flat audio file behind it.  `bytesRemoved` is what the RPC reports back.
+    // The audit rows are kept deliberately - a deletion is itself a decision
+    // somebody made, and the tombstone outlives what it removed.
+    bool deleteSession(const QString &sessionId, quint64 *bytesRemoved, QString *error);
 
     // ---- audio -------------------------------------------------------------
     // Appends to the flat file, then records the new length.  In that order,
@@ -113,6 +118,16 @@ public:
     void updateSpeakerStatus(const QString &sessionId, const QString &speakerId,
                              const QString &status, const QString &publishedName,
                              const QString &publishError);
+    // The registry entry that owns a diarization slot.  Empty when the tier
+    // has not exported the registry yet, which is the normal state until the
+    // meeting's final tick.  The two ids look alike - both count from zero -
+    // and confusing them is what handed one voice's evidence to another.
+    QString speakerForSlot(const QString &sessionId, const QString &diarSlot);
+    // What GetSpeakerRegistryStatus reports for this meeting.  `global_shared`
+    // counts as published, which is the same reckoning the reference adapter
+    // uses and the reason the counters read 0/0 until 2026-09-24.
+    void speakerCounts(const QString &sessionId, quint32 *pending, quint32 *published,
+                       quint32 *failed);
 
 private:
     bool migrate(QString *error);

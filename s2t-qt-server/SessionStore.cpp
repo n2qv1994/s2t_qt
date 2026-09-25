@@ -9,6 +9,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QUuid>
@@ -26,11 +27,11 @@ double nowSeconds()
 // range turns one RPC into a whole meeting over the wire.
 const double kMaxRangeSec = 60.0;
 
-// How many trace events a session keeps.  At the rate the tier emits them -
-// one decode and one merge per correction window - this is roughly the last
-// twenty minutes of a meeting, and every trace question anybody has ever asked
-// has been about the thing that just happened.
-const int kTraceKeepPerSession = 4000;
+// How many trace events a session keeps PER STAGE.  A shared ceiling is spent
+// by whichever stage talks most, so the stages an operator actually debugs
+// punctuation with - correction_asr and itn - were the first to be evicted.
+// Per stage, 2000 events is hours of correction windows.
+const int kTraceKeepPerStage = 2000;
 
 // A session id is used as a file name, so it has to be one.  Ids are minted by
 // this server as hex, but a recovered journal or a hand-written test can carry
@@ -48,6 +49,25 @@ QString safeHandle(const QString &sessionId)
     if (out.isEmpty())
         out = QStringLiteral("unnamed");
     return out;
+}
+
+// The three pass-through fields of SessionSummary, read back out of the
+// config the meeting was started with.  They mean nothing to this server -
+// security_level is a label, not an access control - but a picker showing a
+// meeting has to show what the operator typed, and a second RPC for it is
+// what the .proto put them here to avoid.
+void applyConfigJson(const QString &configJson, asr::SessionSummary *summary)
+{
+    if (configJson.trimmed().isEmpty())
+        return;
+    const QJsonObject object = QJsonDocument::fromJson(configJson.toUtf8()).object();
+    for (const QJsonValue &value : object.value(QStringLiteral("participants")).toArray())
+        summary->participants.append(value.toString());
+    summary->securityLevel = object.value(QStringLiteral("security_level")).toString();
+    summary->mode = object.value(QStringLiteral("mode"))
+                        .toString(QStringLiteral("record_and_s2t"));
+    if (summary->title.isEmpty())
+        summary->title = object.value(QStringLiteral("session_title")).toString();
 }
 
 QString spansToJson(const QList<QPair<double, double>> &spans)
@@ -378,31 +398,48 @@ QList<asr::SessionSummary> SessionStore::listSessions(int limit, const QString &
     const int wanted = limit > 0 ? qMin(limit, 500) : 50;
     QMutexLocker lock(&m_mutex);
     QSqlQuery query(m_db);
-    // The cursor is the created_at of the last row handed out.  Ordering by it
-    // descending means a meeting that starts mid-page cannot push an older one
-    // onto a page the caller has already read.
+
+    // The cursor is (created_at, session_id) of the LAST row handed out, and
+    // the next page starts strictly after it in that order.
+    //
+    // It used to be the created_at of the first row of the *next* page,
+    // compared with `<`, which skipped that row outright: every page boundary
+    // silently lost one meeting.  Measured 2026-09-24 on 23 sessions - pages
+    // of two returned 16, pages of five returned 20 - so the history window
+    // drops meetings exactly when an operator scrolls back to look for one.
+    //
+    // The session id is in the key because created_at is a millisecond
+    // timestamp and two meetings started in the same millisecond would
+    // otherwise be an infinite loop or a lost row, depending on which way the
+    // comparison fell.
+    const int split = cursor.indexOf(QLatin1Char('|'));
+    const double cursorAt = split > 0 ? cursor.left(split).toDouble() : 0.0;
+    const QString cursorId = split > 0 ? cursor.mid(split + 1) : QString();
     if (cursor.isEmpty()) {
         query.prepare(QStringLiteral(
-            "SELECT session_id, title, created_at, updated_at, duration_sec, final"
-            " FROM sessions ORDER BY created_at DESC LIMIT ?"));
+            "SELECT session_id, title, created_at, updated_at, duration_sec, final, config_json"
+            " FROM sessions ORDER BY created_at DESC, session_id DESC LIMIT ?"));
         query.addBindValue(wanted + 1);
     } else {
         query.prepare(QStringLiteral(
-            "SELECT session_id, title, created_at, updated_at, duration_sec, final"
-            " FROM sessions WHERE created_at < ? ORDER BY created_at DESC LIMIT ?"));
-        query.addBindValue(cursor.toDouble());
+            "SELECT session_id, title, created_at, updated_at, duration_sec, final, config_json"
+            " FROM sessions WHERE created_at < ? OR (created_at = ? AND session_id < ?)"
+            " ORDER BY created_at DESC, session_id DESC LIMIT ?"));
+        query.addBindValue(cursorAt);
+        query.addBindValue(cursorAt);
+        query.addBindValue(cursorId);
         query.addBindValue(wanted + 1);
     }
     if (!query.exec()) {
         LOG_WARN(applog::cat::Session) << "list_sessions lỗi:" << query.lastError().text();
         return out;
     }
+    bool more = false;
     while (query.next()) {
         if (out.size() >= wanted) {
-            // One row past the page: its timestamp is the next cursor, and it
-            // is not returned.
-            if (nextCursor)
-                *nextCursor = QString::number(query.value(2).toDouble(), 'f', 6);
+            // One row past the page proves there IS a next page; the cursor
+            // itself is the last row we are returning, so nothing is skipped.
+            more = true;
             break;
         }
         asr::SessionSummary summary;
@@ -413,7 +450,16 @@ QList<asr::SessionSummary> SessionStore::listSessions(int limit, const QString &
         summary.durationSec = query.value(4).toDouble();
         summary.final = query.value(5).toInt() != 0;
         summary.running = false; // a stored session is not the live one
+        // What the operator entered, read back out of the config the meeting
+        // was started with.  It was dropped on the floor here until
+        // 2026-09-24, so a session picker showed empty participants and no
+        // security label for every archived meeting.
+        applyConfigJson(query.value(6).toString(), &summary);
         out.append(summary);
+    }
+    if (more && nextCursor && !out.isEmpty()) {
+        *nextCursor = QString::number(out.last().createdAt, 'f', 6) + QLatin1Char('|')
+            + out.last().sessionId;
     }
     return out;
 }
@@ -476,14 +522,23 @@ bool SessionStore::audioRange(const QString &sessionId, double startSec, double 
         *error = QStringLiteral("máy chủ chưa bật kho phiên (database/dir) nên không lưu audio");
         return false;
     }
-    if (startSec < 0.0 || endSec <= startSec) {
-        *error = QStringLiteral("khoảng audio phải có 0 <= start_sec < end_sec");
+    // Clamped, not refused.
+    //
+    // A reviewer dragging over the waveform routinely asks for a window that
+    // starts before zero or runs past the end - that is what dragging to the
+    // edge means - and answering INVALID_ARGUMENT there makes the player stop
+    // dead at exactly the moment somebody is trying to hear the beginning or
+    // the last sentence.  The response says which range it actually served, so
+    // a clamp is self-describing in a way a refusal is not.  Only a genuinely
+    // empty request - end at or before start - is still an error.
+    if (endSec <= startSec) {
+        *error = QStringLiteral("khoảng audio phải có start_sec < end_sec");
         return false;
     }
-    if (endSec - startSec > kMaxRangeSec) {
-        *error = QStringLiteral("khoảng audio tối đa %1 giây").arg(kMaxRangeSec);
-        return false;
-    }
+    if (startSec < 0.0)
+        startSec = 0.0;
+    if (endSec - startSec > kMaxRangeSec)
+        endSec = startSec + kMaxRangeSec;
 
     quint32 sampleRate = 16000;
     quint32 channels = 1;
@@ -603,14 +658,28 @@ void SessionStore::appendTrace(const QString &sessionId,
     // the only place that knows the table has grown.  A three-hour meeting
     // produces tens of thousands of these and nobody reads past the last few
     // hundred - what a trace is for is "what did the tier decide just now".
-    QSqlQuery trim(m_db);
-    trim.prepare(QStringLiteral(
-        "DELETE FROM pipeline_trace WHERE session_id = ? AND id NOT IN"
-        " (SELECT id FROM pipeline_trace WHERE session_id = ? ORDER BY id DESC LIMIT ?)"));
-    bindText(trim, sessionId);
-    bindText(trim, sessionId);
-    trim.addBindValue(kTraceKeepPerSession);
-    trim.exec();
+    //
+    // Per STAGE, not per session.  One shared ceiling is spent by whichever
+    // stage is noisiest: `vad` and `asr` fire several times a second while
+    // `correction_asr` and `itn` fire once a window, so after about twenty
+    // minutes the only two stages anybody debugs punctuation with had been
+    // pushed out of the table by the two nobody reads.
+    QSet<QString> stages;
+    for (const asr::PipelineTraceEvent &event : events)
+        stages.insert(event.stage);
+    for (const QString &stage : stages) {
+        QSqlQuery trim(m_db);
+        trim.prepare(QStringLiteral(
+            "DELETE FROM pipeline_trace WHERE session_id = ? AND stage = ? AND id NOT IN"
+            " (SELECT id FROM pipeline_trace WHERE session_id = ? AND stage = ?"
+            "  ORDER BY id DESC LIMIT ?)"));
+        bindText(trim, sessionId);
+        bindText(trim, stage);
+        bindText(trim, sessionId);
+        bindText(trim, stage);
+        trim.addBindValue(kTraceKeepPerStage);
+        trim.exec();
+    }
 }
 
 QList<asr::PipelineTraceEvent> SessionStore::traceHistory(const QString &sessionId,
@@ -853,4 +922,104 @@ void SessionStore::updateSpeakerStatus(const QString &sessionId, const QString &
     bindText(query, sessionId);
     bindText(query, speakerId);
     query.exec();
+}
+
+QString SessionStore::speakerForSlot(const QString &sessionId, const QString &diarSlot)
+{
+    if (!m_enabled || diarSlot.isEmpty())
+        return QString();
+    QMutexLocker lock(&m_mutex);
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral(
+        "SELECT session_speaker_id, diar_slots FROM session_speakers WHERE session_id = ?"));
+    query.addBindValue(sessionId);
+    if (!query.exec())
+        return QString();
+    while (query.next()) {
+        // Not named `slots`: Qt #defines that as a keyword.
+        const QList<QString> owned = slotsFromJson(query.value(1).toString());
+        if (owned.contains(diarSlot))
+            return query.value(0).toString();
+    }
+    return QString();
+}
+
+void SessionStore::speakerCounts(const QString &sessionId, quint32 *pending, quint32 *published,
+                                 quint32 *failed)
+{
+    *pending = 0;
+    *published = 0;
+    *failed = 0;
+    if (!m_enabled)
+        return;
+    QMutexLocker lock(&m_mutex);
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral(
+        "SELECT status, COUNT(*) FROM session_speakers WHERE session_id = ? GROUP BY status"));
+    query.addBindValue(sessionId);
+    if (!query.exec())
+        return;
+    while (query.next()) {
+        const QString status = query.value(0).toString();
+        const quint32 count = quint32(qMax(0, query.value(1).toInt()));
+        // `global_shared` IS published - it is the status the publish path
+        // writes on success.  Counting only a literal "published" is why a
+        // voice that had just been written to the shared database was still
+        // reported as pending.
+        if (status == QLatin1String("published") || status == QLatin1String("global_shared"))
+            *published += count;
+        else if (status == QLatin1String("publish_failed"))
+            *failed += count;
+        else
+            *pending += count;
+    }
+}
+
+bool SessionStore::deleteSession(const QString &sessionId, quint64 *bytesRemoved, QString *error)
+{
+    if (bytesRemoved)
+        *bytesRemoved = 0;
+    if (!m_enabled) {
+        *error = QStringLiteral("máy chủ này không có kho phiên (database/dir trống)");
+        return false;
+    }
+    {
+        QMutexLocker lock(&m_mutex);
+        QSqlQuery exists(m_db);
+        exists.prepare(QStringLiteral("SELECT 1 FROM sessions WHERE session_id = ?"));
+        exists.addBindValue(sessionId);
+        if (!exists.exec() || !exists.next()) {
+            *error = QStringLiteral("kho phiên không có phiên '%1'").arg(sessionId);
+            return false;
+        }
+    }
+
+    QFile audio(audioPath(sessionId));
+    quint64 removed = 0;
+    if (audio.exists()) {
+        removed = quint64(audio.size());
+        if (!audio.remove()) {
+            *error = QStringLiteral("không xoá được tệp audio của phiên '%1': %2")
+                         .arg(sessionId, audio.errorString());
+            return false;
+        }
+    }
+
+    QMutexLocker lock(&m_mutex);
+    m_db.transaction();
+    for (const char *statement : {"DELETE FROM sessions WHERE session_id = ?",
+                                  "DELETE FROM transcripts WHERE session_id = ?",
+                                  "DELETE FROM session_speakers WHERE session_id = ?",
+                                  "DELETE FROM pipeline_trace WHERE session_id = ?"}) {
+        QSqlQuery query(m_db);
+        query.prepare(QString::fromLatin1(statement));
+        query.addBindValue(sessionId);
+        query.exec();
+    }
+    m_db.commit();
+    if (bytesRemoved)
+        *bytesRemoved = removed;
+    LOG_INFO(applog::cat::Session)
+        << "session" << sessionId << "deleted from the archive -" << removed << "bytes of audio";
+    return true;
 }

@@ -28,6 +28,11 @@ const int kPushTimeoutMs = 5000;
 // network recovery that queue can legitimately hold minutes of audio, so this
 // has to be generous or a partial session gets finalised.
 const int kStopTimeoutMs = 3600 * 1000;
+// How long stop_session keeps redialling through transport failures before it
+// gives up and tells the operator.  Two minutes is longer than any blip that
+// has been seen on this LAN and short enough that a server which is genuinely
+// gone does not hang the UI until somebody kills it.
+const int kStopRetryBudgetMs = 120 * 1000;
 const int kReviewTimeoutMs = 20000;
 
 // A live session pushes ~6 packets a second and a fast file replay far more
@@ -429,7 +434,38 @@ bool SessionWorker::drainAndStop(AsrClient &client, const QByteArray &tail)
     LOG_INFO(applog::cat::Worker)
         << "calling stop_session for" << request.sessionId
         << "- draining the server-side queue (deadline" << kStopTimeoutMs / 1000 << "s)";
-    const grpc::Status status = client.stopSession(request, &stopped, kStopTimeoutMs);
+
+    // Redial and retry on a transport failure, exactly as push_audio does.
+    //
+    // The case this exists for: the operator pauses, the network blips, and
+    // they then press Dừng phiên.  Nothing has been pushed while paused, so
+    // the connection is dead and nobody has noticed; stop_session went out on
+    // it, came back UNAVAILABLE in 0 ms and was reported as "Kết thúc phiên
+    // thất bại", leaving the meeting open on the server with no way to close
+    // it from the UI.  Retrying is safe because the server's stop is
+    // idempotent - a second call returns the same answer as the first.
+    grpc::Status status;
+    for (int attempt = 1;; ++attempt) {
+        status = client.stopSession(request, &stopped, kStopTimeoutMs);
+        if (status.ok() || !status.isTransport())
+            break;
+        if (stopClock.elapsed() >= kStopRetryBudgetMs) {
+            LOG_ERROR(applog::cat::Worker)
+                << "stop_session still unreachable after" << stopClock.elapsed() << "ms and"
+                << attempt << "attempts -" << status.toString();
+            break;
+        }
+        LOG_WARN(applog::cat::Worker)
+            << "stop_session attempt" << attempt << "hit a transport failure:"
+            << status.toString() << "- redialling and trying again";
+        if (attempt == 1) {
+            emit errorChanged(QStringLiteral(
+                "Mất kết nối tới Server buffer khi kết thúc phiên. Đang tự kết nối lại để "
+                "đóng phiên; xin đừng tắt ứng dụng."));
+        }
+        client.reset();
+        QThread::msleep(500);
+    }
     if (!status.ok()) {
         LOG_ERROR(applog::cat::Worker) << "stop_session failed after" << stopClock.elapsed()
                                        << "ms:" << status.toString();
@@ -437,6 +473,7 @@ bool SessionWorker::drainAndStop(AsrClient &client, const QByteArray &tail)
         emit failed(QStringLiteral("Kết thúc phiên thất bại - %1").arg(status.toString()));
         return false;
     }
+    emit errorChanged(QString());
     LOG_INFO(applog::cat::Worker)
         << "stop_session OK after" << stopClock.elapsed() << "ms - the server has consumed"
         << stopped.state.sourceSeenSec << "s of audio";

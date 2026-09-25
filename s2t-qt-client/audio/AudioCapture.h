@@ -69,7 +69,12 @@ private:
 
     QAudioSource *m_source = nullptr;
     QIODevice *m_io = nullptr;
+    // Both are parented to this object in the constructor so they move with it
+    // to the capture thread.  A bare member QTimer does not, and Qt then
+    // refuses to start it from the wrong thread - which is how the watchdog
+    // came to be silently off for every microphone session.
     QTimer m_health;
+    QTimer m_drain;
     AudioDeviceChoice m_choice;
     QByteArray m_boundId;
     QString m_boundName;

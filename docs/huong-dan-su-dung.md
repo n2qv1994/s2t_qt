@@ -140,6 +140,9 @@ tình trạng tầng suy luận.
    - **Tên phiên**, **Người tham gia** (cách nhau bằng dấu phẩy).
    - **Mức bảo mật** — chỉ lưu nhãn, *không* thay cho phân quyền phía server.
    - **Chế độ**: `Ghi âm + chuyển văn bản` hoặc `Chỉ ghi âm (không chạy AI)`.
+     "Chỉ ghi âm" là một lời hứa chứ không phải một nhãn: phiên đó **không hề
+     gọi** tầng suy luận, nên nó không tốn GPU và bản chép trả về rỗng — đó là
+     câu trả lời đúng, không phải lỗi.
 3. Chọn phạm vi nhận diện người nói:
    - **Không giới hạn** — so khớp với toàn bộ database giọng nói chung.
    - **Chỉ những người được chọn** — tick tên trong danh sách bên dưới.
@@ -564,6 +567,14 @@ hai lần mỗi giây. Cắm lại mic là ghi tiếp cùng một phiên.
 
 Phần audio trong lúc mic mất thì không lấy lại được (nó chưa từng được thu),
 nhưng phần trước và sau vẫn thuộc cùng một cuộc họp.
+
+Cảnh báo này xuất hiện **chậm nhất 2 giây** sau khi mic ngừng giao dữ liệu —
+kể cả khi thiết bị vẫn còn trong danh sách của hệ điều hành mà chỉ đơn giản là
+câm (mic USB bị treo là ca thường gặp nhất). Nếu nó **không** xuất hiện mà
+trạng thái vẫn "đang ghi" trong khi không có tiếng, hãy xem log: một dòng
+`ERROR` nói "bộ canh microphone không khởi động được" nghĩa là phiên đó đang
+chạy không có bộ canh và cần báo ngay — đó chính là lỗi đã được sửa ngày
+2026-09-24.
 
 ### "Thiết bị đã cấu hình không còn đúng microphone"
 

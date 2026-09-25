@@ -25,6 +25,7 @@ SOURCES += \
     $$PWD/grpc/Http2Client.cpp \
     $$PWD/grpc/GrpcChannel.cpp \
     $$PWD/grpc/AsrClient.cpp \
+    $$PWD/audio/Pcm16k.cpp \
     $$PWD/core/Logger.cpp
 
 HEADERS += \
@@ -39,4 +40,5 @@ HEADERS += \
     $$PWD/grpc/GrpcChannel.h \
     $$PWD/grpc/AsrClient.h \
     $$PWD/grpc/Methods.h \
+    $$PWD/audio/Pcm16k.h \
     $$PWD/core/Logger.h

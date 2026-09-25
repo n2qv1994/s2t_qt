@@ -107,8 +107,12 @@ public:
         return collect(out, kPollMs);
     }
 
-    grpc::Status finish(asr::PushAudioResponse *out) override
+    grpc::Status finish(asr::PushAudioResponse *out,
+                        QList<asr::PushAudioResponse> *flushed) override
     {
+        // Riva half-closes the stream instead: its endpointer is served by the
+        // close itself, so there is nothing to pump and nothing to collect.
+        Q_UNUSED(flushed);
         out->sessionId = m_sessionId;
         if (!m_stream.active()) {
             // Already torn down by a failure; the caller still gets whatever the

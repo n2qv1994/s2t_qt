@@ -494,8 +494,14 @@ void SessionController::onCaptureStarted(const QString &deviceName)
         emit statusUpdated();
         return;
     }
-    if (m_worker && m_micStatus == MicStatus::DeviceReconnecting)
+    if (m_worker && m_micStatus == MicStatus::DeviceReconnecting) {
+        // The warning goes with the problem.  Leaving "Microphone bị ngắt khi
+        // đang ghi" on screen while the meeting is visibly recording again
+        // asks the operator to decide which of the two the application means -
+        // and the honest answer, once the device is back, is neither.
+        setError(QString());
         setMicStatus(m_worker->isPaused() ? MicStatus::Paused : MicStatus::Recording);
+    }
     emit statusUpdated();
 }
 
@@ -628,6 +634,16 @@ void SessionController::onWorkerFailed(const QString &message)
 
 void SessionController::teardownWorker()
 {
+    // Park the poller with the worker.
+    //
+    // get_live_state only answers for a meeting the server is still holding,
+    // and after a restart - or after finished_retention_sec - it is not.  The
+    // poller kept asking five times a second for a session that had ended, so
+    // the right-hand panel filled with a red NOT_FOUND that described nothing
+    // the operator had done wrong.  The finished transcript is already in the
+    // model; there is nothing left to poll for.
+    if (m_poller)
+        m_poller->setSession(QString());
     if (m_captureWanted) {
         m_captureWanted = false;
         m_deviceRetry.stop();
@@ -678,6 +694,12 @@ void SessionController::onLiveState(const asr::StateResponse &state, double poll
         m_telemetry.serverQueueSec = qMax(0.0, m_telemetry.sentSec - state.state.sourceSeenSec);
     if (m_model.isReview() && m_model.sessionId() != state.sessionId)
         return; // reviewing another meeting; do not overwrite it with live tail
+    // A meeting the server calls done has nothing more to say, so stop asking.
+    // The worker teardown does this too, but a session closed on the server's
+    // own initiative - the orphan reaper, a stop from another workstation -
+    // never reaches that path.
+    if (state.state.done && m_poller)
+        m_poller->setSession(QString());
     m_model.applyLiveState(state);
     emit modelUpdated();
     emit statusUpdated();
