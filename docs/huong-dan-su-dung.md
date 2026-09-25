@@ -1097,17 +1097,19 @@ Cách an toàn, chỉ ghi đè những tệp có trong git và giữ nguyên `sa
 
 ```bash
 # trên máy có cây nguồn git, đẩy đúng nội dung của một commit sang RHEL
-git -c core.autocrlf=false archive --format=tar HEAD | \
+git -c core.autocrlf=false -c core.eol=lf archive --format=tar HEAD | \
     ssh -p 2247 intekcom@222.252.10.175 'cd ~/s2t-qt && tar -xf -'
 ```
 
-> **Giữ nguyên `-c core.autocrlf=false`** khi đẩy từ một máy Windows. Máy
-> Windows thường bật `core.autocrlf=true`, và `git archive` áp dụng cả cài đặt
-> đó: không có cờ này thì mọi tệp văn bản lên RHEL đều mang xuống dòng CRLF
-> (trừ `.sh`, `.py`, `.service` đã được `.gitattributes` ép về LF). Build vẫn
-> chạy, nhưng cây nguồn trên máy không còn khớp từng byte với commit nữa — và
-> đối chiếu md5 là cách duy nhất để biết máy đang chạy đúng bản nào. Đẩy từ
-> một máy Linux thì cờ này vô hại.
+> **Giữ nguyên cả hai cờ `-c core.autocrlf=false -c core.eol=lf`** khi đẩy từ
+> một máy Windows. `git archive` áp dụng cài đặt xuống dòng của máy đang chạy
+> nó: `core.autocrlf=true` (mặc định của Git for Windows) đổi sang CRLF, và
+> tắt riêng nó vẫn chưa đủ — `.gitattributes` có `* text=auto`, nên git lại
+> dùng `core.eol`, mà trên Windows giá trị đó là CRLF. Thiếu một trong hai cờ
+> thì mọi tệp văn bản lên RHEL đều mang CRLF (trừ `.sh`, `.py`, `.service` đã
+> được ép về LF). Build vẫn chạy, nhưng cây nguồn trên máy không còn khớp từng
+> byte với commit nữa — và đối chiếu md5 là cách duy nhất để biết máy đang
+> chạy đúng bản nào. Đẩy từ một máy Linux thì hai cờ này vô hại.
 
 rồi trên máy RHEL:
 
