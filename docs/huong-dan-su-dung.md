@@ -1,14 +1,34 @@
 # s2t_qt — Hướng dẫn sử dụng
 
 `s2t-qt-client` — ứng dụng khách Qt/C++ cho hệ thống nhận dạng tiếng nói và
-phân tách người nói (ASR + diarization). Nó thu microphone trên máy trạm, đẩy
-lên **Server buffer** (`s2t-qt-server`) qua gRPC, hiển thị bản chép trực tiếp,
-và cho phép soát lại, sửa và lưu vết mọi chỉnh sửa.
+phân tách người nói (ASR + diarization). Nó thu microphone, đẩy lên
+**Server buffer** (`s2t-qt-server`) qua gRPC, hiển thị bản chép trực tiếp, và
+cho phép soát lại, sửa và lưu vết mọi chỉnh sửa.
 
-Server buffer là chương trình đứng giữa máy trạm và tầng suy luận GPU. Nó giữ
-hàng đợi audio, nên một sự cố mạng ở máy trạm hay một lúc tầng suy luận bận
-không làm mất tiếng. Người vận hành không cần cấu hình gì cho nó ngoài việc
-biết địa chỉ của nó.
+Server buffer là chương trình đứng giữa giao diện và tầng suy luận GPU. Nó giữ
+hàng đợi audio, nên một sự cố mạng hay một lúc tầng suy luận bận không làm mất
+tiếng. Người vận hành không cần cấu hình gì cho nó ngoài việc biết địa chỉ.
+
+> ## Máy chạy thật là máy RHEL
+>
+> Hệ thống này **chạy trên máy RHEL 9** (`222.252.10.175`, cổng ssh 2247) —
+> cả giao diện, Server buffer, Triton và database giọng nói đều ở đó. Toàn bộ
+> tài liệu này viết cho máy đó: đường dẫn, lệnh, tên thiết bị âm thanh đều là
+> của RHEL.
+>
+> **Ba việc phải biết trước khi mở ứng dụng:**
+>
+> 1. **Không nhấp đúp được, và cũng không chạy thẳng binary được.** Qt 6 ở
+>    máy này không phải gói hệ điều hành — nó nằm ở `~/Qt/6.11.2/gcc_64` và
+>    không có gì đặt nó vào `PATH`. Chạy thẳng sẽ báo
+>    `libQt6Core.so.6: cannot open shared object file`. Luôn mở bằng
+>    `~/s2t-qt/run_s2t.sh` — xem [mục 0](#0-mở-ứng-dụng-trên-máy-rhel).
+> 2. **Phải ngồi ở màn hình thật của máy đó** (phiên X11 `:1`, cũng là màn
+>    hình AnyDesk nhìn thấy). Mở giao diện qua `ssh` rồi cho chạy nền sẽ treo
+>    phiên ssh cho tới khi ứng dụng thoát.
+> 3. **Server buffer không tự chạy lại sau khi khởi động máy.** Máy này không
+>    có dịch vụ systemd cho nó; nó được `run_s2t.sh` chạy nền. Máy vừa reboot
+>    thì việc đầu tiên là chạy lại script.
 
 Tài liệu này dành cho người vận hành.
 
@@ -24,6 +44,58 @@ Tài liệu này dành cho người vận hành.
 
 ---
 
+## 0. Mở ứng dụng trên máy RHEL
+
+Ngồi ở màn hình thật của máy (hoặc AnyDesk vào đúng màn hình đó), mở một cửa
+sổ dòng lệnh và:
+
+```bash
+cd ~/s2t-qt
+./run_s2t.sh            # Server buffer chạy nền + giao diện.
+                        # Đóng giao diện là dừng cả hai.
+```
+
+Các cách gọi khác, khi cần:
+
+| Lệnh | Làm gì |
+|---|---|
+| `./run_s2t.sh client` | Chỉ mở giao diện, khi Server buffer đã chạy sẵn |
+| `./run_s2t.sh restart` | Dừng server cũ, chạy server nền mới, **không** mở giao diện |
+| `./run_s2t.sh stop` | Dừng server đang giữ cổng 8800 |
+| `./run_s2t.sh config` | Ghi lại cấu hình client cho khớp server ở máy này (có sao lưu) |
+
+Script lo hết phần môi trường: `PATH`, `LD_LIBRARY_PATH`, `QT_PLUGIN_PATH`
+trỏ vào `~/Qt`, ép mã hoá UTF-8, và mặc định `DISPLAY=:1`.
+
+### Kiểm tra server có đang chạy không
+
+```bash
+ss -lntp | grep 8800
+```
+
+Có một dòng `s2t-qt-server` nghĩa là đang chạy. Không có dòng nào thì chưa
+chạy — giao diện sẽ báo đèn đỏ và không mở được phiên nào.
+
+> **Chạy lại script là đè lên.** Thấy một `s2t-qt-server` đang giữ cổng 8800
+> thì nó dừng cái cũ rồi chạy tiếp — cố ý, để không phải đi tìm tiến trình cũ
+> bằng tay. Chỉ những tiến trình **đúng là `s2t-qt-server`** mới bị dừng; thứ
+> khác giữ cổng thì script báo rồi thoát.
+>
+> Đặt `KILL_EXISTING=0` để trở lại nếp "thấy bận thì từ chối", hoặc
+> `LISTEN=127.0.0.1:8801` để chạy song song thay vì chạy đè.
+
+### Sau khi khởi động lại máy
+
+Không có gì tự chạy. Làm đúng hai bước:
+
+```bash
+cd ~/s2t-qt && ./run_s2t.sh
+```
+
+rồi kiểm tra đèn kết nối trong giao diện ([mục 1.4](#14-kiểm-tra-kết-nối)).
+
+---
+
 ## 1. Chuẩn bị trước khi dùng
 
 ### 1.1 Cấu hình lần đầu
@@ -34,30 +106,54 @@ Mở **Công cụ → Cấu hình** (`Ctrl+,`) và điền:
 
 | Mục | Ý nghĩa |
 |---|---|
-| **Máy chủ đệm (host:port)** | Địa chỉ của `s2t-qt-server`. Mặc định `192.168.1.47:8800`. **Không phải** địa chỉ tầng suy luận (`:8700`) — xem ghi chú ngay dưới bảng. |
-| **Bearer token** | Token xác thực của Server buffer. Bấm **Từ tệp...** để đọc từ tệp thay vì gõ tay. Token của tầng suy luận là việc của server và không nằm trên máy này. |
+| **Máy chủ đệm (host:port)** | Địa chỉ của `s2t-qt-server`. Trên máy này là **`127.0.0.1:8800`** — server chạy ngay trên cùng máy. **Không phải** địa chỉ tầng suy luận (`:8011`) — xem ghi chú ngay dưới bảng. |
+| **Bearer token** | Token xác thực của Server buffer. Bấm **Từ tệp...** để đọc từ tệp thay vì gõ tay. Token của tầng suy luận là việc của server và không nằm ở đây. |
 | **Micro** | Thiết bị thu. `(mặc định hệ thống)` để hệ điều hành tự chọn. |
-| **Tên thiết bị bắt buộc chứa** | Chuỗi mà tên thiết bị phải chứa, mặc định `Speaker`. |
-| **Tần số lấy mẫu / Số kênh** | Mặc định 48000 Hz, 1 kênh. Phải là định dạng thiết bị hỗ trợ. |
-| **Hàng đợi tối đa** | Số giây audio đã thu nhưng chưa được server xác nhận, được phép tồn đọng trên máy này. Mặc định 60 s. |
-| **xvF3800 host-control** | Đường dẫn tới `xvf_host.exe`, dùng cho nút bật/tắt lọc nhiễu phần cứng. |
+| **Tên thiết bị bắt buộc chứa** | Chuỗi mà tên thiết bị phải chứa. **Mặc định là `Speaker` — trên máy RHEL này thường phải sửa lại**, xem ghi chú dưới bảng. |
+| **Tần số lấy mẫu / Số kênh** | Mặc định 48000 Hz, 1 kênh. Phải là định dạng thiết bị hỗ trợ. Server tự hạ về 16 kHz mono trước khi đưa vào AI, nên không cần chỉnh theo AI. |
+| **Hàng đợi tối đa** | Số giây audio đã thu nhưng chưa được server xác nhận, được phép tồn đọng ở phía giao diện. Mặc định 60 s. |
+| **xvF3800 host-control** | Đường dẫn tới `xvf_host`, dùng cho nút bật/tắt lọc nhiễu phần cứng. **Máy RHEL này không có công cụ đó** — để trống, và mục *Lọc nhiễu* trong menu **Micro** sẽ báo là không dùng được. |
 | **Bật pipeline trace** | Không còn tác dụng: từ 2026-09-21 máy chủ thu vết cho mọi phiên, xem ở cửa sổ **Pipeline trace** (`F8`). Xem [mục 7](#7-cửa-sổ-pipeline-trace-và-nghiệm-thu). |
 | **Phát lại tệp theo tốc độ thật** | Bật: mô phỏng đúng nhịp cuộc họp (dùng để đo độ trễ). Tắt: xử lý lại một bản ghi càng nhanh càng tốt. |
 | **Chế độ nhật ký / Mức nhật ký** | Xem [mục 8](#8-nhật-ký-và-chẩn-đoán). |
 
 Cấu hình được lưu lại và tự nạp ở lần mở sau.
 
-> **Điền nhầm cổng thì sao.** Nếu bạn trỏ vào tầng suy luận (`:8700`) thay vì
-> Server buffer (`:8800`), đèn báo sẽ đỏ kèm câu *"…trả lời nhưng không phải
-> Server buffer"*. Đó là lỗi cấu hình, không phải lỗi mạng: cả hai đều nói
-> gRPC, nhưng chỉ Server buffer mới trả lời được lệnh `ping` của nó. Đừng dùng
-> địa chỉ `:8700` — bỏ qua bộ đệm nghĩa là mất toàn bộ khả năng chịu sự cố mạng
-> mà nó đem lại.
+> **Điền nhầm cổng thì sao.** Nếu bạn trỏ vào Triton (`:8011`) thay vì Server
+> buffer (`:8800`), đèn báo sẽ đỏ kèm câu *"…trả lời nhưng không phải Server
+> buffer"*. Đó là lỗi cấu hình, không phải lỗi mạng: cả hai đều nói gRPC,
+> nhưng chỉ Server buffer mới trả lời được lệnh `ping` của nó. Bỏ qua bộ đệm
+> nghĩa là mất toàn bộ khả năng chịu sự cố mạng mà nó đem lại.
 
-> **"Tên thiết bị bắt buộc chứa" để làm gì.** Sau khi rút USB mic, Windows có
-> thể tái sử dụng đúng endpoint đó cho một thiết bị khác. Nếu không kiểm tra
-> tên, ứng dụng sẽ thu nhầm thiết bị mà không báo gì. Có ràng buộc này thì nó
-> dừng lại và nói rõ.
+> ### "Tên thiết bị bắt buộc chứa" — chỗ dễ vướng nhất trên RHEL
+>
+> Ô này là một **bộ lọc theo tên**: ứng dụng chỉ mở microphone nào có tên
+> *chứa* chuỗi đó. Mặc định là `Speaker`, và trên máy RHEL này tên thiết bị
+> thường không có chữ đó, nên phiên không mở được, kèm đúng câu:
+>
+> ```
+> Không tìm thấy microphone có tên chứa "Speaker".
+> ```
+>
+> Cách xử lý, theo thứ tự:
+>
+> 1. Xem hệ điều hành đang gọi mic là gì — mục **Sources**:
+>
+>    ```bash
+>    wpctl status
+>    ```
+>
+>    Trên máy này, mic tích hợp hiện ra là `Built-in Audio Analog Stereo` —
+>    không chứa chữ `Speaker`, nên đúng là ca hỏng nói trên.
+>
+> 2. Điền một mẩu tên đủ đặc trưng vào ô đó (ví dụ `Built-in`, `USB`), **hoặc**
+>    để trống ô này nếu máy chỉ có một mic.
+>
+> **Để trống thì mất gì.** Ràng buộc tên có lý do của nó: khi rút USB mic,
+> PipeWire/PulseAudio có thể trao lại đúng chỗ đó cho một thiết bị khác (mic
+> tích hợp chẳng hạn), và không có ràng buộc thì ứng dụng lặng lẽ ghi tiếp
+> bằng thiết bị sai. Có ràng buộc thì nó dừng lại và nói rõ. Nếu máy có nhiều
+> hơn một đầu vào, **nên điền** thay vì để trống.
 
 ### 1.2 Bố cục cửa sổ chính
 
@@ -218,7 +314,8 @@ tệp. Nhận cả **video**: `.wav .m4a .mp3 .aac .flac .ogg .mp4 .mkv .mov .av
 
 - Tệp không phải WAV PCM 16-bit được giải mã tự động. Nếu máy có `ffmpeg` trên
   PATH thì dùng nó; nếu không thì dùng **FFmpeg đi kèm Qt Multimedia**, nên
-  **không cần cài gì thêm trên máy trạm**. Với video, chỉ luồng tiếng được lấy.
+  **không cần cài thêm gì** — và máy RHEL này đúng là không có `ffmpeg` trên
+  PATH. Với video, chỉ luồng tiếng được lấy.
 - Mọi nguồn đều được đưa về **16 kHz mono** trước khi gửi, vì
   `asr_diar_session` nhận một tensor float không kèm nhịp lấy mẫu và mặc định
   coi mọi thứ là 16 kHz — đưa 48 kHz vào thì bản chép nghe trôi chảy nhưng sai
@@ -478,10 +575,18 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 >
 > - **Tên tệp**: `quy-trinh-s2t-qt-client-<ngày>-<giờ>-<pid>.log`
 >   (nửa máy chủ: `quy-trinh-s2t-qt-server-...`).
-> - **Chỗ để tệp**: mở **Công cụ → Nhật ký & chẩn đoán** (`F12`), dòng đầu tab
->   *Nhật ký* ghi sẵn đường dẫn, và nút **Mở thư mục log** mở đúng thư mục đó.
->   - Windows: `%LOCALAPPDATA%\s2t\s2t_qt\logs\`
->   - Linux: `~/.local/share/s2t/s2t_qt/logs/`
+> - **Chỗ để tệp** trên máy RHEL này:
+>   - giao diện: `~/.local/share/s2t/s2t_qt/logs/`
+>   - Server buffer: `~/.local/share/s2t/s2t-qt-server/logs/`
+>
+>   Trong giao diện, mở **Công cụ → Nhật ký & chẩn đoán** (`F12`): dòng đầu
+>   tab *Nhật ký* ghi sẵn đường dẫn, nút **Mở thư mục log** mở đúng thư mục.
+>   Lấy nhanh tệp mới nhất của **từng nửa** từ dòng lệnh:
+>
+>   ```bash
+>   ls -t ~/.local/share/s2t/s2t_qt/logs/quy-trinh-*.log        | head -1
+>   ls -t ~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log | head -1
+>   ```
 > - **Gửi tệp mới nhất** — mỗi lần mở ứng dụng là một tệp mới, nên tệp có giờ
 >   trùng với lúc xảy ra sự cố chính là tệp cần gửi. Ứng dụng giữ 40 tệp gần
 >   nhất rồi tự xoá dần.
@@ -500,6 +605,15 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 > Bên cạnh nó còn `s2t_qt.log` — nhật ký kỹ thuật chi tiết (từng lệnh gRPC,
 > từng khung HTTP/2). Gửi kèm nếu đội phát triển hỏi tới; nó luôn được ghi, kể
 > cả khi chế độ đang là `Debug`.
+>
+> **Sự cố thường cần cả hai nửa.** Giao diện và Server buffer ghi nhật ký riêng
+> nhưng cùng một mã phiên, nên ghép lại mới thành câu chuyện đầy đủ. Đóng gói
+> cả hai bằng một lệnh:
+>
+> ```bash
+> tar -czf ~/nhat-ky-s2t-$(date +%Y%m%d-%H%M).tar.gz \
+>     -C ~/.local/share/s2t s2t_qt/logs s2t-qt-server/logs
+> ```
 
 Menu **Công cụ → Nhật ký & chẩn đoán** (`F12`) mở cửa sổ *Nhật ký & Chẩn đoán*.
 
@@ -533,10 +647,9 @@ dòng, số cảnh báo và số lỗi đang có trong bộ đệm.*
 - **Lưu ra tệp...** — lưu đúng phần đang hiện theo bộ lọc, tiện gửi đi.
 - **Mở thư mục log** — mở thư mục chứa tệp log.
 
-Tệp log nằm ở `%APPDATA%\s2t\s2t_qt\logs\s2t_qt.log` (Windows) hoặc
-`~/.local/share/s2t/s2t_qt/logs/s2t_qt.log` (Linux), tự xoay vòng khi đầy 8 MB
-và giữ 2 đời cũ. Nút **Mở thư mục log** mở đúng thư mục đó, không phải đoán. Mỗi dòng được ghi xuống đĩa ngay, nên vẫn còn sau khi sập
-nguồn.
+Tệp log nằm ở `~/.local/share/s2t/s2t_qt/logs/s2t_qt.log`, tự xoay vòng khi
+đầy 8 MB và giữ 2 đời cũ. Nút **Mở thư mục log** mở đúng thư mục đó, không
+phải đoán. Mỗi dòng được ghi xuống đĩa ngay, nên vẫn còn sau khi sập nguồn.
 
 Định dạng một dòng:
 
@@ -560,7 +673,7 @@ Bấm **Copy báo cáo** để chép kết quả gửi cho người hỗ trợ.
 **Bảng trạng thái đệm là chỗ đầu tiên nên nhìn khi chữ ra chậm.** Cột *Trễ* cho
 biết tầng suy luận đang chậm hơn thời gian thực bao nhiêu giây; cột *Chờ* là số
 gói còn nằm trong hàng đợi. Cả hai lớn dần đều nghĩa là đường ống không theo
-kịp — đó là chuyện của người quản trị hệ thống, không phải của máy trạm.
+kịp — đó là chuyện của tầng suy luận GPU, không phải của giao diện.
 
 Mỗi lúc chỉ chạy được một phép chẩn đoán; các nút còn lại bị khoá cho tới khi
 xong. Nếu máy chủ không phản hồi, phép đang chạy vẫn phải chờ hết deadline của
@@ -570,17 +683,44 @@ nó — **Probe** khoảng 12 giây, **Test mạng đầy đủ** có thể lâu
 
 Các chế độ không cần giao diện:
 
+Trên máy RHEL, binary nằm ở `~/s2t-qt/build-rhel/s2t-qt-client/s2t-qt-client`
+và **cần `LD_LIBRARY_PATH` trỏ vào Qt** như `run_s2t.sh` vẫn làm:
+
+```bash
+export LD_LIBRARY_PATH=$HOME/Qt/6.11.2/gcc_64/lib
+cd ~/s2t-qt/build-rhel/s2t-qt-client
+
+./s2t-qt-client --selftest                           # self-test giao thức
+./s2t-qt-client --probe 127.0.0.1:8800 --token T     # probe Server buffer
+./s2t-qt-client --selftest-net 127.0.0.1:18700 --token T
 ```
-s2t-qt-client --selftest                                 # self-test giao thức
-s2t-qt-client --probe 192.168.1.47:8800 --token T        # probe Server buffer
-s2t-qt-client --selftest-net 127.0.0.1:18700 --token T   # test mạng đầy đủ
+
+Ba chế độ này **không cần màn hình**, nên chạy được qua `ssh`. Mọi chế độ
+khác thì không: mở giao diện mà không có `DISPLAY` sẽ bị từ chối kèm câu giải
+thích, chứ không phải treo hay sập.
+
+Nửa server cũng có chế độ tự kiểm:
+
+```bash
+export LD_LIBRARY_PATH=$HOME/Qt/6.11.2/gcc_64/lib
+~/s2t-qt/build-rhel/s2t-qt-server/s2t-qt-server --selftest
 ```
+
+> **Muốn biết server đang chạy với cấu hình nào thì đừng dùng `--show-config`**
+> — gọi trần như vậy nó in ra *giá trị mặc định*, không phải thứ tiến trình
+> đang chạy dùng (`run_s2t.sh` truyền tham số riêng). Cấu hình thật của lượt
+> chạy hiện tại nằm ở đầu nhật ký quy trình:
+>
+> ```bash
+> sed -n '/MÔI TRƯỜNG/,/CÁC BƯỚC/p' \
+>     "$(ls -t ~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log | head -1)"
+> ```
 
 Điều khiển log:
 
-```
-s2t-qt-client --log-mode develop --log-level trace
-s2t-qt-client --log-file D:\loi-hom-nay.log    # tự chuyển sang chế độ develop
+```bash
+./s2t-qt-client --log-mode develop --log-level trace
+./s2t-qt-client --log-file ~/loi-hom-nay.log
 ```
 
 Hoặc bằng biến môi trường `S2T_LOG_MODE`, `S2T_LOG_LEVEL`, `S2T_LOG_FILE`.
@@ -675,14 +815,32 @@ chập chờn theo đợt.
 
 ### Không mở được microphone
 
-Kiểm tra theo thứ tự: USB mic còn cắm không, có đúng là thiết bị đầu vào đang
-chọn không, có tiến trình khác đang giữ thiết bị không. Sửa xong thì bắt đầu
-phiên mới.
+Nếu thông báo là *"Không tìm thấy microphone có tên chứa …"* thì đó là ô
+**Tên thiết bị bắt buộc chứa** trong Cấu hình, không phải phần cứng — xem
+[ghi chú ở mục 1.1](#11-cấu-hình-lần-đầu).
+
+Còn lại, kiểm tra theo thứ tự trên máy RHEL:
+
+```bash
+wpctl status                 # mục Sources: hệ điều hành có thấy mic không
+fuser -v /dev/snd/*          # có tiến trình nào đang giữ thiết bị không
+```
+
+Sửa xong thì bắt đầu phiên mới. (Máy này **không có `pactl`**, chỉ có `wpctl`
+và `pw-cli` của PipeWire.)
 
 ### Không thấy log ở đâu cả
 
-Nhiều khả năng đang ở chế độ `Debug` mà ứng dụng lại được mở bằng nhấp đúp —
-không có console nào để in ra. Đổi sang **Develop** trong tab Nhật ký.
+Từ 2026-09-25 chuyện này không xảy ra nữa: **tệp luôn được ghi ở cả hai chế
+độ**. Nếu thư mục `~/.local/share/s2t/s2t_qt/logs/` vẫn trống thì là quyền ghi
+— kiểm tra bằng `ls -ld ~/.local/share/s2t/s2t_qt/logs`. Bản cũ hơn thì phải
+đổi sang **Develop** trong tab Nhật ký mới có tệp.
+
+### Máy vừa khởi động lại, đèn kết nối đỏ
+
+Server buffer **không tự chạy lại** — máy này không có dịch vụ systemd cho nó.
+Chạy `cd ~/s2t-qt && ./run_s2t.sh restart` rồi kiểm tra lại. Xem
+[mục 0](#0-mở-ứng-dụng-trên-máy-rhel).
 
 ### Đóng ứng dụng mà nó đứng im một lúc rồi mới tắt
 
@@ -733,12 +891,16 @@ console/VNC của máy, hoặc dùng các chế độ dòng lệnh ở mục 8.3
   lại, việc nhiều người cùng theo dõi một cuộc họp là rẻ: Server buffer đệm
   trạng thái trong 200 ms, nên mười người xem chỉ tốn của tầng suy luận đúng
   một lần đọc.
-- **Máy trạm chỉ cần mở một cổng ra ngoài**, tới Server buffer. Địa chỉ và
-  token của tầng suy luận GPU không còn nằm trên máy của người vận hành.
-- **Phiên có sống qua lần khởi động lại của Server buffer hay không là do cấu
-  hình phía server** (`buffer/journal_dir`). Bật thì một lần khởi động lại gần
-  như vô hình với người đang ghi; tắt thì mất cuộc họp đang mở. Thông báo lỗi
-  nói rõ đang ở trường hợp nào — xem mục 9.
+- **Giao diện chỉ nói chuyện với đúng một địa chỉ**: Server buffer. Địa chỉ và
+  token của tầng suy luận GPU không nằm ở phía người vận hành. Trên máy RHEL
+  này cả hai chạy chung một máy, nên địa chỉ đó là `127.0.0.1:8800`.
+- **Phiên sống qua lần khởi động lại của Server buffer** — và từ 2026-09-24 thì
+  **cả bản chép** cũng sống, không chỉ audio. Cấu hình trên máy này đã bật
+  `buffer/journal_dir`, nên một lần khởi động lại server giữa cuộc họp gần như
+  vô hình với người đang ghi. Thông báo lỗi nói rõ đang ở trường hợp nào — xem
+  mục 9.
+- **Server buffer không tự chạy lại sau khi máy khởi động lại.** Máy này không
+  có dịch vụ systemd cho nó — xem [mục 0](#0-mở-ứng-dụng-trên-máy-rhel).
 
 ---
 
@@ -767,29 +929,9 @@ không ảnh hưởng tới các phiên đã lưu.
 
 ---
 
-## Phụ lục A — chạy trên máy RHEL và bộ mẫu demo
+## Phụ lục A — bộ mẫu demo và cập nhật phần mềm
 
-Máy trạm Windows nhấp đúp là chạy. Trên máy RHEL của dự án thì Qt 6 **không**
-phải gói của hệ điều hành — nó nằm ở `~/Qt/6.11.2/gcc_64` và không có gì đặt nó
-vào `PATH`, nên chạy thẳng binary sẽ báo `libQt6Core.so.6: cannot open shared
-object file`. Script `run_s2t.sh` ở gốc cây nguồn có mặt để lo đúng chuyện đó.
-
-```bash
-cd ~/s2t-qt
-./run_s2t.sh            # server chạy nền + giao diện; đóng giao diện là dừng cả hai
-./run_s2t.sh client     # chỉ giao diện, khi server đã chạy sẵn
-./run_s2t.sh restart    # dừng server cũ, chạy server nền mới, không mở giao diện
-./run_s2t.sh stop       # dừng server đang giữ cổng
-./run_s2t.sh config     # ghi lại cấu hình client cho khớp server ở đây (có sao lưu)
-```
-
-Chạy trên **màn hình thật của máy đó** (phiên X11 `:1`, cũng là màn hình
-AnyDesk nhìn thấy). Đừng chạy giao diện qua `ssh` rồi cho vào nền: phiên ssh sẽ
-bị giữ cho tới khi ứng dụng thoát.
-
-> Chạy lại script là **đè lên**: thấy một `s2t-qt-server` đang giữ cổng 8800 thì
-> nó dừng cái cũ rồi chạy tiếp. Đặt `KILL_EXISTING=0` để trở lại nếp cũ, hoặc
-> `LISTEN=127.0.0.1:8801` để chạy song song thay vì chạy đè.
+Cách mở ứng dụng nằm ở [mục 0](#0-mở-ứng-dụng-trên-máy-rhel).
 
 ### Bộ mẫu để trình diễn
 
@@ -814,9 +956,39 @@ chọn *Phát lại tệp theo tốc độ thật* trong Cấu hình — nếu �
 diễn dài đúng 88 phút. Bản chép đầy đủ lấy ở bảng Soát & sửa (`F9`) hoặc bằng
 `tools/export_transcript.py`.
 
-> **`tools/deploy_rhel.sh` xoá sạch `~/s2t-qt/sample/`** — nó `rm -rf ~/s2t-qt`
-> rồi giải nén bản mới, mà `sample/` không nằm trong git. Sao lưu bộ mẫu trước
-> mỗi lần triển khai lại.
-
 Máy RHEL này **không có `ffmpeg`** trên `PATH`; các tệp `.mp4` đi qua FFmpeg đi
 kèm Qt Multimedia nên vẫn chạy bình thường, không phải cài thêm gì.
+
+### Cập nhật phần mềm trên máy này
+
+> **Đừng chạy `tools/deploy_rhel.sh`.** Nó `rm -rf ~/s2t-qt` rồi giải nén bản
+> mới, mà `sample/` (721 MB video của dự án) **không nằm trong git** — chạy nó
+> là mất sạch bộ mẫu ở trên.
+
+Cách an toàn, chỉ ghi đè những tệp có trong git và giữ nguyên `sample/`,
+`build-rhel/`, `.qtcreator/`:
+
+```bash
+# trên máy có cây nguồn git, đẩy đúng nội dung của một commit sang RHEL
+git archive --format=tar HEAD | ssh -p 2247 intekcom@222.252.10.175 \
+    'cd ~/s2t-qt && tar -xf -'
+```
+
+rồi trên máy RHEL:
+
+```bash
+export QMAKE6=$HOME/Qt/6.11.2/gcc_64/bin/qmake
+export OUT=$HOME/s2t-qt/build-rhel
+cd ~/s2t-qt && tools/build_rhel9.sh          # build cả hai nửa
+
+export LD_LIBRARY_PATH=$HOME/Qt/6.11.2/gcc_64/lib
+build-rhel/s2t-qt-server/s2t-qt-server --selftest       # phải: 6/6 bộ OK
+QT_QPA_PLATFORM=offscreen \
+    build-rhel/s2t-qt-client/s2t-qt-client --selftest   # phải: ALL PASS
+
+./run_s2t.sh restart                          # chạy lại server bằng bản mới
+```
+
+Kiểm tra bản vừa chạy đúng là bản mong muốn: mở
+`~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log` mới nhất, phần
+**MÔI TRƯỜNG** ghi rõ ngày giờ biên dịch và toàn bộ cấu hình đang chạy.
