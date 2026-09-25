@@ -134,6 +134,60 @@ luôn được ghi, dù chọn chế độ nào.*
 
 Cấu hình được lưu lại và tự nạp ở lần mở sau.
 
+#### Chọn microphone — từng bước
+
+Làm trên màn hình thật của máy RHEL (hoặc AnyDesk vào đúng màn hình đó).
+
+**Bước 1 — Mở ứng dụng**
+
+1. Mở một cửa sổ dòng lệnh (Terminal).
+2. Gõ lần lượt, mỗi dòng xong bấm Enter:
+   ```bash
+   cd ~/s2t-qt
+   ./run_s2t.sh client
+   ```
+   Phải có chữ `client` — gõ trần `./run_s2t.sh` thì đóng ứng dụng là tắt
+   luôn server (xem [mục 0](#0-mở-ứng-dụng-trên-máy-rhel)).
+3. Đợi cửa sổ chính hiện ra. Đèn ở góc phải thanh công cụ phải là
+   **● ĐÃ KẾT NỐI AI** (xanh).
+
+**Bước 2 — Mở hộp thoại Cấu hình**
+
+4. Trên thanh menu bấm **Công cụ**, rồi bấm **Cấu hình...** (dòng cuối). Hoặc
+   bấm `Ctrl` + `,`.
+5. Nếu máy còn giữ cấu hình cũ, ô **Tên thiết bị bắt buộc chứa** là `Speaker`
+   và ngay dưới có dòng chữ **đỏ** *"⚠ Không tìm thấy microphone có tên chứa
+   "Speaker". Ghi âm sẽ không bắt đầu được."* (ảnh
+   `13-cau-hinh-mic-sai.png` ở ghi chú dưới).
+
+**Bước 3 — Chọn mic**
+
+6. Bấm vào ô **Micro** (dòng thứ 3).
+7. Chọn đúng tên mic trong danh sách — trên máy này là **Built-in Audio
+   Analog Stereo**. Vừa cắm thêm mic mà chưa thấy tên thì bấm **Tải lại** bên
+   phải rồi mở lại danh sách.
+8. Kiểm tra hai điều:
+   - ô **Tên thiết bị bắt buộc chứa** đã **tự đổi** theo tên mic vừa chọn;
+   - dòng chữ bên dưới đã thành dòng **xám** *"Sẽ thu bằng: <tên mic>"*.
+
+   Vẫn còn chữ đỏ thì **đừng bấm Lưu** — chụp màn hình gửi đội phát triển.
+
+**Bước 4 — Lưu**
+
+9. Bấm **Lưu** (nút xanh, góc phải dưới cùng). **Huỷ** là bỏ hết thay đổi.
+
+**Bước 5 — Kiểm tra lại**
+
+10. Mở lại **Công cụ → Cấu hình...**: ô Micro phải còn giữ mic vừa chọn và dòng
+    chữ vẫn xám. Bấm **Huỷ** để đóng.
+11. Ghi thử: **Ghi âm từ micro** (`Ctrl+R`) → **Bắt đầu ghi âm** → nói vài câu →
+    **Dừng phiên** (`Ctrl+.`). Chữ phải hiện trên màn hình.
+
+Chỉ phải làm một lần — lần mở sau ứng dụng tự nạp lại. Nhật ký quy trình
+(mục 8) ghi lại việc này thành bước `user.settings`, và từ lần mở sau thì đầu
+tệp có dòng *"Bấm Ghi âm sẽ thu bằng: <tên mic>"* — đội phát triển xem tệp là
+biết máy đã cấu hình đúng chưa.
+
 > **Điền nhầm cổng thì sao.** Nếu bạn trỏ vào Triton (`:8011`) thay vì Server
 > buffer (`:8800`), đèn báo sẽ đỏ kèm câu *"…trả lời nhưng không phải Server
 > buffer"*. Đó là lỗi cấu hình, không phải lỗi mạng: cả hai đều nói gRPC,
