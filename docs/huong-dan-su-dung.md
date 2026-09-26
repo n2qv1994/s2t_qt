@@ -688,7 +688,14 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 > tự, kèm môi trường máy đang chạy. Không phải bật gì cả.
 >
 > - **Tên tệp**: `quy-trinh-s2t-qt-client-<ngày>-<giờ>-<pid>.log`
->   (nửa máy chủ: `quy-trinh-s2t-qt-server-...`).
+>   (nửa máy chủ: `quy-trinh-s2t-qt-server-<cổng>-...`, tức là
+>   `quy-trinh-s2t-qt-server-8800-...` cho server thật trên máy này).
+>
+>   Cổng nằm trong tên vì **server thử nghiệm ghi vào cùng thư mục**: bộ nghiệm
+>   thu dùng cổng 8801, `tools/restart_check.py` dùng 18877. Mỗi cổng giữ 40
+>   tệp của riêng nó. Trước 2026-09-26, 40 tệp là giới hạn chung, nên một lượt
+>   chạy bộ nghiệm thu đẩy mất hết nhật ký của server thật. Tệp tên
+>   `quy-trinh-s2t-qt-server-<ngày>-...` (không có cổng) là của bản cũ hơn.
 > - **Chỗ để tệp** trên máy RHEL này:
 >   - giao diện: `~/.local/share/s2t/s2t_qt/logs/`
 >   - Server buffer: `~/.local/share/s2t/s2t-qt-server/logs/`
@@ -698,9 +705,12 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 >   Lấy nhanh tệp mới nhất của **từng nửa** từ dòng lệnh:
 >
 >   ```bash
->   ls -t ~/.local/share/s2t/s2t_qt/logs/quy-trinh-*.log        | head -1
->   ls -t ~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log | head -1
+>   ls -t ~/.local/share/s2t/s2t_qt/logs/quy-trinh-*.log                  | head -1
+>   ls -t ~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-s2t-qt-server-8800-*.log | head -1
 >   ```
+>
+>   Với server, **ghi rõ `-8800-`**: gõ trần `quy-trinh-*.log` thì tệp mới nhất
+>   có thể là của một server thử nghiệm.
 > - **Gửi tệp mới nhất** — mỗi lần mở ứng dụng là một tệp mới, nên tệp có giờ
 >   trùng với lúc xảy ra sự cố chính là tệp cần gửi. Ứng dụng giữ 40 tệp gần
 >   nhất rồi tự xoá dần.
@@ -724,9 +734,16 @@ thô của từng sự kiện và ghép nhiều span để nghe liền.
 > có trật tự (đăng xuất, tắt máy, `kill`, `run_s2t.sh stop`) thì *có* mục
 > KẾT THÚC, với lý do *"bị tắt bằng tín hiệu SIGTERM"*: đó không phải sự cố.
 >
-> Bên cạnh nó còn `s2t_qt.log` — nhật ký kỹ thuật chi tiết (từng lệnh gRPC,
-> từng khung HTTP/2). Gửi kèm nếu đội phát triển hỏi tới; nó luôn được ghi, kể
-> cả khi chế độ đang là `Debug`.
+> Bên cạnh nó còn nhật ký kỹ thuật chi tiết (từng lệnh gRPC, từng khung
+> HTTP/2): `s2t_qt.log` của giao diện, và `s2t_qt-8800.log` của server thật
+> (`run_s2t.sh` đặt tên theo cổng, cùng lý do như trên). Gửi kèm nếu đội phát
+> triển hỏi tới; chúng luôn được ghi và tự xoay vòng ở 8 MB.
+>
+> `~/.local/share/s2t-qt-server/logs/server.log` giờ chỉ còn phần in ra lúc
+> server khởi động và các lỗi nghiêm trọng in thẳng ra stderr. Nó được xoay
+> vòng mỗi lần khởi động khi vượt 10 MB (bản cũ là `server.log.1`). Trước
+> 2026-09-26 mọi dòng log đều bị chép thêm vào đây và tệp không bao giờ bị cắt
+> — trên máy này nó đã lên 604 MB.
 >
 > **Sự cố thường cần cả hai nửa.** Giao diện và Server buffer ghi nhật ký riêng
 > nhưng cùng một mã phiên, nên ghép lại mới thành câu chuyện đầy đủ. Đóng gói
@@ -837,7 +854,7 @@ export LD_LIBRARY_PATH=$HOME/Qt/6.11.2/gcc_64/lib
 >
 > ```bash
 > sed -n '/MÔI TRƯỜNG/,/CÁC BƯỚC/p' \
->     "$(ls -t ~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log | head -1)"
+>     "$(ls -t ~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-s2t-qt-server-8800-*.log | head -1)"
 > ```
 
 Điều khiển log:
@@ -1138,6 +1155,6 @@ QT_QPA_PLATFORM=offscreen \
 > mở lại (`./run_s2t.sh client`); server thì `restart` như trên.
 
 Kiểm tra bản vừa chạy đúng là bản mong muốn: mở
-`~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-*.log` mới nhất, phần
+`~/.local/share/s2t/s2t-qt-server/logs/quy-trinh-s2t-qt-server-8800-*.log` mới nhất, phần
 **MÔI TRƯỜNG** ghi rõ *"Tệp chạy được build lúc"* và toàn bộ cấu hình đang
 chạy.

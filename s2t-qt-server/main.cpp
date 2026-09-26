@@ -165,7 +165,11 @@ int main(int argc, char *argv[])
     // setting goes into its header: a run is only reproducible if the file
     // says what it was run with, and "which config was that server on?" is the
     // first question of every remote diagnosis.
-    runjournal::start(QStringLiteral("s2t-qt-server"), QStringLiteral(S2T_SERVER_VERSION));
+    // Tagged with the port: the production server, the acceptance harness's
+    // and restart_check's all write into this same folder, and each must keep
+    // its own last 40 runs rather than evict the others'.
+    runjournal::start(QStringLiteral("s2t-qt-server"), QStringLiteral(S2T_SERVER_VERSION),
+                      QString::number(config.listenPort));
     runjournal::section(QStringLiteral("CẤU HÌNH ĐANG CHẠY"));
     for (const QString &line : config.describe()) {
         const int colon = line.indexOf(QLatin1Char(':'));

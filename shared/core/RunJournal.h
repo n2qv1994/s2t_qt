@@ -36,7 +36,14 @@ namespace runjournal {
 // Opens the journal for this run and writes the header.  `program` is what the
 // file will call itself - "s2t-qt-client" or "s2t-qt-server".  Safe to call
 // once, from main(), after applog::initFromArguments().
-void start(const QString &program, const QString &version);
+//
+// `instance` tells apart several copies of one program sharing a log folder -
+// the server passes its listen port.  It goes into the file name, and the
+// kept-files limit counts per instance: before it, the acceptance harness's
+// server on :8801 and restart_check's on :18877 wrote into the same folder as
+// the production server on :8800, and one test run pushed every production
+// journal past the limit - the very file an operator is asked to send.
+void start(const QString &program, const QString &version, const QString &instance = QString());
 
 // A titled block in the header.  Used for the parts of the environment that
 // only one half knows about: audio devices on the client, the inference tier

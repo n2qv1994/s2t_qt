@@ -99,7 +99,12 @@ JOURNAL_DIR=${JOURNAL_DIR-$STATE_DIR/journal}
 DB_DIR=${DB_DIR-$STATE_DIR/database}
 LOG_DIR=${LOG_DIR:-$STATE_DIR/logs}
 PID_FILE=$STATE_DIR/s2t-qt-server.pid
+# Chỉ còn phần khởi động và lỗi nghiêm trọng của tiến trình (stdout/stderr thô).
+# Log chi tiết đi vào tệp riêng bên dưới, có xoay vòng.  Trước 2026-09-26 mọi
+# dòng log đều bị ghi thêm vào đây qua console và tệp này không bao giờ bị cắt:
+# đo được 604 MB.
 SERVER_LOG=$LOG_DIR/server.log
+SERVER_LOG_MAX_BYTES=${SERVER_LOG_MAX_BYTES:-10485760}
 
 BUILD_DIR=${BUILD_DIR:-${OUT:-$root/build-rhel}}
 CLIENT_CONFIG=${CLIENT_CONFIG:-$HOME/.config/s2t/s2t_qt.conf}
@@ -139,7 +144,45 @@ server_args() {
     [[ -n $DB_DIR ]]         && args+=(--database-dir "$DB_DIR")
     [[ -n $JOURNAL_DIR ]]    && args+=(--journal-dir "$JOURNAL_DIR")
     [[ $BACKEND == riva && -n $LANGUAGE ]] && args+=(--language "$LANGUAGE")
+    # Một tệp log gỡ lỗi riêng cho server này, theo cổng.  Tệp này tự xoay vòng
+    # ở 8 MB.  Chế độ (có chép ra console hay không) do nơi gọi quyết định:
+    # chạy nền thì develop, chạy tiền cảnh thì debug.
+    args+=(--log-file "$(server_debug_log)")
     printf '%s\n' "${args[@]}"
+}
+
+# Cùng thư mục mà nhật ký quy trình của server nằm (thư mục dữ liệu của Qt), để
+# người vận hành chỉ phải mở một chỗ.  Tên có cổng: server thử nghiệm của bộ
+# nghiệm thu (:8801) hay restart_check (:18877) dùng tệp mặc định s2t_qt.log,
+# không ghi lẫn vào tệp của server thật.
+server_debug_log() {
+    local data=${XDG_DATA_HOME:-$HOME/.local/share}
+    echo "$data/s2t/s2t-qt-server/logs/s2t_qt-${LISTEN##*:}.log"
+}
+
+# Xoay vòng server.log khi khởi động: giữ đúng một bản cũ.  Tệp này giờ nhỏ,
+# nhưng một server khởi động hỏng lặp đi lặp lại vẫn có thể làm nó phình ra.
+rotate_server_log() {
+    [[ -f $SERVER_LOG ]] || return 0
+    local size
+    size=$(stat -c %s "$SERVER_LOG" 2>/dev/null || echo 0)
+    if (( size > SERVER_LOG_MAX_BYTES )); then
+        mv -f "$SERVER_LOG" "$SERVER_LOG.1"
+        echo "==> $SERVER_LOG đã quá $((SERVER_LOG_MAX_BYTES / 1048576)) MB - chuyển sang $SERVER_LOG.1"
+    fi
+}
+
+# Khi server không mở được cổng: lý do nằm trong log gỡ lỗi (chế độ develop
+# không in ra console), còn server.log giữ những gì in thẳng ra stderr.
+show_start_failure() {
+    echo "server không mở được $LISTEN - 20 dòng cuối của nhật ký:" >&2
+    tail -n 20 "$SERVER_LOG" >&2 || true
+    local debug_log
+    debug_log=$(server_debug_log)
+    if [[ -f $debug_log ]]; then
+        echo "--- $debug_log ---" >&2
+        tail -n 20 "$debug_log" >&2 || true
+    fi
 }
 
 # Token rỗng nghĩa là chấp nhận mọi người gọi tới được cổng này.  Chấp nhận
@@ -384,7 +427,9 @@ cmd_server() {
     prepare_dirs
     mapfile -t args < <(server_args)
     echo "==> s2t-qt-server nghe ở $LISTEN, tầng suy luận $BACKEND $UPSTREAM"
-    exec "$bin" "${args[@]}"
+    # Chạy ở tiền cảnh là để nhìn log ngay trên màn hình: giữ bản in ra console
+    # mà --log-file vừa tắt đi.  Tệp log vẫn được ghi.
+    exec "$bin" "${args[@]}" --log-mode debug
 }
 
 start_server_background() {
@@ -398,10 +443,17 @@ start_server_background() {
     ensure_port_free
 
     prepare_dirs
+    rotate_server_log
     mapfile -t args < <(server_args)
     # < /dev/null có lý do: chạy qua ssh, một tiến trình nền thừa hưởng stdin
     # sẽ giữ kênh ssh mở kể cả khi stdout đã được chuyển hướng.
-    "$bin" "${args[@]}" </dev/null >>"$SERVER_LOG" 2>&1 &
+    #
+    # --log-mode develop ghi rõ trên dòng lệnh, không trông vào việc --log-file
+    # tự suy ra nó: S2T_LOG_MODE=debug được export ở đầu script (cho client), và
+    # biến môi trường đó chặn phép suy ra - server nền khi ấy vẫn chép từng dòng
+    # log ra stderr, tức là vào server.log, không giới hạn.  Dòng lệnh thắng
+    # biến môi trường.
+    "$bin" "${args[@]}" --log-mode develop </dev/null >>"$SERVER_LOG" 2>&1 &
     echo $! > "$PID_FILE"
     echo "==> s2t-qt-server pid $(cat "$PID_FILE"), nhật ký: $SERVER_LOG"
 }
@@ -450,11 +502,10 @@ cmd_stop() {
 cmd_restart() {
     start_server_background
     if ! wait_for_port "$LISTEN"; then
-        echo "server không mở được $LISTEN - 20 dòng cuối của nhật ký:" >&2
-        tail -n 20 "$SERVER_LOG" >&2 || true
+        show_start_failure
         exit 1
     fi
-    echo "==> server sẵn sàng ở $LISTEN (pid $(cat "$PID_FILE")), nhật ký: $SERVER_LOG"
+    echo "==> server sẵn sàng ở $LISTEN (pid $(cat "$PID_FILE")), log chi tiết: $(server_debug_log)"
 }
 
 cmd_client() {
@@ -485,8 +536,7 @@ cmd_all() {
     start_server_background
     trap stop_server EXIT INT TERM
     if ! wait_for_port "$LISTEN"; then
-        echo "server không mở được $LISTEN - 20 dòng cuối của nhật ký:" >&2
-        tail -n 20 "$SERVER_LOG" >&2 || true
+        show_start_failure
         exit 1
     fi
     echo "==> server sẵn sàng ở $LISTEN"

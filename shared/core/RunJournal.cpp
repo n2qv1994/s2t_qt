@@ -34,6 +34,9 @@ struct State
     QFile file;
     QString path;
     QString dir;
+    // "<program>" or "<program>-<instance>": the file-name prefix, and the
+    // group the kept-files limit is counted over.
+    QString base;
     bool stepsOpened = false;
     bool finished = false;
     bool complained = false;
@@ -85,8 +88,12 @@ void pruneLocked()
 {
     State &s = state();
     QDir dir(s.dir);
-    QFileInfoList files = dir.entryInfoList({QStringLiteral("quy-trinh-*.log")}, QDir::Files,
-                                            QDir::Time | QDir::Reversed);
+    // Only this program's (and this instance's) own files.  The date that
+    // follows the prefix starts with a digit and an instance tag here is a
+    // port, so "s2t-qt-server-8800-" can never match another instance's files.
+    QFileInfoList files =
+        dir.entryInfoList({QStringLiteral("quy-trinh-%1-*.log").arg(s.base)}, QDir::Files,
+                          QDir::Time | QDir::Reversed);
     while (files.size() > kKeepFiles) {
         QFile::remove(files.first().absoluteFilePath());
         files.removeFirst();
@@ -119,7 +126,7 @@ QStringList recent()
     return state().lines;
 }
 
-void start(const QString &program, const QString &version)
+void start(const QString &program, const QString &version, const QString &instance)
 {
     State &s = state();
     {
@@ -127,6 +134,7 @@ void start(const QString &program, const QString &version)
         if (s.file.isOpen())
             return;
         s.dir = applog::logDirectory();
+        s.base = instance.isEmpty() ? program : QStringLiteral("%1-%2").arg(program, instance);
         QDir().mkpath(s.dir);
         // Named after the moment the run began, and carrying the pid: two
         // copies of the client started in the same second on one machine -
@@ -134,7 +142,7 @@ void start(const QString &program, const QString &version)
         // up writing into the same file.
         const QString name =
             QStringLiteral("quy-trinh-%1-%2-%3.log")
-                .arg(program,
+                .arg(s.base,
                      QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")),
                      QString::number(QCoreApplication::applicationPid()));
         s.path = QDir(s.dir).filePath(name);
@@ -163,6 +171,8 @@ void start(const QString &program, const QString &version)
     }
 
     field(QStringLiteral("Chương trình"), QStringLiteral("%1 %2").arg(program, version));
+    if (!instance.isEmpty())
+        field(QStringLiteral("Phiên bản chạy (cổng)"), instance);
     // The executable's own timestamp, not __DATE__/__TIME__: those are frozen
     // into whichever object file holds them, and an incremental build that
     // does not recompile this file kept reporting the morning's build for a
