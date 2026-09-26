@@ -7,6 +7,9 @@
 # Same for the Python tools: they carry a `#!/usr/bin/env python3` line, and
 # with CRLF the kernel looks for an interpreter called "python3\r".
 *.py text eol=lf
+# A serialized protobuf FileDescriptorSet (tools/triton_grpc.desc): binary,
+# and one converted byte makes protoc reject the whole file.
+*.desc binary
 # Same reason: systemd refuses a unit file with CRLF, and QSettings reads a
 # CRLF .conf but writes it back with LF, which turns every save into a whole
 # file diff.

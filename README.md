@@ -406,8 +406,15 @@ hai đầu. `--selftest` trong C++ kiểm toàn bộ logic khôi phục nhưng c
 nằm ngoài tiến trình trước khi client được ACK. `SIGKILL` không chạy destructor
 và không flush gì cả.
 
-Chạy lần gần nhất (2026-08-25, trên RHEL): đạt ở cả `durability=os` lẫn
-`durability=fsync`, và ở cả hai chế độ `journal_keep`.
+Tầng suy luận giả là một Triton giả (`inference.GRPCInferenceService`, stub
+sinh từ schema chính thức trong `tools/triton_grpc.desc`). Ngoài thứ tự và
+tính không trùng của gói, bài còn kiểm chữ trước cú giết có còn không và mốc
+thời gian sau khi khôi phục có đúng không.
+
+Chạy lần gần nhất (2026-09-26, trên RHEL): 17/17 ở cả `durability=os`,
+`durability=fsync` và `journal_keep=session`. Lần chạy đầu tiên của bản viết
+lại này bắt được một lỗi thật — chữ tới ngay trước lúc hàng đợi đứng yên không
+bao giờ được lưu — xem `docs/luong-hoat-dong.md` §7b.7.
 
 ## Kiểm tra bộ nhớ và gỡ lỗi trên RHEL
 

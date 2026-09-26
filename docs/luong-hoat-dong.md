@@ -787,6 +787,17 @@ Hai việc làm nên điều đó, cả hai đều ở `SessionBuffer`:
    ngay lập tức sau mỗi lần sửa tay, đổi tên hoặc dừng. Mỗi gói một lần ghi thì
    là sáu lần ghi SQLite mỗi giây cho một cấu trúc lớn dần theo cuộc họp; 2
    giây là phần tệ nhất có thể mất, mà phần đó tầng suy luận còn chưa chốt.
+
+   **Lúc hàng đợi đứng yên cũng phải lưu.** Tới 2026-09-26, `saveState()` chỉ
+   được gọi *sau một lần đẩy gói thành công*, và bị giới hạn tối đa một lần
+   mỗi 2 giây. Nên chữ tới trong 2 giây cuối trước khi hàng đợi đứng yên —
+   client bấm Tạm dừng, hoặc tier bắt đầu từ chối — **không bao giờ** được
+   ghi, và một cú `SIGKILL` sau đó làm mất chúng dù chúng tới từ bao lâu trước.
+   `restart_check.py` bắt được đúng ca này (chữ tới 3 giây trước cú giết, chỉ
+   từ đầu tiên sống sót). Giờ bộ chuyển tiếp chờ hàng đợi theo nhịp
+   `kIdleSaveCheckMs` (500 ms) thay vì chờ vô hạn, và gọi `saveState(false)`
+   mỗi lần hết giờ chờ và mỗi vòng thử lại khi tier từ chối — một phép so
+   version khi không có gì thay đổi.
 2. **Phiên khôi phục nạp lại bản chép đó** (`LiveTranscript::restore`) và đặt
    **mốc thời gian lệch** (`setTimeOffset`) bằng số giây audio tầng suy luận đã
    nhận. Luồng mới mở trên tier đếm lại từ 0; không có mốc lệch này thì nửa sau
@@ -1337,7 +1348,16 @@ python3 tools/restart_check.py ./s2t-qt-server [--durability fsync]
 - `restart_check.py` **giết máy chủ bằng `SIGKILL`** giữa cuộc họp. Bài
   `--selftest` chỉ tháo đối tượng, nên nó không chứng minh được điều quan trọng
   nhất: rằng bản ghi đã nằm ngoài tiến trình trước khi client được ACK.
-  `SIGKILL` không chạy destructor và không flush gì cả.
+  `SIGKILL` không chạy destructor và không flush gì cả. Tầng suy luận giả là
+  một **Triton giả** nói đúng `inference.GRPCInferenceService`, với stub sinh
+  từ `tools/triton_grpc.desc` — schema chính thức trích từ tritonclient 2.49.0,
+  không phải bản tự viết (cách trích nằm ở đầu tệp). Mỗi gói mang một giá trị
+  mẫu hằng số nên Triton giả đọc ngược ra seq từ `audio_chunk`, và trả về một
+  từ cho mỗi gói tính giờ theo stream của nó — nhờ vậy bài kiểm được cả thứ
+  tự/không trùng của gói, cả việc chữ trước cú giết còn nguyên, cả mốc thời
+  gian sau khi khôi phục (bản sửa N10). Bản trước 2026-09-26 giả lập adapter
+  cũ (`ProductASRService`), thứ server không còn gọi, nên nó FAIL mà không nói
+  gì về server.
 
 **Một widget thì không được kiểm bằng build sạch.** Cách rẻ nhất còn lại là
 liên kết một `main()` dùng một lần với **mọi object của một cây build sẵn có,

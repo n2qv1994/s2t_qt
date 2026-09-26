@@ -58,6 +58,12 @@ const double kStateSaveIntervalSec = 2.0;
 // meeting saves less often than a three-minute one rather than spending the
 // forwarder thread on it.
 const double kStateSaveIntervalMaxSec = 10.0;
+// How often an IDLE forwarder looks at whether the transcript still has
+// unsaved changes.  The interval above only bounds how often a save happens;
+// without this, a save was only ever attempted after a forward, so a queue
+// that went quiet (a paused client, a refusing tier) left the last words
+// unsaved indefinitely.  A check is a version compare when nothing changed.
+const int kIdleSaveCheckMs = 500;
 
 double percentile(QList<double> values, double fraction)
 {
@@ -998,6 +1004,11 @@ bool SessionBuffer::forward(BackendSession &session, const Packet &packet, grpc:
         }
         // Do not wait out HTTP/2's own reconnect behaviour on a stale socket.
         session.reset();
+        // The tier may stay away for minutes.  Words that arrived just before
+        // it went are still only in memory - the save after them was
+        // rate-limited - so they are written now rather than when the tier
+        // comes back, which a crash in between would never see.
+        saveState(false);
         if (m_shutdownRequested.loadRelaxed()) {
             fatal->code = grpc::Cancelled;
             fatal->message = QStringLiteral("máy chủ đệm đang tắt");
@@ -1192,7 +1203,21 @@ void SessionBuffer::run()
             QMutexLocker lock(&m_mutex);
             while (m_queue.isEmpty() && !m_stopRequested.loadRelaxed()
                    && !m_shutdownRequested.loadRelaxed()) {
-                m_notEmpty.wait(&m_mutex);
+                // A timed wait, not an open-ended one: an idle queue is
+                // exactly when the transcript still owes the store its last
+                // few words.  saveState() only ever ran after a successful
+                // forward, and it is rate-limited, so the words from the last
+                // two seconds before the client paused (or before the tier
+                // started refusing) were never written at all - a SIGKILL
+                // then lost them however long ago they had arrived.  Found by
+                // tools/restart_check.py, 2026-09-26.
+                if (!m_notEmpty.wait(&m_mutex, kIdleSaveCheckMs)) {
+                    // State before queue: never call into the transcript while
+                    // holding m_mutex.
+                    lock.unlock();
+                    saveState(false);
+                    lock.relock();
+                }
             }
             if (m_shutdownRequested.loadRelaxed())
                 break;
